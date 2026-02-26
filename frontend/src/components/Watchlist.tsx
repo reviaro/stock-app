@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
 import { useWatchlist } from '@/hooks/useWatchlist'
 import { useAnalysisWorker } from '@/hooks/useAnalysisWorker'
 import { useTickerStore } from '@/lib/store'
@@ -31,7 +32,7 @@ function WatchlistRow({ entry, isSelected, onSelect }: WatchlistRowProps) {
   const hasPriceData = entry.price !== undefined
 
   return (
-    <button
+    <motion.button
       type="button"
       onClick={() => onSelect(entry.symbol)}
       className={[
@@ -42,6 +43,8 @@ function WatchlistRow({ entry, isSelected, onSelect }: WatchlistRowProps) {
       ].join(' ')}
       aria-pressed={isSelected}
       aria-label={`Select ${entry.symbol}`}
+      whileHover={{ scale: 1.02, transition: { type: 'spring', stiffness: 350, damping: 22 } }}
+      whileTap={{ scale: 0.97, transition: { type: 'spring', stiffness: 400, damping: 25 } }}
     >
       <div>
         <p className="font-semibold text-sm text-foreground">{entry.symbol}</p>
@@ -64,7 +67,7 @@ function WatchlistRow({ entry, isSelected, onSelect }: WatchlistRowProps) {
           <p className="text-xs text-muted-foreground">No data</p>
         )}
       </div>
-    </button>
+    </motion.button>
   )
 }
 
@@ -177,14 +180,23 @@ export function Watchlist() {
 
         {sortedData.length > 0 && (
           <div className="flex flex-col gap-1">
-            {sortedData.map((entry) => (
-              <WatchlistRow
-                key={entry.symbol}
-                entry={entry}
-                isSelected={selectedTicker === entry.symbol}
-                onSelect={setSelectedTicker}
-              />
-            ))}
+            <AnimatePresence initial={false}>
+              {sortedData.map((entry, i) => (
+                <motion.div
+                  key={entry.symbol}
+                  initial={{ opacity: 0, x: -12 }}
+                  animate={{ opacity: 1, x: 0, transition: { delay: i * 0.04, duration: 0.25 } }}
+                  exit={{ opacity: 0, x: 12, transition: { duration: 0.15 } }}
+                  layout
+                >
+                  <WatchlistRow
+                    entry={entry}
+                    isSelected={selectedTicker === entry.symbol}
+                    onSelect={setSelectedTicker}
+                  />
+                </motion.div>
+              ))}
+            </AnimatePresence>
           </div>
         )}
       </CardContent>
