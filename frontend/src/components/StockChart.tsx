@@ -1,10 +1,9 @@
 import { useEffect, useRef } from 'react'
 import {
   createChart,
-  candlestickSeries,
+  CandlestickSeries,
   ColorType,
   type IChartApi,
-  type ISeriesApi,
   type CandlestickData,
   type Time,
 } from 'lightweight-charts'
@@ -30,7 +29,6 @@ interface StockChartProps {
 export function StockChart({ ticker }: StockChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
-  const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
 
   useEffect(() => {
     if (!chartContainerRef.current) return
@@ -65,19 +63,17 @@ export function StockChart({ ticker }: StockChartProps) {
 
     chartRef.current = chart
 
-    // Add candlestick series
-    const series = chart.addSeries(candlestickSeries, {
-      upColor: '#22c55e',      // green-500
-      downColor: '#ef4444',    // red-500
+    // Add candlestick series using the v5 CandlestickSeries definition
+    const series = chart.addSeries(CandlestickSeries, {
+      upColor: '#22c55e',       // green-500
+      downColor: '#ef4444',     // red-500
       borderUpColor: '#22c55e',
       borderDownColor: '#ef4444',
       wickUpColor: '#22c55e',
       wickDownColor: '#ef4444',
     })
 
-    seriesRef.current = series
     series.setData(DUMMY_DATA)
-
     chart.timeScale().fitContent()
 
     // ResizeObserver for fluid container responsiveness
@@ -93,7 +89,6 @@ export function StockChart({ ticker }: StockChartProps) {
       resizeObserver.disconnect()
       chart.remove()
       chartRef.current = null
-      seriesRef.current = null
     }
   }, [])
 
