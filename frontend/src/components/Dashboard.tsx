@@ -35,7 +35,7 @@ export function Dashboard() {
                 </CardTitle>
               </CardHeader>
               <CardContent className="h-[400px] p-2">
-                <StockChart ticker={selectedTicker ?? undefined} />
+                <StockChart />
               </CardContent>
             </Card>
           </div>
