@@ -174,7 +174,7 @@ export interface TechnicalIndicators {
     rsi: number
     macd: { line: number; signal: number; histogram: number }
     sma: { '20': number; '50': number; '200': number }
-    ema: { '12': number; '26': number }
+    ema: { '12': number; '21': number; '26': number }
     bollingerBands: { upper: number; middle: number; lower: number }
     atr: number
   }
@@ -195,5 +195,8 @@ export interface TechnicalIndicators {
       lower: (number | null)[]
       price: (number | null)[]
     }
+    sma50: (number | null)[]
+    sma200: (number | null)[]
+    ema21: (number | null)[]
   }
 }
