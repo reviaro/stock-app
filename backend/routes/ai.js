@@ -1,5 +1,5 @@
 const express = require('express');
-const { streamText } = require('ai');
+const { streamText, convertToModelMessages } = require('ai');
 const { model, tools } = require('../services/ai_service');
 
 const router = express.Router();
@@ -24,36 +24,21 @@ router.post('/chat', async (req, res) => {
       return res.status(400).json({ error: 'Invalid request: messages array is required.' });
     }
 
+    // AI SDK v6: convert UIMessage format (parts-based) to ModelMessage format
+    // that streamText accepts. The frontend sends UIMessages with a `parts` array.
+    const modelMessages = await convertToModelMessages(messages, { tools });
+
     const result = await streamText({
       model,
       system: SYSTEM_PROMPT,
-      messages,
+      messages: modelMessages,
       tools,
       maxSteps: 5,
     });
 
-    const response = result.toDataStreamResponse();
-
-    // Copy headers from AI SDK response
-    response.headers.forEach((value, key) => {
-      res.setHeader(key, value);
-    });
-
-    res.status(response.status);
-
-    // Pipe the readable stream body to Express response
-    const reader = response.body.getReader();
-    const pump = async () => {
-      const { done, value } = await reader.read();
-      if (done) {
-        res.end();
-        return;
-      }
-      res.write(value);
-      return pump();
-    };
-
-    await pump();
+    // AI SDK v6: use pipeUIMessageStreamToResponse instead of the removed toDataStreamResponse.
+    // This streams UIMessageChunks (compatible with the @ai-sdk/react useChat client).
+    result.pipeUIMessageStreamToResponse(res);
   } catch (err) {
     console.error('[AI Route] Error:', err.message);
     if (!res.headersSent) {
