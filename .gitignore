@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Database (runtime-generated)
+*.db
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

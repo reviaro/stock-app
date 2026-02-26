@@ -3,6 +3,7 @@ import { useTickerStore } from '@/lib/store'
 import { MarketPulse } from '@/components/MarketPulse'
 import { Watchlist } from '@/components/Watchlist'
 import { StockChart } from '@/components/StockChart'
+import { CANSLIMScorecard } from '@/components/CANSLIMScorecard'
 
 export function Dashboard() {
   const selectedTicker = useTickerStore((s) => s.selectedTicker)
@@ -47,16 +48,7 @@ export function Dashboard() {
 
           {/* CANSLIM Scorecard - spans 4 cols on desktop */}
           <div className="lg:col-span-4">
-            <Card className="h-full min-h-[200px]">
-              <CardHeader>
-                <CardTitle>CANSLIM Scorecard</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-muted-foreground text-sm">
-                  Select a stock to view its CANSLIM analysis.
-                </p>
-              </CardContent>
-            </Card>
+            <CANSLIMScorecard />
           </div>
 
         </div>
