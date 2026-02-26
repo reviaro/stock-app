@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
 import {
   createChart,
   CandlestickSeries,
@@ -47,6 +48,29 @@ const INDICATORS: IndicatorConfig[] = [
 // S&P 500 symbol used for comparison overlay
 const SP500_SYMBOL = '^GSPC'
 
+/** Skeleton loader shown while chart data is fetching */
+function ChartSkeleton() {
+  return (
+    <div className="w-full h-full flex flex-col gap-3 p-4 animate-pulse" style={{ minHeight: '400px' }}>
+      {/* Simulated price scale lines */}
+      <div className="flex items-end gap-1 flex-1">
+        {Array.from({ length: 40 }).map((_, i) => (
+          <div
+            key={i}
+            className="flex-1 bg-muted/40 rounded-sm"
+            style={{
+              height: `${20 + Math.sin(i * 0.4) * 30 + Math.random() * 20}%`,
+              minHeight: '4px',
+            }}
+          />
+        ))}
+      </div>
+      {/* Simulated time axis */}
+      <div className="h-3 bg-muted/30 rounded w-full" />
+    </div>
+  )
+}
+
 export function StockChart() {
   const selectedTicker = useTickerStore((s) => s.selectedTicker)
 
@@ -89,10 +113,24 @@ export function StockChart() {
   }, [])
 
   // ---- Chart initialization ----
+  // Created once — separate effects handle data updates.
+  // ResizeObserver keeps dimensions in sync with the container.
+  // Cleanup: resizeObserver.disconnect() + chart.remove() + null all refs.
+  // This ensures no duplicate charts appear on re-renders or StrictMode double-mount.
   useEffect(() => {
     if (!chartContainerRef.current) return
 
     const container = chartContainerRef.current
+
+    // Guard: if a chart already exists (e.g. StrictMode double-invoke), remove it first.
+    if (chartRef.current) {
+      chartRef.current.remove()
+      chartRef.current = null
+      candleSeriesRef.current = null
+      stockLineSeriesRef.current = null
+      sp500SeriesRef.current = null
+      lineSeriesRefs.current = {}
+    }
 
     const chart = createChart(container, {
       width: container.clientWidth,
@@ -178,8 +216,12 @@ export function StockChart() {
 
     return () => {
       resizeObserver.disconnect()
-      chart.remove()
-      chartRef.current = null
+      // Always remove the chart and null refs to prevent memory leaks and
+      // duplicate chart creation during rapid ticker switching or HMR reloads.
+      if (chartRef.current) {
+        chartRef.current.remove()
+        chartRef.current = null
+      }
       candleSeriesRef.current = null
       stockLineSeriesRef.current = null
       sp500SeriesRef.current = null
@@ -336,6 +378,21 @@ export function StockChart() {
   // ---- Render ----
   return (
     <div className="relative w-full h-full min-h-[400px] flex flex-col">
+      {/* Loading skeleton — overlays the chart container while data fetches */}
+      <AnimatePresence>
+        {histLoading && (
+          <motion.div
+            key="chart-skeleton"
+            className="absolute inset-0 z-20 bg-card rounded-md overflow-hidden"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0, transition: { duration: 0.3 } }}
+          >
+            <ChartSkeleton />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Indicator toggle controls */}
       <div className="absolute top-2 right-2 z-10 flex gap-1 flex-wrap justify-end max-w-[60%]">
         {/* Compare with S&P 500 toggle */}
@@ -384,9 +441,6 @@ export function StockChart() {
         {selectedTicker}
         {isComparisonMode && (
           <span className="ml-2 text-xs text-gray-400">vs S&P 500</span>
-        )}
-        {histLoading && (
-          <span className="ml-2 text-xs text-muted-foreground/60">Loading...</span>
         )}
         {histError && (
           <span className="ml-2 text-xs text-red-400">Error loading data</span>
