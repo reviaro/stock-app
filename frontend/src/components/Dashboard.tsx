@@ -1,5 +1,6 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { useTickerStore } from '@/lib/store'
+import { MarketPulse } from '@/components/MarketPulse'
 
 export function Dashboard() {
   const selectedTicker = useTickerStore((s) => s.selectedTicker)
@@ -17,14 +18,7 @@ export function Dashboard() {
 
           {/* Market Pulse - spans 2 cols on desktop */}
           <div className="lg:col-span-2">
-            <Card className="h-full">
-              <CardHeader>
-                <CardTitle>Market Pulse</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-muted-foreground text-sm">Loading market data...</p>
-              </CardContent>
-            </Card>
+            <MarketPulse />
           </div>
 
           {/* Active Chart - spans 4 cols on desktop */}
