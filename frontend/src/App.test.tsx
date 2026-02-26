@@ -1,20 +1,25 @@
 import { render, screen } from '@testing-library/react'
-import { describe, it, expect, vi } from 'vitest'
-
-// Mock asset imports to avoid jsdom URL issues
-vi.mock('./assets/react.svg', () => ({ default: 'react.svg' }))
-vi.mock('/vite.svg', () => ({ default: 'vite.svg' }))
-
+import { describe, it, expect } from 'vitest'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
 
-describe('App', () => {
-  it('renders without crashing', () => {
-    render(<App />)
-    expect(screen.getByText('Vite + React')).toBeInTheDocument()
+function renderWithProviders(ui: React.ReactElement) {
+  const queryClient = new QueryClient({
+    defaultOptions: { 
+      queries: { 
+        retry: false,
+        staleTime: 0,
+      } 
+    },
   })
+  return render(
+    <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>
+  )
+}
 
-  it('renders the count button', () => {
-    render(<App />)
-    expect(screen.getByRole('button', { name: /count is/i })).toBeInTheDocument()
+describe('App', () => {
+  it('renders the Stock Dashboard heading', () => {
+    renderWithProviders(<App />)
+    expect(screen.getByText('Stock Dashboard')).toBeInTheDocument()
   })
 })
