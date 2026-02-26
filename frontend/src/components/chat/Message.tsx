@@ -1,4 +1,4 @@
-import { motion } from 'framer-motion'
+import { motion, type Variants } from 'framer-motion'
 import type { UIMessage } from 'ai'
 import { isTextUIPart, isToolUIPart } from 'ai'
 import { ToolRenderer } from './ToolRenderer'
@@ -8,9 +8,9 @@ interface MessageProps {
 }
 
 /** Subtle slide-up + fade-in for new messages */
-const messageVariants = {
+const messageVariants: Variants = {
   hidden: { opacity: 0, y: 8 },
-  visible: { opacity: 1, y: 0, transition: { duration: 0.2, ease: 'easeOut' } },
+  visible: { opacity: 1, y: 0, transition: { duration: 0.2, ease: 'easeOut' as const } },
 }
 
 /**

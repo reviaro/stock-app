@@ -95,7 +95,7 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
               <div className="text-[10px] text-muted-foreground font-medium uppercase tracking-wide">
                 Market Direction
               </div>
-              {direction.direction && (
+              {Boolean(direction.direction) && (
                 <div className={`text-sm font-semibold ${
                   String(direction.direction).includes('Uptrend') ? 'text-green-400' :
                   String(direction.direction).includes('Pressure') ? 'text-amber-400' :
@@ -104,7 +104,7 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
                   {String(direction.direction)}
                 </div>
               )}
-              {direction.summary && (
+              {Boolean(direction.summary) && (
                 <p className="text-xs text-muted-foreground">{String(direction.summary)}</p>
               )}
             </div>
