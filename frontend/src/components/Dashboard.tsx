@@ -4,6 +4,7 @@ import { MarketPulse } from '@/components/MarketPulse'
 import { Watchlist } from '@/components/Watchlist'
 import { StockChart } from '@/components/StockChart'
 import { CANSLIMScorecard } from '@/components/CANSLIMScorecard'
+import { ChatPanel } from '@/components/chat/ChatPanel'
 
 export function Dashboard() {
   const selectedTicker = useTickerStore((s) => s.selectedTicker)
@@ -49,6 +50,11 @@ export function Dashboard() {
           {/* CANSLIM Scorecard - spans 4 cols on desktop */}
           <div className="lg:col-span-4">
             <CANSLIMScorecard />
+          </div>
+
+          {/* AI Financial Analyst Chat - spans full 6 cols on desktop */}
+          <div className="lg:col-span-6">
+            <ChatPanel />
           </div>
 
         </div>
