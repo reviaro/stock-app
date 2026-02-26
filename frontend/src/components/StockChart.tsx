@@ -44,17 +44,30 @@ const INDICATORS: IndicatorConfig[] = [
   { key: 'ema21',  label: 'EMA 21',  color: '#a855f7', lineWidth: 1 }, // purple-500
 ]
 
+// S&P 500 symbol used for comparison overlay
+const SP500_SYMBOL = '^GSPC'
+
 export function StockChart() {
   const selectedTicker = useTickerStore((s) => s.selectedTicker)
 
-  // Data hooks
+  // Comparison mode state
+  const [isComparisonMode, setIsComparisonMode] = useState(false)
+
+  // Data hooks — target stock
   const { data: historyData, isLoading: histLoading, error: histError } = useStockHistory(selectedTicker)
   const { data: technicalData } = useTechnicalData(selectedTicker)
+
+  // Data hook — S&P 500 (only fetches when comparison mode is active)
+  const { data: sp500Data } = useStockHistory(isComparisonMode ? SP500_SYMBOL : '')
 
   // Chart DOM refs
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  // Stock line series — used in comparison mode instead of candlestick
+  const stockLineSeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
+  // S&P 500 overlay line series
+  const sp500SeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
   const lineSeriesRefs = useRef<Partial<Record<string, ISeriesApi<'Line'>>>>({})
 
   // Indicator visibility state
@@ -108,7 +121,7 @@ export function StockChart() {
 
     chartRef.current = chart
 
-    // Candlestick series
+    // Candlestick series (normal mode)
     const candleSeries = chart.addSeries(CandlestickSeries, {
       upColor: '#22c55e',       // green-500
       downColor: '#ef4444',     // red-500
@@ -116,8 +129,31 @@ export function StockChart() {
       borderDownColor: '#ef4444',
       wickUpColor: '#22c55e',
       wickDownColor: '#ef4444',
+      visible: true,
     })
     candleSeriesRef.current = candleSeries
+
+    // Stock line series (comparison mode — shows normalized % from start)
+    const stockLineSeries = chart.addSeries(LineSeries, {
+      color: '#22c55e',     // green-500, matches candlestick up color
+      lineWidth: 2 as LineWidth,
+      visible: false,       // hidden by default — shown in comparison mode
+      priceLineVisible: false,
+      lastValueVisible: true,
+    })
+    stockLineSeriesRef.current = stockLineSeries
+
+    // S&P 500 overlay line series (comparison mode — dashed grey)
+    const sp500Series = chart.addSeries(LineSeries, {
+      color: '#6b7280',     // gray-500 — subtle reference line
+      lineWidth: 1 as LineWidth,
+      lineStyle: 2,         // dashed
+      visible: false,       // hidden by default — shown in comparison mode
+      priceLineVisible: false,
+      lastValueVisible: true,
+      title: 'S&P 500',
+    })
+    sp500SeriesRef.current = sp500Series
 
     // Add a line series per indicator
     for (const ind of INDICATORS) {
@@ -145,11 +181,13 @@ export function StockChart() {
       chart.remove()
       chartRef.current = null
       candleSeriesRef.current = null
+      stockLineSeriesRef.current = null
+      sp500SeriesRef.current = null
       lineSeriesRefs.current = {}
     }
   }, []) // Chart created once — data updated in separate effects
 
-  // ---- Candlestick data update ----
+  // ---- Candlestick data update (normal mode) ----
   useEffect(() => {
     const series = candleSeriesRef.current
     if (!series || !historyData?.data?.length) return
@@ -214,12 +252,111 @@ export function StockChart() {
     }
   }, [technicalData, historyData])
 
+  // ---- Comparison mode effect ----
+  // Switches between candlestick (normal) and normalized line (comparison) views.
+  // When isComparisonMode changes, or when data arrives in comparison mode, this
+  // effect updates visibility, price scale mode, and series data.
+  useEffect(() => {
+    const chart = chartRef.current
+    const candleSeries = candleSeriesRef.current
+    const stockLineSeries = stockLineSeriesRef.current
+    const sp500Series = sp500SeriesRef.current
+
+    if (!chart || !candleSeries || !stockLineSeries || !sp500Series) return
+
+    if (isComparisonMode) {
+      // Switch price scale to Percentage mode — both series start at 0%
+      chart.priceScale('right').applyOptions({ mode: PriceScaleMode.Percentage })
+
+      // Hide candlestick series; show stock line series
+      candleSeries.applyOptions({ visible: false })
+      stockLineSeries.applyOptions({ visible: true })
+
+      // Hide indicator overlays (they have absolute prices, not % — would distort)
+      for (const ind of INDICATORS) {
+        lineSeriesRefs.current[ind.key]?.applyOptions({ visible: false })
+      }
+
+      // Populate stock line series from historyData (use close prices)
+      if (historyData?.data?.length) {
+        const byDate = new Map<string, LineData<Time>>()
+        for (const pt of historyData.data) {
+          const d: LineData<Time> = { time: pt.date.slice(0, 10) as Time, value: pt.close }
+          byDate.set(pt.date.slice(0, 10), d)
+        }
+        const sorted = Array.from(byDate.values()).sort((a, b) =>
+          (a.time as string).localeCompare(b.time as string),
+        )
+        const normalized = normalizeToPercent(sorted)
+        if (normalized.length > 0) {
+          stockLineSeries.setData(normalized)
+        }
+      }
+
+      // Populate S&P 500 series if data is available
+      if (sp500Data?.data?.length) {
+        const byDate = new Map<string, LineData<Time>>()
+        for (const pt of sp500Data.data) {
+          const d: LineData<Time> = { time: pt.date.slice(0, 10) as Time, value: pt.close }
+          byDate.set(pt.date.slice(0, 10), d)
+        }
+        const sorted = Array.from(byDate.values()).sort((a, b) =>
+          (a.time as string).localeCompare(b.time as string),
+        )
+        const normalized = normalizeToPercent(sorted)
+        if (normalized.length > 0) {
+          sp500Series.setData(normalized)
+          sp500Series.applyOptions({ visible: true })
+        }
+      } else {
+        // SP500 data not yet loaded — hide until it arrives
+        sp500Series.applyOptions({ visible: false })
+      }
+
+      chart.timeScale().fitContent()
+    } else {
+      // Switch price scale back to Normal mode
+      chart.priceScale('right').applyOptions({ mode: PriceScaleMode.Normal })
+
+      // Show candlestick series; hide comparison line series
+      candleSeries.applyOptions({ visible: true })
+      stockLineSeries.applyOptions({ visible: false })
+      sp500Series.applyOptions({ visible: false })
+
+      // Restore indicator overlay visibility from state
+      for (const ind of INDICATORS) {
+        lineSeriesRefs.current[ind.key]?.applyOptions({ visible: visible[ind.key] })
+      }
+
+      chart.timeScale().fitContent()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isComparisonMode, historyData, sp500Data])
+
   // ---- Render ----
   return (
     <div className="relative w-full h-full min-h-[400px] flex flex-col">
       {/* Indicator toggle controls */}
-      <div className="absolute top-2 right-2 z-10 flex gap-1">
-        {INDICATORS.map((ind) => (
+      <div className="absolute top-2 right-2 z-10 flex gap-1 flex-wrap justify-end max-w-[60%]">
+        {/* Compare with S&P 500 toggle */}
+        <button
+          onClick={() => setIsComparisonMode((prev) => !prev)}
+          className={`px-2 py-0.5 rounded text-xs font-medium border transition-opacity ${
+            isComparisonMode ? 'opacity-100' : 'opacity-60'
+          }`}
+          style={{
+            borderColor: '#6b7280',
+            color: '#6b7280',
+            backgroundColor: isComparisonMode ? 'rgba(107, 114, 128, 0.15)' : 'transparent',
+          }}
+          title="Compare with S&P 500"
+          aria-pressed={isComparisonMode}
+        >
+          Compare with S&P 500
+        </button>
+
+        {/* Indicator toggles — hidden in comparison mode */}
+        {!isComparisonMode && INDICATORS.map((ind) => (
           <button
             key={ind.key}
             onClick={() => toggleIndicator(ind.key)}
@@ -245,6 +382,9 @@ export function StockChart() {
       {/* Ticker label */}
       <div className="absolute top-2 left-2 z-10 text-sm font-semibold text-muted-foreground">
         {selectedTicker}
+        {isComparisonMode && (
+          <span className="ml-2 text-xs text-gray-400">vs S&P 500</span>
+        )}
         {histLoading && (
           <span className="ml-2 text-xs text-muted-foreground/60">Loading...</span>
         )}
