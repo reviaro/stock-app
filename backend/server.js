@@ -8,6 +8,7 @@ const watchlistRoutes = require('./routes/watchlist');
 const stockRoutes = require('./routes/stocks');
 const canslimRoutes = require('./routes/canslim');
 const marketRoutes = require('./routes/market');
+const aiRoutes = require('./routes/ai');
 const { initUniverseScheduler } = require('./services/universeCache');
 
 const PORT = 3002;
@@ -25,6 +26,7 @@ app.use('/api/stock', stockRoutes);
 app.use('/api/stock/search', stockRoutes);
 app.use('/api/canslim', canslimRoutes);
 app.use('/api/market', marketRoutes);
+app.use('/api/ai', aiRoutes);
 
 // Serve frontend for all other routes (SPA)
 app.get('*', (req, res) => {
