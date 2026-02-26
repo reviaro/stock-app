@@ -4,6 +4,7 @@ import {
   CandlestickSeries,
   LineSeries,
   ColorType,
+  PriceScaleMode,
   type IChartApi,
   type ISeriesApi,
   type CandlestickData,
@@ -13,6 +14,21 @@ import {
 } from 'lightweight-charts'
 import { useTickerStore } from '@/lib/store'
 import { useStockHistory, useTechnicalData } from '@/hooks/useMarketData'
+
+/**
+ * Normalizes OHLCV or line data to percentage change from the first data point.
+ * Formula: normalized_value = (current_price - start_price) / start_price * 100
+ * The start_price is the first price in the provided data range.
+ */
+function normalizeToPercent(data: LineData<Time>[]): LineData<Time>[] {
+  if (!data.length) return []
+  const startPrice = data[0].value
+  if (startPrice === 0) return data
+  return data.map((d) => ({
+    time: d.time,
+    value: ((d.value - startPrice) / startPrice) * 100,
+  }))
+}
 
 // Indicator display configuration
 interface IndicatorConfig {
