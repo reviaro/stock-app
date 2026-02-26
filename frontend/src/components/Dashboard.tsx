@@ -2,6 +2,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { useTickerStore } from '@/lib/store'
 import { MarketPulse } from '@/components/MarketPulse'
 import { Watchlist } from '@/components/Watchlist'
+import { StockChart } from '@/components/StockChart'
 
 export function Dashboard() {
   const selectedTicker = useTickerStore((s) => s.selectedTicker)
@@ -24,8 +25,8 @@ export function Dashboard() {
 
           {/* Active Chart - spans 4 cols on desktop */}
           <div className="lg:col-span-4">
-            <Card className="h-full min-h-[200px]">
-              <CardHeader>
+            <Card className="h-full min-h-[450px]">
+              <CardHeader className="pb-2">
                 <CardTitle>
                   Active Chart
                   {selectedTicker && (
@@ -33,10 +34,8 @@ export function Dashboard() {
                   )}
                 </CardTitle>
               </CardHeader>
-              <CardContent>
-                <p className="text-muted-foreground text-sm">
-                  Select a stock from the Watchlist to view its chart.
-                </p>
+              <CardContent className="h-[400px] p-2">
+                <StockChart ticker={selectedTicker ?? undefined} />
               </CardContent>
             </Card>
           </div>
