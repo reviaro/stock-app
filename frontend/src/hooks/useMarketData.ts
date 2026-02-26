@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import type { ApiResponse, MarketIndex, StockHistory, TechnicalIndicators } from '@/types'
+import type { ApiResponse, MarketIndex, StockHistory, TechnicalIndicators, CANSLIMAnalysis } from '@/types'
 
 /**
  * Fetches major market index prices from /api/market/indexes.
@@ -101,6 +101,36 @@ export function useTechnicalData(symbol: string) {
     queryKey: ['technicalData', symbol],
     queryFn: () => fetchTechnicalData(symbol),
     staleTime: 5 * 60_000,  // 5 minutes — technical indicators are daily data
+    retry: 1,
+    enabled: Boolean(symbol),
+  })
+}
+
+/**
+ * Fetches CANSLIM analysis for a given ticker symbol.
+ * Endpoint: GET /api/canslim/:symbol
+ */
+async function fetchCANSLIMData(symbol: string): Promise<CANSLIMAnalysis> {
+  const response = await fetch(`/api/canslim/${encodeURIComponent(symbol)}`)
+  if (!response.ok) throw new Error(`Failed to fetch CANSLIM for ${symbol}`)
+  const json: ApiResponse<CANSLIMAnalysis> = await response.json()
+  if (json.status === 'error') throw new Error(json.error ?? 'Unknown error')
+  if (!json.data) throw new Error(`No CANSLIM data for ${symbol}`)
+  return json.data
+}
+
+/**
+ * React Query hook to load CANSLIM analysis for the active ticker.
+ * Used by CANSLIMScorecard to display the 7-criteria scorecard.
+ *
+ * @param symbol - Stock ticker symbol (e.g. "AAPL")
+ * @returns TanStack Query result containing CANSLIMAnalysis
+ */
+export function useCANSLIMData(symbol: string) {
+  return useQuery({
+    queryKey: ['canslim', symbol],
+    queryFn: () => fetchCANSLIMData(symbol),
+    staleTime: 15 * 60_000,  // 15 minutes — CANSLIM is daily-resolution data
     retry: 1,
     enabled: Boolean(symbol),
   })
