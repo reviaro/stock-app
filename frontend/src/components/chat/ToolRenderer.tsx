@@ -56,8 +56,15 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
   // Tool succeeded — map to specialised component
   if (state === 'output-available') {
     const output = 'output' in toolPart ? toolPart.output : undefined
-    const args = 'args' in toolPart && toolPart.args ? (toolPart.args as Record<string, unknown>) : undefined
-    const symbol = args?.symbol && typeof args.symbol === 'string' ? args.symbol : undefined
+
+    // Safely extract args from potential locations in the AI SDK v6 UIMessage stream
+    let args: Record<string, unknown> | undefined;
+    if ('args' in toolPart && toolPart.args) {
+      args = toolPart.args as Record<string, unknown>;
+    } else if ('toolInvocation' in toolPart && (toolPart as any).toolInvocation?.args) {
+      args = (toolPart as any).toolInvocation.args;
+    }
+    const symbol = args?.symbol && typeof args.symbol === 'string' ? args.symbol : undefined;
 
     switch (toolName) {
       case 'getCanslimAnalysis':
@@ -96,8 +103,8 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
               </div>
               {Boolean(direction.direction) && (
                 <div className={`text-sm font-semibold ${String(direction.direction).includes('Uptrend') ? 'text-green-400' :
-                    String(direction.direction).includes('Pressure') ? 'text-amber-400' :
-                      'text-red-400'
+                  String(direction.direction).includes('Pressure') ? 'text-amber-400' :
+                    'text-red-400'
                   }`}>
                   {String(direction.direction)}
                 </div>
