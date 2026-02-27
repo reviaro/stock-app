@@ -25,7 +25,7 @@ const financialAgentTransport = new DefaultChatTransport({
  *  - Transport is configured separately from the hook options.
  */
 export function useFinancialAgent() {
-  const { messages, sendMessage, status, error, stop } = useChat({
+  const { messages, setMessages, sendMessage, status, error, stop } = useChat({
     transport: financialAgentTransport,
   })
 
@@ -33,6 +33,7 @@ export function useFinancialAgent() {
 
   return {
     messages,
+    setMessages,
     sendMessage,
     isLoading,
     status,

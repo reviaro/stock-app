@@ -1,8 +1,11 @@
 const { google } = require('@ai-sdk/google');
+const { groq } = require('@ai-sdk/groq');
 const { tool } = require('ai');
 const { z } = require('zod');
 const pybridge = require('./pybridge');
 const model = google('gemini-3-flash-preview');
+const backupModel = google('gemini-2.5-flash');
+const fallbackModel = groq('llama-3.3-70b-versatile');
 
 const tools = {
   getStockInfo: tool({
@@ -11,7 +14,9 @@ const tools = {
     parameters: z.object({
       symbol: z.string().describe('The stock ticker symbol (e.g. AAPL, MSFT)'),
     }),
-    execute: async ({ symbol }) => {
+    execute: async (args) => {
+
+      const symbol = args?.symbol;
       if (!symbol || typeof symbol !== 'string') return { error: 'Symbol parameter is required and must be a string' };
       return await pybridge.getStockInfo(symbol.toUpperCase());
     },
@@ -23,7 +28,9 @@ const tools = {
     parameters: z.object({
       symbol: z.string().describe('The stock ticker symbol (e.g. AAPL, MSFT)'),
     }),
-    execute: async ({ symbol }) => {
+    execute: async (args) => {
+
+      const symbol = args?.symbol;
       if (!symbol || typeof symbol !== 'string') return { error: 'Symbol parameter is required and must be a string' };
       return await pybridge.getCANSlimAnalysis(symbol.toUpperCase());
     },
@@ -35,7 +42,8 @@ const tools = {
     parameters: z.object({
       symbol: z.string().describe('The stock ticker symbol (e.g. AAPL, MSFT)'),
     }),
-    execute: async ({ symbol }) => {
+    execute: async (args) => {
+      const symbol = args?.symbol;
       if (!symbol || typeof symbol !== 'string') return { error: 'Symbol parameter is required and must be a string' };
       return await pybridge.getTechnicalIndicators(symbol.toUpperCase());
     },
@@ -56,11 +64,11 @@ const tools = {
     parameters: z.object({
       symbol: z.string().describe('The stock ticker symbol or index (e.g. AAPL, MSFT, ^GSPC)').optional(),
     }),
-    execute: async ({ symbol }) => {
-      const ticker = symbol && typeof symbol === 'string' ? symbol.toUpperCase() : '^GSPC';
+    execute: async (args) => {
+      const ticker = args?.symbol && typeof args.symbol === 'string' ? args.symbol.toUpperCase() : '^GSPC';
       return await pybridge.getNews(ticker);
     },
   }),
 };
 
-module.exports = { model, tools };
+module.exports = { model, backupModel, fallbackModel, tools };

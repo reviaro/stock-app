@@ -57,14 +57,11 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
   if (state === 'output-available') {
     const output = 'output' in toolPart ? toolPart.output : undefined
 
-    // Safely extract args from potential locations in the AI SDK v6 UIMessage stream
-    let args: Record<string, unknown> | undefined;
-    if ('args' in toolPart && toolPart.args) {
-      args = toolPart.args as Record<string, unknown>;
-    } else if ('toolInvocation' in toolPart && (toolPart as any).toolInvocation?.args) {
-      args = (toolPart as any).toolInvocation.args;
-    }
-    const symbol = args?.symbol && typeof args.symbol === 'string' ? args.symbol : undefined;
+    // AI SDK v6 UIToolInvocation uses "input" (not "args") for tool arguments
+    const input = 'input' in toolPart && toolPart.input && typeof toolPart.input === 'object'
+      ? (toolPart.input as Record<string, unknown>)
+      : undefined;
+    const symbol = input?.symbol && typeof input.symbol === 'string' ? input.symbol : undefined;
 
     switch (toolName) {
       case 'getCanslimAnalysis':

@@ -83,6 +83,10 @@ For **macro/market analysis**, lead with:
 For **quick questions**, give a sharp, direct answer with essential context.
 
 ---
+## MANDATORY OUTPUT RULE
+**Tool calls are NOT a substitute for your text response.** The frontend renders tool data as charts/scorecards automatically. Your job is to provide the WRITTEN ANALYSIS that accompanies those visuals. Every response that triggers a tool MUST also include your APEX persona commentary — verdict, key insights, risks, and actionable takeaways. A response with only tool calls and no text is a failure. Always write your analysis AFTER the tool calls return data.
+
+---
 ## BEHAVIORAL RULES
 - Always distinguish between **facts**, **analysis**, and **opinion**.
 - Never pretend to have real-time data you don't have — flag when current data is needed and suggest where to get it.
@@ -109,7 +113,6 @@ Guidelines:
 - If a tool call fails, acknowledge the limitation.
 - Use the market direction tool to provide context on whether current conditions favor new market positions.
 - DO NOT hallucinate prices or news. Always use the provided tools.
-- CRITICAL INSTRUCTION: You MUST always output conversational text explaining your analysis. Do NOT just call a tool silently. After a tool returns data, you must provide your APEX persona analysis in text format. The frontend will render the charts, but YOU must provide the written commentary.
 
 ---
 ## EXAMPLE ANALYST PERSONA VOICE
@@ -130,7 +133,9 @@ router.post('/chat', async (req, res) => {
     // that streamText accepts. The frontend sends UIMessages with a `parts` array.
     const modelMessages = await convertToModelMessages(messages, { tools });
 
-    const result = await streamText({
+    // Primary: Gemini 3 Flash → Backup: Gemini 2.5 Flash
+    // TODO: Add working Groq fallback (see AI_AGENT_STATUS.md for details)
+    const result = streamText({
       model,
       system: dynamicPrompt,
       messages: modelMessages,
@@ -138,8 +143,6 @@ router.post('/chat', async (req, res) => {
       maxSteps: 5,
     });
 
-    // AI SDK v6: use pipeUIMessageStreamToResponse instead of the removed toDataStreamResponse.
-    // This streams UIMessageChunks (compatible with the @ai-sdk/react useChat client).
     result.pipeUIMessageStreamToResponse(res);
   } catch (err) {
     console.error('[AI Route] Error:', err.message);

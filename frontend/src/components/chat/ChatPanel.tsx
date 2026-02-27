@@ -1,6 +1,6 @@
 import { useRef, useEffect, useState } from 'react'
 import { AnimatePresence } from 'framer-motion'
-import { Send, Square } from 'lucide-react'
+import { Send, Square, Trash2 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { useFinancialAgent } from '@/hooks/useFinancialAgent'
@@ -26,7 +26,7 @@ const SUGGESTED_PROMPTS = [
  * - `status` ('ready' | 'submitted' | 'streaming' | 'error') instead of `isLoading`.
  */
 export function ChatPanel() {
-  const { messages, sendMessage, isLoading, stop, error } = useFinancialAgent()
+  const { messages, setMessages, sendMessage, isLoading, stop, error } = useFinancialAgent()
   const [inputValue, setInputValue] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -61,11 +61,22 @@ export function ChatPanel() {
 
   return (
     <Card className="h-full flex flex-col min-h-[400px]">
-      <CardHeader className="pb-2 shrink-0">
+      <CardHeader className="pb-2 pt-3 px-4 flex flex-row items-center justify-between shrink-0 space-y-0">
         <CardTitle className="text-base flex items-center gap-2">
           <span className="inline-block w-2 h-2 rounded-full bg-green-400 animate-pulse" />
           AI Financial Analyst
         </CardTitle>
+        {messages.length > 0 && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8 px-2 text-muted-foreground hover:text-destructive"
+            onClick={() => setMessages([])}
+            title="Clear conversation"
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        )}
       </CardHeader>
 
       <CardContent className="flex flex-col flex-1 overflow-hidden p-3 gap-3">
