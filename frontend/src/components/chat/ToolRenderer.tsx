@@ -56,32 +56,31 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
   // Tool succeeded — map to specialised component
   if (state === 'output-available') {
     const output = 'output' in toolPart ? toolPart.output : undefined
+    const args = 'args' in toolPart && toolPart.args ? (toolPart.args as Record<string, unknown>) : undefined
+    const symbol = args?.symbol && typeof args.symbol === 'string' ? args.symbol : undefined
 
     switch (toolName) {
       case 'getCanslimAnalysis':
-        // CANSLIMScorecard reads from the Zustand store (selectedTicker).
-        // The AI tool result confirms the symbol — the component fetches its
-        // own data via React Query so it stays live and up-to-date.
+        // CANSLIMScorecard renders the AI's requested symbol, or falls back to selectedTicker
         return (
           <div className="w-full rounded-md overflow-hidden border border-border">
             <div className="px-2 pt-1 pb-0 text-[10px] text-muted-foreground font-medium uppercase tracking-wide">
               CAN SLIM Analysis
             </div>
-            <CANSLIMScorecard />
+            <CANSLIMScorecard symbol={symbol} />
           </div>
         )
 
       case 'getStockInfo':
       case 'getTechnicalIndicators':
-        // StockChart reads from Zustand store and React Query.
-        // The AI calling this tool signals "show the chart", so we embed it inline.
+        // StockChart renders the AI's requested symbol, or falls back to selectedTicker
         return (
           <div className="w-full rounded-md overflow-hidden border border-border">
             <div className="px-2 pt-1 pb-0 text-[10px] text-muted-foreground font-medium uppercase tracking-wide">
               {toolName === 'getTechnicalIndicators' ? 'Technical Analysis' : 'Stock Info'}
             </div>
             <div className="h-[200px]">
-              <StockChart />
+              <StockChart symbol={symbol} />
             </div>
           </div>
         )
@@ -96,11 +95,10 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
                 Market Direction
               </div>
               {Boolean(direction.direction) && (
-                <div className={`text-sm font-semibold ${
-                  String(direction.direction).includes('Uptrend') ? 'text-green-400' :
-                  String(direction.direction).includes('Pressure') ? 'text-amber-400' :
-                  'text-red-400'
-                }`}>
+                <div className={`text-sm font-semibold ${String(direction.direction).includes('Uptrend') ? 'text-green-400' :
+                    String(direction.direction).includes('Pressure') ? 'text-amber-400' :
+                      'text-red-400'
+                  }`}>
                   {String(direction.direction)}
                 </div>
               )}
@@ -134,10 +132,10 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
 function ToolSkeleton({ toolName }: { toolName: string }) {
   const label =
     toolName === 'getCanslimAnalysis' ? 'Running CAN SLIM analysis...' :
-    toolName === 'getStockInfo' ? 'Fetching stock data...' :
-    toolName === 'getTechnicalIndicators' ? 'Calculating technical indicators...' :
-    toolName === 'getMarketDirection' ? 'Checking market direction...' :
-    `Calling ${toolName}...`
+      toolName === 'getStockInfo' ? 'Fetching stock data...' :
+        toolName === 'getTechnicalIndicators' ? 'Calculating technical indicators...' :
+          toolName === 'getMarketDirection' ? 'Checking market direction...' :
+            `Calling ${toolName}...`
 
   return (
     <div className="w-full rounded-md border border-border px-3 py-3 animate-pulse">

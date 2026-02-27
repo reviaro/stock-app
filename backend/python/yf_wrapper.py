@@ -585,6 +585,42 @@ def get_market_indexes():
         demo = get_demo_indexes()
         print(json.dumps(demo) if demo else '')
 
+def get_news(symbol):
+    """Get latest news for a stock symbol"""
+    try:
+        stock = yf.Ticker(symbol)
+        news = stock.news
+        if not news:
+            return {'status': 'success', 'data': []}
+        
+        formatted_news = []
+        for item in news[:10]:
+            n = item.get('content') or item
+            
+            title = n.get('title', '')
+            pub_date = n.get('pubDate') or n.get('providerPublishTime', '')
+            
+            provider_dict = n.get('provider') or {}
+            publisher = provider_dict.get('displayName') or n.get('publisher', '')
+            
+            click_through = n.get('clickThroughUrl') or {}
+            canonical = n.get('canonicalUrl') or {}
+            link = click_through.get('url') or canonical.get('url') or n.get('link', '')
+            
+            formatted_news.append({
+                'title': title,
+                'publisher': publisher,
+                'link': link,
+                'providerPublishTime': pub_date
+            })
+            
+        return {
+            'status': 'success',
+            'data': formatted_news
+        }
+    except Exception as e:
+        return {'status': 'error', 'error': str(e)}
+
 def calculate_rsi(prices, period=14):
     """Calculate Relative Strength Index"""
     if len(prices) < period + 1:
@@ -1017,6 +1053,8 @@ def main():
         result = get_history(symbol, period, interval)
     elif action == 'canslim':
         result = get_canslim_analysis(symbol)
+    elif action == 'news':
+        result = get_news(symbol)
     elif action == 'indexes':
         result = get_market_indexes()
     elif action == 'technical':

@@ -2,8 +2,7 @@ const { google } = require('@ai-sdk/google');
 const { tool } = require('ai');
 const { z } = require('zod');
 const pybridge = require('./pybridge');
-
-const model = google('gemini-2.0-flash');
+const model = google('gemini-3-flash-preview');
 
 const tools = {
   getStockInfo: tool({
@@ -13,6 +12,7 @@ const tools = {
       symbol: z.string().describe('The stock ticker symbol (e.g. AAPL, MSFT)'),
     }),
     execute: async ({ symbol }) => {
+      if (!symbol || typeof symbol !== 'string') return { error: 'Symbol parameter is required and must be a string' };
       return await pybridge.getStockInfo(symbol.toUpperCase());
     },
   }),
@@ -24,6 +24,7 @@ const tools = {
       symbol: z.string().describe('The stock ticker symbol (e.g. AAPL, MSFT)'),
     }),
     execute: async ({ symbol }) => {
+      if (!symbol || typeof symbol !== 'string') return { error: 'Symbol parameter is required and must be a string' };
       return await pybridge.getCANSlimAnalysis(symbol.toUpperCase());
     },
   }),
@@ -35,6 +36,7 @@ const tools = {
       symbol: z.string().describe('The stock ticker symbol (e.g. AAPL, MSFT)'),
     }),
     execute: async ({ symbol }) => {
+      if (!symbol || typeof symbol !== 'string') return { error: 'Symbol parameter is required and must be a string' };
       return await pybridge.getTechnicalIndicators(symbol.toUpperCase());
     },
   }),
@@ -45,6 +47,18 @@ const tools = {
     parameters: z.object({}),
     execute: async () => {
       return await pybridge.getMarketDirection();
+    },
+  }),
+
+  getNews: tool({
+    description:
+      'Fetches the latest news articles for a specific stock symbol or the broader market. For general market news, try using index symbols like ^GSPC (S&P 500) or SPY. Returns a list of recent article titles, publishers, links, and publish timestamps.',
+    parameters: z.object({
+      symbol: z.string().describe('The stock ticker symbol or index (e.g. AAPL, MSFT, ^GSPC)').optional(),
+    }),
+    execute: async ({ symbol }) => {
+      const ticker = symbol && typeof symbol === 'string' ? symbol.toUpperCase() : '^GSPC';
+      return await pybridge.getNews(ticker);
     },
   }),
 };

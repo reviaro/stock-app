@@ -1,11 +1,11 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { useWatchlist } from '@/hooks/useWatchlist'
+import { useWatchlist, useAddToWatchlist, useRemoveFromWatchlist, searchStocks } from '@/hooks/useWatchlist'
 import { useAnalysisWorker } from '@/hooks/useAnalysisWorker'
 import { useTickerStore } from '@/lib/store'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import type { WatchlistEntry } from '@/types'
+import type { WatchlistEntry, StockSearchResult } from '@/types'
 import type { SortCriteria, SortField, SortDirection } from '../workers/analysis.worker.ts'
 
 /** Format a change percent with sign (e.g. +0.47%) */
@@ -25,35 +25,40 @@ interface WatchlistRowProps {
   entry: WatchlistEntry
   isSelected: boolean
   onSelect: (symbol: string) => void
+  onRemove: (symbol: string) => void
+  isRemoving: boolean
+  displayMode: SortField
 }
 
-function WatchlistRow({ entry, isSelected, onSelect }: WatchlistRowProps) {
+function WatchlistRow({ entry, isSelected, onSelect, onRemove, isRemoving, displayMode }: WatchlistRowProps) {
   const isPositive = (entry.changePercent ?? 0) >= 0
   const hasPriceData = entry.price !== undefined
 
-  return (
-    <motion.button
-      type="button"
-      onClick={() => onSelect(entry.symbol)}
-      className={[
-        'w-full flex items-center justify-between px-3 py-2 rounded-lg',
-        'text-left transition-colors duration-150 border border-transparent',
-        'hover:bg-accent hover:border-border',
-        isSelected ? 'bg-accent border-border ring-1 ring-primary' : '',
-      ].join(' ')}
-      aria-pressed={isSelected}
-      aria-label={`Select ${entry.symbol}`}
-      whileHover={{ scale: 1.02, transition: { type: 'spring', stiffness: 350, damping: 22 } }}
-      whileTap={{ scale: 0.97, transition: { type: 'spring', stiffness: 400, damping: 25 } }}
-    >
-      <div>
-        <p className="font-semibold text-sm text-foreground">{entry.symbol}</p>
-        <p className="text-xs text-muted-foreground truncate max-w-[120px]">
-          {entry.name ?? entry.symbol}
-        </p>
-      </div>
-      <div className="text-right shrink-0 ml-2">
-        {hasPriceData ? (
+  /** Render the right-side value based on active display mode */
+  function renderValue() {
+    if (!hasPriceData) {
+      return <p className="text-xs text-muted-foreground">No data</p>
+    }
+
+    switch (displayMode) {
+      case 'changePercent':
+        return (
+          <Badge
+            variant={isPositive ? 'default' : 'destructive'}
+            className="text-sm px-2 py-0.5"
+          >
+            {formatPercent(entry.changePercent)}
+          </Badge>
+        )
+      case 'price':
+        return (
+          <p className="font-mono text-sm font-semibold text-foreground">
+            ${formatPrice(entry.price)}
+          </p>
+        )
+      case 'symbol':
+      default:
+        return (
           <>
             <p className="font-mono text-sm font-semibold">${formatPrice(entry.price)}</p>
             <Badge
@@ -63,11 +68,52 @@ function WatchlistRow({ entry, isSelected, onSelect }: WatchlistRowProps) {
               {formatPercent(entry.changePercent)}
             </Badge>
           </>
-        ) : (
-          <p className="text-xs text-muted-foreground">No data</p>
-        )}
-      </div>
-    </motion.button>
+        )
+    }
+  }
+
+  return (
+    <motion.div
+      className={[
+        'group w-full flex items-center justify-between px-3 py-2 rounded-lg',
+        'text-left transition-colors duration-150 border border-transparent',
+        'hover:bg-accent hover:border-border',
+        isSelected ? 'bg-accent border-border ring-1 ring-primary' : '',
+      ].join(' ')}
+      whileHover={{ scale: 1.02, transition: { type: 'spring', stiffness: 350, damping: 22 } }}
+      whileTap={{ scale: 0.97, transition: { type: 'spring', stiffness: 400, damping: 25 } }}
+    >
+      <button
+        type="button"
+        onClick={() => onSelect(entry.symbol)}
+        className="flex-1 flex items-center justify-between min-w-0"
+        aria-pressed={isSelected}
+        aria-label={`Select ${entry.symbol}`}
+      >
+        <div>
+          <p className="font-semibold text-sm text-foreground">{entry.symbol}</p>
+          <p className="text-xs text-muted-foreground truncate max-w-[120px]">
+            {entry.name ?? entry.symbol}
+          </p>
+        </div>
+        <div className="text-right shrink-0 ml-2">
+          {renderValue()}
+        </div>
+      </button>
+      {/* Delete button — visible on hover */}
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onRemove(entry.symbol) }}
+        disabled={isRemoving}
+        className="ml-1 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive p-1 rounded shrink-0"
+        aria-label={`Remove ${entry.symbol} from watchlist`}
+        title="Remove from watchlist"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      </button>
+    </motion.div>
   )
 }
 
@@ -78,45 +124,222 @@ const SORT_OPTIONS: { label: string; field: SortField; direction: SortDirection 
 ]
 
 /**
+ * AddStockSearch — inline search input with dropdown results.
+ * Searches /api/watchlist/search/:query and calls POST /api/watchlist on selection.
+ */
+function AddStockSearch({ onClose }: { onClose: () => void }) {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState<StockSearchResult[]>([])
+  const [isSearching, setIsSearching] = useState(false)
+  const addMutation = useAddToWatchlist()
+  const inputRef = useRef<HTMLInputElement>(null)
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined)
+
+  // Auto-focus on mount
+  useEffect(() => {
+    inputRef.current?.focus()
+  }, [])
+
+  // Debounced search
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    if (!query.trim()) {
+      setResults([])
+      return
+    }
+    setIsSearching(true)
+    debounceRef.current = setTimeout(async () => {
+      const data = await searchStocks(query)
+      setResults(data)
+      setIsSearching(false)
+    }, 250)
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current)
+    }
+  }, [query])
+
+  const handleAdd = async (symbol: string) => {
+    try {
+      await addMutation.mutateAsync(symbol)
+      onClose()
+    } catch {
+      // error shown via mutation state
+    }
+  }
+
+  const triggerSearch = async () => {
+    if (!query.trim()) return
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    setIsSearching(true)
+    const data = await searchStocks(query)
+    setResults(data)
+    setIsSearching(false)
+  }
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -10 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -10 }}
+      className="relative z-50 mb-2"
+    >
+      <div className="flex items-center gap-1">
+        <div className="relative flex-1">
+          <input
+            ref={inputRef}
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search by symbol or name…"
+            className="w-full pl-3 pr-8 py-1.5 rounded-md bg-secondary text-foreground text-sm border border-border focus:border-primary focus:outline-none transition-colors placeholder:text-muted-foreground"
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') onClose()
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                void triggerSearch()
+              }
+            }}
+          />
+          {/* Search icon button */}
+          <button
+            type="button"
+            onClick={() => void triggerSearch()}
+            className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground p-0.5 rounded transition-colors"
+            aria-label="Search"
+            title="Search"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+            </svg>
+          </button>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-muted-foreground hover:text-foreground p-1 rounded transition-colors"
+          aria-label="Cancel search"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </div>
+
+      {/* Search results dropdown */}
+      {query.trim() && (
+        <div className="absolute z-50 left-0 right-0 mt-1 rounded-md border border-border bg-card shadow-lg max-h-48 overflow-y-auto">
+          {isSearching && (
+            <p className="text-xs text-muted-foreground px-3 py-2">Searching…</p>
+          )}
+          {!isSearching && results.length === 0 && (
+            <p className="text-xs text-muted-foreground px-3 py-2">No results found</p>
+          )}
+          {results.map((stock) => (
+            <button
+              key={stock.symbol}
+              type="button"
+              onClick={() => handleAdd(stock.symbol)}
+              disabled={addMutation.isPending}
+              className="w-full flex items-center justify-between px-3 py-2 text-left text-sm hover:bg-accent transition-colors border-b border-border last:border-0"
+            >
+              <div>
+                <span className="font-semibold text-foreground">{stock.symbol}</span>
+                <span className="text-muted-foreground ml-2 text-xs">{stock.name}</span>
+              </div>
+              <span className="text-xs text-primary font-medium">+ Add</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {/* Error message */}
+      {addMutation.isError && (
+        <p className="text-xs text-destructive mt-1">
+          {addMutation.error instanceof Error ? addMutation.error.message : 'Failed to add stock'}
+        </p>
+      )}
+    </motion.div>
+  )
+}
+
+/**
  * Watchlist component — displays saved stocks with live price data.
- * Sorting is offloaded to a Web Worker via the useAnalysisWorker hook to
- * keep the main thread free from heavy computation on large datasets.
- * Clicking a stock calls setSelectedTicker to update global state.
+ * Sorting is offloaded to a Web Worker via the useAnalysisWorker hook.
+ * Includes add-stock search and per-row delete functionality.
  */
 export function Watchlist() {
   const { data, isLoading, isError, error } = useWatchlist()
   const selectedTicker = useTickerStore((s) => s.selectedTicker)
   const setSelectedTicker = useTickerStore((s) => s.setSelectedTicker)
+  const removeMutation = useRemoveFromWatchlist()
 
-  const { workerApi, isReady } = useAnalysisWorker()
+  const { workerApi } = useAnalysisWorker()
   const [sortedData, setSortedData] = useState<WatchlistEntry[]>([])
   const [activeSortIdx, setActiveSortIdx] = useState(0)
+  const [showAddSearch, setShowAddSearch] = useState(false)
 
-  /**
-   * Re-sort whenever the raw data or the active sort option changes.
-   * The sort runs asynchronously on the worker thread — no main-thread blocking.
-   */
+  /** Main-thread fallback sort when the web worker isn't available */
+  const sortLocal = useCallback(
+    (entries: WatchlistEntry[], sortIdx: number): WatchlistEntry[] => {
+      const option = SORT_OPTIONS[sortIdx]
+      const sorted = [...entries]
+      sorted.sort((a, b) => {
+        const field = option.field
+        let aVal: string | number | undefined
+        let bVal: string | number | undefined
+
+        if (field === 'symbol') {
+          aVal = a.symbol
+          bVal = b.symbol
+        } else if (field === 'price') {
+          aVal = a.price ?? 0
+          bVal = b.price ?? 0
+        } else if (field === 'changePercent') {
+          aVal = a.changePercent ?? 0
+          bVal = b.changePercent ?? 0
+        }
+
+        if (aVal === undefined) aVal = 0
+        if (bVal === undefined) bVal = 0
+
+        let cmp: number
+        if (typeof aVal === 'string' && typeof bVal === 'string') {
+          cmp = aVal.localeCompare(bVal)
+        } else {
+          cmp = (aVal as number) - (bVal as number)
+        }
+
+        return option.direction === 'desc' ? -cmp : cmp
+      })
+      return sorted
+    },
+    []
+  )
+
   const runSort = useCallback(
     async (entries: WatchlistEntry[], sortIdx: number) => {
-      if (!workerApi || !entries.length) {
+      if (!entries.length) {
         setSortedData(entries)
         return
       }
-      const option = SORT_OPTIONS[sortIdx]
-      const criteria: SortCriteria[] = [
-        { field: option.field, direction: option.direction },
-        // Secondary tiebreak: alphabetical by symbol
-        { field: 'symbol', direction: 'asc' },
-      ]
-      try {
-        const result = await workerApi.sortEntries(entries, criteria)
-        setSortedData(result)
-      } catch {
-        // Fallback to unsorted if worker fails
-        setSortedData(entries)
+      // Try worker first, fall back to main-thread sort
+      if (workerApi) {
+        const option = SORT_OPTIONS[sortIdx]
+        const criteria: SortCriteria[] = [
+          { field: option.field, direction: option.direction },
+          { field: 'symbol', direction: 'asc' },
+        ]
+        try {
+          const result = await workerApi.sortEntries(entries, criteria)
+          setSortedData(result)
+          return
+        } catch {
+          // Worker failed — fall through to local sort
+        }
       }
+      // Fallback: sort on main thread
+      setSortedData(sortLocal(entries, sortIdx))
     },
-    [workerApi]
+    [workerApi, sortLocal]
   )
 
   useEffect(() => {
@@ -124,23 +347,41 @@ export function Watchlist() {
       setSortedData([])
       return
     }
-    if (isReady) {
-      void runSort(data, activeSortIdx)
-    } else {
-      // Worker not yet initialised — show data unsorted while it loads
-      setSortedData(data)
+    void runSort(data, activeSortIdx)
+  }, [data, activeSortIdx, runSort])
+
+  const handleRemove = async (symbol: string) => {
+    try {
+      await removeMutation.mutateAsync(symbol)
+    } catch {
+      // Error state available via removeMutation
     }
-  }, [data, activeSortIdx, isReady, runSort])
+  }
 
   return (
-    <Card className="h-full">
+    <Card className="h-full flex flex-col">
       <CardHeader className="pb-2">
         <div className="flex items-center justify-between gap-2">
           <CardTitle>Watchlist</CardTitle>
-          {/* Sort controls — only show when there is data to sort */}
-          {sortedData.length > 1 && (
-            <div className="flex gap-1 flex-wrap justify-end">
-              {SORT_OPTIONS.map((opt, idx) => (
+          <div className="flex items-center gap-1 flex-wrap justify-end">
+            {/* Add stock button */}
+            <button
+              type="button"
+              onClick={() => setShowAddSearch((v) => !v)}
+              className={[
+                'text-xs px-2 py-0.5 rounded-md border transition-colors',
+                showAddSearch
+                  ? 'bg-primary text-primary-foreground border-primary'
+                  : 'bg-transparent text-muted-foreground border-border hover:border-primary hover:text-foreground',
+              ].join(' ')}
+              aria-label="Add stock to watchlist"
+              title="Add stock"
+            >
+              + Add
+            </button>
+            {/* Sort controls */}
+            {sortedData.length > 1 &&
+              SORT_OPTIONS.map((opt, idx) => (
                 <button
                   key={opt.field}
                   type="button"
@@ -156,11 +397,17 @@ export function Watchlist() {
                   {opt.label}
                 </button>
               ))}
-            </div>
-          )}
+          </div>
         </div>
       </CardHeader>
-      <CardContent className="px-3">
+      <CardContent className="px-3 flex-1 overflow-y-auto min-h-0 pb-4">
+        {/* Add stock search bar */}
+        <AnimatePresence>
+          {showAddSearch && (
+            <AddStockSearch onClose={() => setShowAddSearch(false)} />
+          )}
+        </AnimatePresence>
+
         {isLoading && (
           <p className="text-muted-foreground text-sm px-3">Loading watchlist...</p>
         )}
@@ -174,7 +421,7 @@ export function Watchlist() {
 
         {!isLoading && !isError && sortedData.length === 0 && (
           <p className="text-muted-foreground text-sm px-3">
-            Your watchlist is empty. Add stocks to get started.
+            Your watchlist is empty. Click "+ Add" to get started.
           </p>
         )}
 
@@ -193,6 +440,9 @@ export function Watchlist() {
                     entry={entry}
                     isSelected={selectedTicker === entry.symbol}
                     onSelect={setSelectedTicker}
+                    onRemove={handleRemove}
+                    isRemoving={removeMutation.isPending}
+                    displayMode={SORT_OPTIONS[activeSortIdx].field}
                   />
                 </motion.div>
               ))}

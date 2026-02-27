@@ -60,8 +60,9 @@ function CriterionRow({ letter, criterion }: { letter: string; criterion: CANSLI
   )
 }
 
-export function CANSLIMScorecard() {
-  const selectedTicker = useTickerStore((s) => s.selectedTicker)
+export function CANSLIMScorecard({ symbol }: { symbol?: string }) {
+  const storeTicker = useTickerStore((s) => s.selectedTicker)
+  const selectedTicker = symbol || storeTicker
   const { data, isLoading, error } = useCANSLIMData(selectedTicker)
 
   return (

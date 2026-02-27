@@ -1,4 +1,6 @@
+import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
+import { Sun, Moon } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { useTickerStore } from '@/lib/store'
 import { MarketPulse } from '@/components/MarketPulse'
@@ -6,6 +8,7 @@ import { Watchlist } from '@/components/Watchlist'
 import { StockChart } from '@/components/StockChart'
 import { CANSLIMScorecard } from '@/components/CANSLIMScorecard'
 import { ChatPanel } from '@/components/chat/ChatPanel'
+import { Glossary } from '@/components/Glossary'
 
 /** Animation variants for bento grid cards */
 const cardVariants = {
@@ -16,46 +19,74 @@ const cardVariants = {
     transition: {
       delay: i * 0.07,
       duration: 0.35,
-      ease: 'easeOut',
+      ease: 'easeOut' as const,
     },
   }),
 }
 
 /** Shared hover/tap spring props for interactive cards */
 const interactiveMotion = {
-  whileHover: { scale: 1.015, transition: { type: 'spring', stiffness: 300, damping: 20 } },
-  whileTap: { scale: 0.985, transition: { type: 'spring', stiffness: 400, damping: 25 } },
+  whileHover: { scale: 1.015, transition: { type: 'spring' as const, stiffness: 300, damping: 20 } },
+  whileTap: { scale: 0.985, transition: { type: 'spring' as const, stiffness: 400, damping: 25 } },
 }
 
 export function Dashboard() {
   const selectedTicker = useTickerStore((s) => s.selectedTicker)
+  const [glossaryOpen, setGlossaryOpen] = useState(false)
+  const [isDark, setIsDark] = useState(true)
+
+  // Initialize theme from localStorage or default to dark
+  useEffect(() => {
+    const saved = localStorage.getItem('theme')
+    const dark = saved ? saved === 'dark' : true
+    setIsDark(dark)
+    document.documentElement.classList.toggle('dark', dark)
+  }, [])
+
+  const toggleTheme = () => {
+    const next = !isDark
+    setIsDark(next)
+    document.documentElement.classList.toggle('dark', next)
+    localStorage.setItem('theme', next ? 'dark' : 'light')
+  }
 
   return (
     <div className="min-h-screen bg-background p-4">
       <div className="max-w-[1600px] mx-auto">
-        <h1 className="text-2xl font-bold mb-4 text-foreground">Stock Dashboard</h1>
+        {/* Header with title and glossary button */}
+        <div className="flex items-center justify-between mb-4">
+          <h1 className="text-2xl font-bold text-foreground">Stock Dashboard</h1>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={toggleTheme}
+              className="flex items-center justify-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border border-border text-muted-foreground hover:text-foreground hover:border-primary hover:bg-accent transition-colors"
+              aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+              title={isDark ? 'Light mode' : 'Dark mode'}
+            >
+              {isDark ? (
+                <><Sun size={16} className="text-yellow-400" /> Light</>
+              ) : (
+                <><Moon size={16} className="text-blue-400" /> Dark</>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => setGlossaryOpen(true)}
+              className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border border-border text-muted-foreground hover:text-foreground hover:border-primary hover:bg-accent transition-colors"
+            >
+              <span>📖</span> Glossary
+            </button>
+          </div>
+        </div>
 
-        {/*
-          Bento Grid Layout — dense auto-flow prevents "swiss cheese" gaps.
-          Mobile:  1 column  (all cards stack vertically)
-          Tablet:  2 columns (md breakpoint)
-          Desktop: 6 columns (lg breakpoint)
-
-          Row spans give the grid vertical rhythm:
-            - MarketPulse & Watchlist: shallow (auto height)
-            - StockChart & CANSLIM:    min 380px
-            - ChatPanel:               min 420px
-        */}
+        {/* Bento Grid Layout */}
         <div
           className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-4"
           style={{ gridAutoFlow: 'dense' }}
         >
 
-          {/* ── Market Pulse ─────────────────────────────────────
-              Mobile:  full width  (col-span-1 / 1)
-              Tablet:  full width  (md:col-span-2)
-              Desktop: 2 of 6     (lg:col-span-2)
-          ──────────────────────────────────────────────────────── */}
+          {/* ── Market Pulse ── */}
           <motion.div
             className="lg:col-span-2 min-h-[180px]"
             custom={0}
@@ -67,11 +98,7 @@ export function Dashboard() {
             <MarketPulse />
           </motion.div>
 
-          {/* ── Active Chart ──────────────────────────────────────
-              Mobile:  full width
-              Tablet:  full width  (md:col-span-2)
-              Desktop: 4 of 6     (lg:col-span-4)
-          ──────────────────────────────────────────────────────── */}
+          {/* ── Active Chart ── */}
           <motion.div
             className="md:col-span-2 lg:col-span-4 min-h-[420px]"
             custom={1}
@@ -89,7 +116,7 @@ export function Dashboard() {
                       className="text-primary font-bold"
                       initial={{ opacity: 0, x: -8 }}
                       animate={{ opacity: 1, x: 0 }}
-                      transition={{ duration: 0.25, ease: 'easeOut' }}
+                      transition={{ duration: 0.25, ease: 'easeOut' as const }}
                     >
                       {selectedTicker}
                     </motion.span>
@@ -102,27 +129,18 @@ export function Dashboard() {
             </Card>
           </motion.div>
 
-          {/* ── Watchlist ─────────────────────────────────────────
-              Mobile:  full width
-              Tablet:  1 of 2     (md:col-span-1)
-              Desktop: 2 of 6     (lg:col-span-2)
-          ──────────────────────────────────────────────────────── */}
+          {/* ── Watchlist ── */}
           <motion.div
             className="lg:col-span-2 min-h-[320px]"
             custom={2}
             initial="hidden"
             animate="visible"
             variants={cardVariants}
-            {...interactiveMotion}
           >
             <Watchlist />
           </motion.div>
 
-          {/* ── CANSLIM Scorecard ─────────────────────────────────
-              Mobile:  full width
-              Tablet:  1 of 2     (md:col-span-1)
-              Desktop: 4 of 6     (lg:col-span-4)
-          ──────────────────────────────────────────────────────── */}
+          {/* ── CANSLIM Scorecard ── */}
           <motion.div
             className="lg:col-span-4 min-h-[320px]"
             custom={3}
@@ -134,9 +152,7 @@ export function Dashboard() {
             <CANSLIMScorecard />
           </motion.div>
 
-          {/* ── AI Financial Analyst Chat ─────────────────────────
-              All breakpoints: full width (6 of 6)
-          ──────────────────────────────────────────────────────── */}
+          {/* ── AI Financial Analyst Chat ── */}
           <motion.div
             className="md:col-span-2 lg:col-span-6 min-h-[420px]"
             custom={4}
@@ -149,6 +165,9 @@ export function Dashboard() {
 
         </div>
       </div>
+
+      {/* Glossary Modal */}
+      <Glossary isOpen={glossaryOpen} onClose={() => setGlossaryOpen(false)} />
     </div>
   )
 }

@@ -40,9 +40,9 @@ interface IndicatorConfig {
 }
 
 const INDICATORS: IndicatorConfig[] = [
-  { key: 'sma50',  label: 'SMA 50',  color: '#f59e0b', lineWidth: 1 }, // amber-400
+  { key: 'sma50', label: 'SMA 50', color: '#f59e0b', lineWidth: 1 }, // amber-400
   { key: 'sma200', label: 'SMA 200', color: '#3b82f6', lineWidth: 1 }, // blue-500
-  { key: 'ema21',  label: 'EMA 21',  color: '#a855f7', lineWidth: 1 }, // purple-500
+  { key: 'ema21', label: 'EMA 21', color: '#a855f7', lineWidth: 1 }, // purple-500
 ]
 
 // S&P 500 symbol used for comparison overlay
@@ -71,8 +71,9 @@ function ChartSkeleton() {
   )
 }
 
-export function StockChart() {
-  const selectedTicker = useTickerStore((s) => s.selectedTicker)
+export function StockChart({ symbol }: { symbol?: string }) {
+  const storeTicker = useTickerStore((s) => s.selectedTicker)
+  const selectedTicker = symbol || storeTicker
 
   // Comparison mode state
   const [isComparisonMode, setIsComparisonMode] = useState(false)
@@ -237,9 +238,9 @@ export function StockChart() {
     const candles: CandlestickData<Time>[] = historyData.data.map((pt) => ({
       // Normalise ISO datetime to YYYY-MM-DD for lightweight-charts Time
       time: pt.date.slice(0, 10) as Time,
-      open:  pt.open,
-      high:  pt.high,
-      low:   pt.low,
+      open: pt.open,
+      high: pt.high,
+      low: pt.low,
       close: pt.close,
     }))
 
@@ -372,7 +373,7 @@ export function StockChart() {
 
       chart.timeScale().fitContent()
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isComparisonMode, historyData, sp500Data])
 
   // ---- Render ----
@@ -398,9 +399,8 @@ export function StockChart() {
         {/* Compare with S&P 500 toggle */}
         <button
           onClick={() => setIsComparisonMode((prev) => !prev)}
-          className={`px-2 py-0.5 rounded text-xs font-medium border transition-opacity ${
-            isComparisonMode ? 'opacity-100' : 'opacity-60'
-          }`}
+          className={`px-2 py-0.5 rounded text-xs font-medium border transition-opacity ${isComparisonMode ? 'opacity-100' : 'opacity-60'
+            }`}
           style={{
             borderColor: '#6b7280',
             color: '#6b7280',
@@ -417,11 +417,10 @@ export function StockChart() {
           <button
             key={ind.key}
             onClick={() => toggleIndicator(ind.key)}
-            className={`px-2 py-0.5 rounded text-xs font-medium border transition-opacity ${
-              visible[ind.key]
+            className={`px-2 py-0.5 rounded text-xs font-medium border transition-opacity ${visible[ind.key]
                 ? 'opacity-100'
                 : 'opacity-40'
-            }`}
+              }`}
             style={{
               borderColor: ind.color,
               color: ind.color,

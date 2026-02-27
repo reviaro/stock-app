@@ -4,7 +4,7 @@ const db = require('../database/db');
 const pybridge = require('../services/pybridge');
 
 // Search stocks - predefined list + yfinance lookup
-router.get('/search/:query', (req, res) => {
+router.get('/search/:query', async (req, res) => {
     const KNOWN_STOCKS = [
         { symbol: 'AAPL', name: 'Apple Inc.' },
         { symbol: 'MSFT', name: 'Microsoft Corporation' },
@@ -39,11 +39,54 @@ router.get('/search/:query', (req, res) => {
     ];
 
     const { query } = req.params;
-    const q = query.toLowerCase();
-    const results = KNOWN_STOCKS.filter(s =>
+    const q = query.toLowerCase().trim();
+
+    // 1. Search known stocks
+    let results = KNOWN_STOCKS.filter(s =>
         s.symbol.toLowerCase().includes(q) ||
         s.name.toLowerCase().includes(q)
     ).slice(0, 10);
+
+    // 2. Try Yahoo Finance for real-time search
+    try {
+        const yfRes = await fetch(`https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=10&newsCount=0`);
+        if (yfRes.ok) {
+            const yfData = await yfRes.json();
+            if (yfData.quotes && Array.isArray(yfData.quotes)) {
+                const yfResults = yfData.quotes
+                    .filter(quote => quote.quoteType === 'EQUITY' || quote.quoteType === 'ETF')
+                    .map(quote => ({
+                        symbol: quote.symbol,
+                        name: quote.shortname || quote.longname || quote.symbol
+                    }));
+
+                // Merge, avoiding duplicates
+                const existingSymbols = new Set(results.map(r => r.symbol));
+                for (const yfMatch of yfResults) {
+                    if (!existingSymbols.has(yfMatch.symbol)) {
+                        results.push(yfMatch);
+                        existingSymbols.add(yfMatch.symbol);
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        console.error('Yahoo Finance search error:', err);
+    }
+
+    results = results.slice(0, 10);
+
+    // 3. Always offer the exact query as a potential ticker if it's 1-5 letters
+    const isLikelyTicker = /^[a-zA-Z]{1,5}$/.test(q);
+    const hasExactMatch = results.some(r => r.symbol.toLowerCase() === q);
+
+    if (isLikelyTicker && !hasExactMatch) {
+        results.unshift({
+            symbol: q.toUpperCase(),
+            name: `Search yfinance for ${q.toUpperCase()}...`
+        });
+    }
+
     res.json({ status: 'success', data: results });
 });
 
@@ -85,26 +128,13 @@ router.post('/', async (req, res) => {
         // Clean input
         let ticker = symbol.trim().toUpperCase();
 
-        // If it looks like a company name (has spaces or >5 chars), try to resolve it
-        if (ticker.length > 5 || ticker.includes(' ')) {
-            const KNOWN = {
-                'APPLE': 'AAPL', 'MICROSOFT': 'MSFT', 'GOOGLE': 'GOOGL', 'ALPHABET': 'GOOGL',
-                'AMAZON': 'AMZN', 'TESLA': 'TSLA', 'NVIDIA': 'NVDA', 'META': 'META',
-                'FACEBOOK': 'META', 'ELI LILLY': 'LLY', 'COCA COLA': 'KO', 'COCA-COLA': 'KO',
-                'PEPSI': 'PEP', 'PEPSICO': 'PEP', 'BOEING': 'BA', 'COSTCO': 'COST',
-                'WALMART': 'WMT', 'DISNEY': 'DIS', 'NETFLIX': 'NFLX', 'ADOBE': 'ADBE',
-                'INTEL': 'INTC', 'AMD': 'AMD', 'JPMORGAN': 'JPM', 'EXXON': 'XOM',
-                'JOHNSON': 'JNJ', 'BERKSHIRE': 'BRK-B', 'SALESFORCE': 'CRM',
-            };
-            const resolved = KNOWN[ticker] || KNOWN[ticker.replace(/[^A-Z ]/g, '')];
-            if (resolved) {
-                ticker = resolved;
-            } else {
-                return res.status(400).json({
-                    status: 'error',
-                    error: `Could not resolve "${symbol}" to a ticker. Please use the stock symbol (e.g., AAPL, MSFT, NVDA).`
-                });
-            }
+        // The frontend search now sends the exact Yahoo Finance symbol.
+        // If it still happens to be a long name, we just pass it to yfinance to verify.
+        if (ticker.length > 10 && ticker.includes(' ')) {
+            return res.status(400).json({
+                status: 'error',
+                error: `Please select a valid stock ticker symbol from the search results, not a full company name.`
+            });
         }
 
         // Verify stock exists via yfinance

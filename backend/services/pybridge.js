@@ -10,18 +10,18 @@ function callPython(request) {
         const python = spawn(PYTHON_PATH, [SCRIPT_PATH], {
             stdio: ['pipe', 'pipe', 'pipe']
         });
-        
+
         let stdout = '';
         let stderr = '';
-        
+
         python.stdout.on('data', (data) => {
             stdout += data.toString();
         });
-        
+
         python.stderr.on('data', (data) => {
             stderr += data.toString();
         });
-        
+
         python.on('close', (code) => {
             if (code !== 0) {
                 reject(new Error(`Python process exited with code ${code}: ${stderr}`));
@@ -34,7 +34,7 @@ function callPython(request) {
                 }
             }
         });
-        
+
         // Write request to stdin
         python.stdin.write(JSON.stringify(request));
         python.stdin.end();
@@ -69,6 +69,10 @@ async function getMarketDirection() {
     return callPython({ action: 'market_direction' });
 }
 
+async function getNews(symbol) {
+    return callPython({ action: 'news', symbol });
+}
+
 module.exports = {
     callPython,
     getStockInfo,
@@ -77,5 +81,6 @@ module.exports = {
     getTechnicalIndicators,
     getMarketIndexes,
     updateUniverse,
-    getMarketDirection
+    getMarketDirection,
+    getNews
 };
