@@ -1,6 +1,6 @@
 const express = require('express');
 const { streamText, convertToModelMessages } = require('ai');
-const { model, backupModel, fallbackModel, tools } = require('../services/ai_service');
+const { model, backupModel, fallbackModel, tools, chatTools } = require('../services/ai_service');
 
 const router = express.Router();
 
@@ -83,8 +83,16 @@ For **macro/market analysis**, lead with:
 For **quick questions**, give a sharp, direct answer with essential context.
 
 ---
-## MANDATORY OUTPUT RULE
-**Tool calls are NOT a substitute for your text response.** The frontend renders tool data as charts/scorecards automatically. Your job is to provide the WRITTEN ANALYSIS that accompanies those visuals. Every response that triggers a tool MUST also include your APEX persona commentary — verdict, key insights, risks, and actionable takeaways. A response with only tool calls and no text is a failure. Always write your analysis AFTER the tool calls return data.
+## MANDATORY OUTPUT RULE — READ THIS FIRST
+Your response MUST always contain substantial written text. The rule is simple:
+
+**Write your analysis TEXT first. Then call a tool if live data is needed.**
+
+The correct sequence for any stock question:
+1. Write your full APEX analysis in text (verdict, thesis, key metrics, bull/bear cases, risks, catalysts)
+2. THEN optionally call getStockInfo once to show the live price chart alongside your text
+
+A response that is only a tool call with no written text is a complete failure. The chart is supplementary — your written analysis is the deliverable. Never let a tool call replace your commentary.
 
 ---
 ## BEHAVIORAL RULES
@@ -106,8 +114,8 @@ Guidelines:
 - Answer general analyst questions WITHOUT tools. If the user asks opinions about a stock, give your written analysis directly without auto-firing tools.
 - If the user asks about a stock (e.g. "what is nike stock price"), immediately use the getStockInfo tool to fetch the live price and data.
 - If the user asks about the news or events (e.g. "how was the stock market today", "check the news"), use the getNews tool. Pass "^GSPC" for general market news, or the specific ticker for company news.
-- Use getCanslimAnalysis ONLY when the user explicitly asks for CAN SLIM analysis or scores. Never call it automatically just because a stock is mentioned.
-- Use getTechnicalIndicators ONLY when the user explicitly asks for technical analysis, RSI, MACD, chart patterns, etc.
+- When the user asks for a CAN SLIM analysis or stock score, write your CANSLIM evaluation as structured text (grade each criterion: C, A, N, S, L, I, M) — do NOT call a tool for this. The CANSLIM scorecard is already displayed in the main dashboard.
+- Use getTechnicalIndicators ONLY when the user explicitly asks for a technical chart, RSI, MACD, or moving averages in the chat.
 - Be concise and actionable. Focus on what matters most for CAN SLIM investors (earnings growth, new highs, volume, institutional sponsorship).
 - Clearly state the source of your data (e.g., "Based on current live market data...").
 - If a tool call fails, acknowledge the limitation.
@@ -131,19 +139,28 @@ router.post('/chat', async (req, res) => {
 
     // AI SDK v6: convert UIMessage format (parts-based) to ModelMessage format
     // that streamText accepts. The frontend sends UIMessages with a `parts` array.
+    // Always use the full tools set here so historical getCanslimAnalysis messages
+    // in the conversation history are decoded correctly.
     const modelMessages = await convertToModelMessages(messages, { tools });
+    console.log('[AI] chatTools (available to model):', Object.keys(chatTools));
 
     // Model fallback chain: Gemini 3 Flash → Gemini 2.5 Flash → Groq Llama 3.3
     const models = [model, backupModel, fallbackModel];
 
-    for (const currentModel of models) {
+    for (let i = 0; i < models.length; i++) {
+      const currentModel = models[i];
+      // Groq/Llama (last fallback) sends null tool args with Llama models even via OpenAI
+      // adapter — disable tools entirely so it generates clean text instead of broken charts.
+      const isGroqFallback = i === models.length - 1;
       try {
         const result = streamText({
           model: currentModel,
           system: dynamicPrompt,
           messages: modelMessages,
-          tools,
-          maxSteps: 5,
+          ...(isGroqFallback ? {} : { tools: chatTools, maxSteps: 5 }),
+          onStepFinish: ({ text, finishReason, toolCalls }) => {
+            console.log(`[AI] step finish — reason: ${finishReason}, textLen: ${text.length}, tools: ${toolCalls?.map(t => t.toolName).join(',') || 'none'}`);
+          },
         });
 
         result.pipeUIMessageStreamToResponse(res);

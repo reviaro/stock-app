@@ -77,4 +77,18 @@ const tools = {
   }),
 };
 
-module.exports = { model, backupModel, fallbackModel, tools };
+// chatTools is what the AI is allowed to call during chat.
+// getCanslimAnalysis is intentionally excluded: the CANSLIM scorecard already
+// lives in the main dashboard (driven by the Zustand store). Giving the AI this
+// tool causes it to render a duplicate chart in chat and then generate no written
+// commentary — the model treats the chart render as a complete answer.
+// Without the tool the AI is forced to write its CANSLIM-style analysis as text.
+// Defined explicitly (not via destructuring) to avoid any proxy/enumeration issues.
+const chatTools = {
+  getStockInfo: tools.getStockInfo,
+  getTechnicalIndicators: tools.getTechnicalIndicators,
+  getMarketDirection: tools.getMarketDirection,
+  getNews: tools.getNews,
+};
+
+module.exports = { model, backupModel, fallbackModel, tools, chatTools };
