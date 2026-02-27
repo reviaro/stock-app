@@ -130,7 +130,7 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
                     ) : (
                       <span className="text-foreground">{String(article.title || 'Untitled')}</span>
                     )}
-                    {article.publisher && (
+                    {Boolean(article.publisher) && (
                       <span className="text-muted-foreground ml-1">— {String(article.publisher)}</span>
                     )}
                   </li>
