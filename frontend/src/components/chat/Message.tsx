@@ -1,6 +1,7 @@
 import { motion, type Variants } from 'framer-motion'
 import type { UIMessage } from 'ai'
 import { isTextUIPart, isToolUIPart } from 'ai'
+import Markdown from 'react-markdown'
 import { ToolRenderer } from './ToolRenderer'
 
 interface MessageProps {
@@ -52,7 +53,13 @@ export function Message({ message }: MessageProps) {
       >
         {/* Text content — may be empty when the message contains only tool calls */}
         {textContent && (
-          <p className="whitespace-pre-wrap">{textContent}</p>
+          isUser ? (
+            <p className="whitespace-pre-wrap">{textContent}</p>
+          ) : (
+            <div className="prose prose-sm prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-strong:text-foreground">
+              <Markdown>{textContent}</Markdown>
+            </div>
+          )
         )}
 
         {/* Generative UI: render tool invocations as specialized components */}

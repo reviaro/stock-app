@@ -1,6 +1,6 @@
 const express = require('express');
 const { streamText, convertToModelMessages } = require('ai');
-const { model, tools } = require('../services/ai_service');
+const { model, backupModel, fallbackModel, tools } = require('../services/ai_service');
 
 const router = express.Router();
 
@@ -133,17 +133,38 @@ router.post('/chat', async (req, res) => {
     // that streamText accepts. The frontend sends UIMessages with a `parts` array.
     const modelMessages = await convertToModelMessages(messages, { tools });
 
-    // Primary: Gemini 3 Flash → Backup: Gemini 2.5 Flash
-    // TODO: Add working Groq fallback (see AI_AGENT_STATUS.md for details)
-    const result = streamText({
-      model,
-      system: dynamicPrompt,
-      messages: modelMessages,
-      tools,
-      maxSteps: 5,
-    });
+    // Model fallback chain: Gemini 3 Flash → Gemini 2.5 Flash → Groq Llama 3.3
+    const models = [model, backupModel, fallbackModel];
 
-    result.pipeUIMessageStreamToResponse(res);
+    for (const currentModel of models) {
+      try {
+        const result = streamText({
+          model: currentModel,
+          system: dynamicPrompt,
+          messages: modelMessages,
+          tools,
+          maxSteps: 5,
+        });
+
+        result.pipeUIMessageStreamToResponse(res);
+        await result.consumeStream();
+        return; // Success — stream completed
+      } catch (err) {
+        console.error(`[AI] Model ${currentModel.modelId || 'unknown'} failed:`, err.message);
+        if (res.headersSent) {
+          // Partial response already sent — can't retry with a different model
+          return;
+        }
+        // Headers not sent yet — try next model
+        continue;
+      }
+    }
+
+    // All models failed
+    if (!res.headersSent) {
+      res.status(503).json({ error: 'All AI models are currently unavailable. Please try again later.' });
+    }
+    return;
   } catch (err) {
     console.error('[AI Route] Error:', err.message);
     if (!res.headersSent) {

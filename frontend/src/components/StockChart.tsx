@@ -51,7 +51,7 @@ const SP500_SYMBOL = '^GSPC'
 /** Skeleton loader shown while chart data is fetching */
 function ChartSkeleton() {
   return (
-    <div className="w-full h-full flex flex-col gap-3 p-4 animate-pulse" style={{ minHeight: '400px' }}>
+    <div className="w-full h-full flex flex-col gap-3 p-4 animate-pulse">
       {/* Simulated price scale lines */}
       <div className="flex items-end gap-1 flex-1">
         {Array.from({ length: 40 }).map((_, i) => (
@@ -71,7 +71,7 @@ function ChartSkeleton() {
   )
 }
 
-export function StockChart({ symbol }: { symbol?: string }) {
+export function StockChart({ symbol, compact = false }: { symbol?: string; compact?: boolean }) {
   const storeTicker = useTickerStore((s) => s.selectedTicker)
   const selectedTicker = symbol || storeTicker
 
@@ -378,7 +378,7 @@ export function StockChart({ symbol }: { symbol?: string }) {
 
   // ---- Render ----
   return (
-    <div className="relative w-full h-full min-h-[400px] flex flex-col">
+    <div className={`relative w-full h-full flex flex-col ${compact ? 'min-h-[280px]' : 'min-h-[400px]'}`}>
       {/* Loading skeleton — overlays the chart container while data fetches */}
       <AnimatePresence>
         {histLoading && (
@@ -394,8 +394,8 @@ export function StockChart({ symbol }: { symbol?: string }) {
         )}
       </AnimatePresence>
 
-      {/* Indicator toggle controls */}
-      <div className="absolute top-2 right-2 z-10 flex gap-1 flex-wrap justify-end max-w-[60%]">
+      {/* Indicator toggle controls — hidden in compact (chat) mode */}
+      {!compact && <div className="absolute top-2 right-2 z-10 flex gap-1 flex-wrap justify-end max-w-[60%]">
         {/* Compare with S&P 500 toggle */}
         <button
           onClick={() => setIsComparisonMode((prev) => !prev)}
@@ -433,7 +433,7 @@ export function StockChart({ symbol }: { symbol?: string }) {
             {ind.label}
           </button>
         ))}
-      </div>
+      </div>}
 
       {/* Ticker label */}
       <div className="absolute top-2 left-2 z-10 text-sm font-semibold text-muted-foreground">
@@ -450,7 +450,7 @@ export function StockChart({ symbol }: { symbol?: string }) {
       <div
         ref={chartContainerRef}
         className="w-full h-full"
-        style={{ minHeight: '400px' }}
+        style={{ minHeight: compact ? '250px' : '400px' }}
       />
     </div>
   )

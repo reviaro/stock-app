@@ -1,11 +1,17 @@
 const { google } = require('@ai-sdk/google');
-const { groq } = require('@ai-sdk/groq');
+const { createOpenAI } = require('@ai-sdk/openai');
 const { tool } = require('ai');
 const { z } = require('zod');
 const pybridge = require('./pybridge');
 const model = google('gemini-3-flash-preview');
 const backupModel = google('gemini-2.5-flash');
-const fallbackModel = groq('llama-3.3-70b-versatile');
+
+// Use OpenAI-compatible adapter for Groq — @ai-sdk/groq sends null tool args with Llama models
+const groqViaOpenAI = createOpenAI({
+  baseURL: 'https://api.groq.com/openai/v1',
+  apiKey: process.env.GROQ_API_KEY,
+});
+const fallbackModel = groqViaOpenAI('llama-3.3-70b-versatile');
 
 const tools = {
   getStockInfo: tool({

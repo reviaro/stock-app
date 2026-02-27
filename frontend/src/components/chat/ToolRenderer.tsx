@@ -83,9 +83,7 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
             <div className="px-2 pt-1 pb-0 text-[10px] text-muted-foreground font-medium uppercase tracking-wide">
               {toolName === 'getTechnicalIndicators' ? 'Technical Analysis' : 'Stock Info'}
             </div>
-            <div className="h-[200px]">
-              <StockChart symbol={symbol} />
-            </div>
+            <StockChart symbol={symbol} compact />
           </div>
         )
 
@@ -114,6 +112,36 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
         }
         return null
 
+      case 'getNews': {
+        const articles = Array.isArray(output) ? output : (output && typeof output === 'object' && 'articles' in (output as Record<string, unknown>) ? (output as Record<string, unknown>).articles as unknown[] : null)
+        if (articles && articles.length > 0) {
+          return (
+            <div className="w-full rounded-md border border-border px-3 py-2 space-y-2">
+              <div className="text-[10px] text-muted-foreground font-medium uppercase tracking-wide">
+                Latest News {symbol ? `— ${symbol}` : ''}
+              </div>
+              <ul className="space-y-1.5">
+                {(articles as Record<string, unknown>[]).slice(0, 8).map((article, i) => (
+                  <li key={i} className="text-xs leading-snug">
+                    {article.link ? (
+                      <a href={String(article.link)} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                        {String(article.title || 'Untitled')}
+                      </a>
+                    ) : (
+                      <span className="text-foreground">{String(article.title || 'Untitled')}</span>
+                    )}
+                    {article.publisher && (
+                      <span className="text-muted-foreground ml-1">— {String(article.publisher)}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )
+        }
+        return null
+      }
+
       default:
         // Unknown tool — show raw output as JSON for debugging
         return (
@@ -139,6 +167,7 @@ function ToolSkeleton({ toolName }: { toolName: string }) {
       toolName === 'getStockInfo' ? 'Fetching stock data...' :
         toolName === 'getTechnicalIndicators' ? 'Calculating technical indicators...' :
           toolName === 'getMarketDirection' ? 'Checking market direction...' :
+          toolName === 'getNews' ? 'Fetching latest news...' :
             `Calling ${toolName}...`
 
   return (
