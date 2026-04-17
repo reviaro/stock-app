@@ -87,30 +87,39 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
           </div>
         )
 
-      case 'getMarketDirection':
-        // Market direction result is compact enough to render as structured text
+      case 'getMarketDirection': {
+        // Actual response shape: { status, ftd_detected, ftd_day?, ftd_gain_pct?, error? }
         if (output && typeof output === 'object') {
-          const direction = output as Record<string, unknown>
+          const d = output as Record<string, unknown>
+          const isBullish = d.status === 'success' && Boolean(d.ftd_detected)
+          const statusLabel = isBullish
+            ? 'Confirmed Uptrend'
+            : d.ftd_detected === false
+              ? 'No Follow-Through Day Detected'
+              : 'Data Unavailable'
+          const colorClass = isBullish ? 'text-green-400' : 'text-red-400'
           return (
             <div className="w-full rounded-md border border-border px-3 py-2 space-y-1">
               <div className="text-[10px] text-muted-foreground font-medium uppercase tracking-wide">
                 Market Direction
               </div>
-              {Boolean(direction.direction) && (
-                <div className={`text-sm font-semibold ${String(direction.direction).includes('Uptrend') ? 'text-green-400' :
-                  String(direction.direction).includes('Pressure') ? 'text-amber-400' :
-                    'text-red-400'
-                  }`}>
-                  {String(direction.direction)}
-                </div>
+              <div className={`text-sm font-semibold ${colorClass}`}>
+                {statusLabel}
+              </div>
+              {Boolean(d.ftd_day) && (
+                <p className="text-xs text-muted-foreground">
+                  Follow-Through Day: {String(d.ftd_day)}
+                  {d.ftd_gain_pct != null ? ` (+${Number(d.ftd_gain_pct).toFixed(2)}%)` : ''}
+                </p>
               )}
-              {Boolean(direction.summary) && (
-                <p className="text-xs text-muted-foreground">{String(direction.summary)}</p>
+              {d.status !== 'success' && Boolean(d.error) && (
+                <p className="text-xs text-destructive">{String(d.error)}</p>
               )}
             </div>
           )
         }
         return null
+      }
 
       case 'getNews': {
         const articles = Array.isArray(output) ? output : (output && typeof output === 'object' && 'articles' in (output as Record<string, unknown>) ? (output as Record<string, unknown>).articles as unknown[] : null)

@@ -90,6 +90,46 @@ router.get('/search/:query', async (req, res) => {
     res.json({ status: 'success', data: results });
 });
 
+// GET /api/watchlist/export/csv — export watchlist as CSV with live prices
+router.get('/export/csv', async (req, res) => {
+    try {
+        const watchlist = await db.getWatchlist();
+        const header = '"Symbol","Name","Price","Change %","52W High","52W Low","Volume","Added At"';
+
+        if (watchlist.length === 0) {
+            res.setHeader('Content-Type', 'text/csv');
+            res.setHeader('Content-Disposition', 'attachment; filename="watchlist.csv"');
+            return res.send(header + '\n');
+        }
+
+        const rows = await Promise.all(watchlist.map(async (item) => {
+            try {
+                const info = await pybridge.getStockInfo(item.symbol);
+                const d = info?.data ?? {};
+                return [
+                    item.symbol,
+                    d.name ?? '',
+                    d.price ?? '',
+                    d.changePercent ?? '',
+                    d.week52High ?? '',
+                    d.week52Low ?? '',
+                    d.volume ?? '',
+                    item.added_at ?? '',
+                ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',');
+            } catch {
+                return `"${item.symbol}","","","","","","","${item.added_at ?? ''}"`;
+            }
+        }));
+
+        const csv = [header, ...rows].join('\n');
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename="watchlist.csv"');
+        res.send(csv);
+    } catch (err) {
+        res.status(500).json({ status: 'error', error: err.message });
+    }
+});
+
 // GET /api/watchlist - List all saved stocks with live data
 router.get('/', async (req, res) => {
     try {

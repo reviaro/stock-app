@@ -1,6 +1,6 @@
 const express = require('express');
 const { streamText, convertToModelMessages } = require('ai');
-const { model, backupModel, fallbackModel, tools, chatTools } = require('../services/ai_service');
+const { model, backupModel, localModel, tools, chatTools } = require('../services/ai_service');
 
 const router = express.Router();
 
@@ -127,12 +127,34 @@ Guidelines:
 Be sharp, confident, and precise — like a managing director presenting to an investment committee. Use financial terminology naturally but define terms when speaking to non-experts. Be willing to say "this is a bad bet" or "the market is missing this" when the analysis supports it. Never be sycophantic or wishy-washy.`;
 }
 
+// DELETE /api/ai/history — clear persisted chat history
+router.delete('/history', async (req, res) => {
+  try {
+    const { sessionId = 'default' } = req.body ?? {};
+    await db.clearChatHistory(sessionId);
+    res.json({ status: 'success' });
+  } catch (err) {
+    res.status(500).json({ status: 'error', error: err.message });
+  }
+});
+
 router.post('/chat', async (req, res) => {
   try {
-    const { messages } = req.body;
+    const { messages, sessionId = 'default' } = req.body;
 
     if (!messages || !Array.isArray(messages)) {
       return res.status(400).json({ error: 'Invalid request: messages array is required.' });
+    }
+
+    // Persist the incoming user message
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg && lastMsg.role === 'user') {
+      const textContent = Array.isArray(lastMsg.parts)
+        ? lastMsg.parts.filter(p => p.type === 'text').map(p => p.text).join(' ')
+        : (typeof lastMsg.content === 'string' ? lastMsg.content : '');
+      if (textContent) {
+        db.saveChatMessage('user', textContent, sessionId).catch(() => {});
+      }
     }
 
     const dynamicPrompt = await getDynamicSystemPrompt();
@@ -144,35 +166,47 @@ router.post('/chat', async (req, res) => {
     const modelMessages = await convertToModelMessages(messages, { tools });
     console.log('[AI] chatTools (available to model):', Object.keys(chatTools));
 
-    // Model fallback chain: Gemini 3 Flash → Gemini 2.5 Flash → Groq Llama 3.3
-    const models = [model, backupModel, fallbackModel];
+    // Model fallback chain: Gemini Flash → Gemini 2.5 Flash → LM Studio (local Qwen)
+    const models = [model, backupModel, localModel];
+    const modelLabels = ['gemini-primary', 'gemini-backup', 'lmstudio-local'];
 
     for (let i = 0; i < models.length; i++) {
       const currentModel = models[i];
-      // Groq/Llama (last fallback) sends null tool args with Llama models even via OpenAI
-      // adapter — disable tools entirely so it generates clean text instead of broken charts.
-      const isGroqFallback = i === models.length - 1;
+      const label = modelLabels[i];
       try {
         const result = streamText({
           model: currentModel,
           system: dynamicPrompt,
           messages: modelMessages,
-          ...(isGroqFallback ? {} : { tools: chatTools, maxSteps: 5 }),
+          tools: chatTools,
+          maxSteps: 5,
           onStepFinish: ({ text, finishReason, toolCalls }) => {
-            console.log(`[AI] step finish — reason: ${finishReason}, textLen: ${text.length}, tools: ${toolCalls?.map(t => t.toolName).join(',') || 'none'}`);
+            console.log(`[AI][${label}] step finish — reason: ${finishReason}, textLen: ${text.length}, tools: ${toolCalls?.map(t => t.toolName).join(',') || 'none'}`);
+          },
+          onFinish: ({ text }) => {
+            if (text) {
+              db.saveChatMessage('assistant', text, sessionId).catch(() => {});
+            }
           },
         });
 
+        // pipeUIMessageStreamToResponse sends headers immediately.
+        // consumeStream() drives the lazy API call — 429/rate-limit errors surface here.
         result.pipeUIMessageStreamToResponse(res);
-        await result.consumeStream();
-        return; // Success — stream completed
-      } catch (err) {
-        console.error(`[AI] Model ${currentModel.modelId || 'unknown'} failed:`, err.message);
-        if (res.headersSent) {
-          // Partial response already sent — can't retry with a different model
+        try {
+          await result.consumeStream();
+        } catch (streamErr) {
+          // Stream error after headers already sent — can't retry or change status code.
+          console.error(`[AI][${label}] Stream error:`, streamErr.message);
           return;
         }
-        // Headers not sent yet — try next model
+        return; // Success
+      } catch (err) {
+        console.error(`[AI][${label}] Failed:`, err.message);
+        if (res.headersSent) {
+          return;
+        }
+        // Headers not sent yet — try next model in the chain
         continue;
       }
     }

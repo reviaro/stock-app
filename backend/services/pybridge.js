@@ -73,6 +73,14 @@ async function getNews(symbol) {
     return callPython({ action: 'news', symbol });
 }
 
+async function getEarningsDate(symbol) {
+    return callPython({ action: 'earnings', symbol });
+}
+
+async function getSectorPerformance() {
+    return callPython({ action: 'sectors' });
+}
+
 module.exports = {
     callPython,
     getStockInfo,
@@ -82,5 +90,7 @@ module.exports = {
     getMarketIndexes,
     updateUniverse,
     getMarketDirection,
-    getNews
+    getNews,
+    getEarningsDate,
+    getSectorPerformance,
 };

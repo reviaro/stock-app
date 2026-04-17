@@ -9,14 +9,21 @@ const stockRoutes = require('./routes/stocks');
 const canslimRoutes = require('./routes/canslim');
 const marketRoutes = require('./routes/market');
 const aiRoutes = require('./routes/ai');
+const historyRoutes = require('./routes/history');
+const portfolioRoutes = require('./routes/portfolio');
 const { initUniverseScheduler } = require('./services/universeCache');
+const { initSnapshotScheduler } = require('./services/snapshotScheduler');
 
 const PORT = 3002;
 
 const app = express();
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: ['http://localhost:5173', 'http://localhost:3002', 'http://127.0.0.1:5173', 'http://127.0.0.1:3002'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  credentials: false,
+}));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '..', 'frontend', 'dist')));
 
@@ -27,6 +34,8 @@ app.use('/api/stock/search', stockRoutes);
 app.use('/api/canslim', canslimRoutes);
 app.use('/api/market', marketRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/history', historyRoutes);
+app.use('/api/portfolio', portfolioRoutes);
 
 // Serve frontend for all other routes (SPA)
 app.get('*', (req, res) => {
@@ -40,6 +49,7 @@ async function start() {
         console.log('Database initialized');
         
         initUniverseScheduler(); // Fire-and-forget — don't await (don't block server start)
+        initSnapshotScheduler();
         
         app.listen(PORT, '0.0.0.0', () => {
             console.log(`Stock Dashboard running on http://localhost:${PORT}`);

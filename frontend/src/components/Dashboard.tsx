@@ -9,6 +9,9 @@ import { StockChart } from '@/components/StockChart'
 import { CANSLIMScorecard } from '@/components/CANSLIMScorecard'
 import { ChatPanel } from '@/components/chat/ChatPanel'
 import { Glossary } from '@/components/Glossary'
+import { HistoryPanel } from '@/components/HistoryPanel'
+import { PortfolioPanel } from '@/components/PortfolioPanel'
+import { SectorRotation } from '@/components/SectorRotation'
 
 /** Animation variants for bento grid cards */
 const cardVariants = {
@@ -152,10 +155,44 @@ export function Dashboard() {
             <CANSLIMScorecard />
           </motion.div>
 
+          {/* ── Portfolio Tracker ── */}
+          <motion.div
+            className="lg:col-span-2 min-h-[360px]"
+            custom={5}
+            initial="hidden"
+            animate="visible"
+            variants={cardVariants}
+          >
+            <PortfolioPanel />
+          </motion.div>
+
+          {/* ── Daily Price History ── */}
+          <motion.div
+            className="lg:col-span-4 min-h-[360px]"
+            custom={6}
+            initial="hidden"
+            animate="visible"
+            variants={cardVariants}
+            {...interactiveMotion}
+          >
+            <HistoryPanel />
+          </motion.div>
+
+          {/* ── Sector Rotation ── */}
+          <motion.div
+            className="lg:col-span-2 min-h-[360px]"
+            custom={7}
+            initial="hidden"
+            animate="visible"
+            variants={cardVariants}
+          >
+            <SectorRotation />
+          </motion.div>
+
           {/* ── AI Financial Analyst Chat ── */}
           <motion.div
             className="md:col-span-2 lg:col-span-6 min-h-[420px]"
-            custom={4}
+            custom={8}
             initial="hidden"
             animate="visible"
             variants={cardVariants}

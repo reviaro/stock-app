@@ -581,9 +581,10 @@ def get_market_indexes():
         
         return {'status': 'success', 'data': result}
     except Exception as e:
-        print(json.dumps({'status': 'error', 'error': str(e)}))
         demo = get_demo_indexes()
-        print(json.dumps(demo) if demo else '')
+        if demo:
+            return demo
+        return {'status': 'error', 'error': str(e)}
 
 def get_news(symbol):
     """Get latest news for a stock symbol"""
@@ -929,8 +930,78 @@ def get_technical_indicators(symbol):
             }
         }
     except Exception as e:
-        print(json.dumps({'status': 'error', 'error': str(e)}))
         return get_demo_technical(symbol)
+
+def get_earnings_calendar(symbol):
+    """Get upcoming earnings date for a stock"""
+    try:
+        stock = yf.Ticker(symbol)
+        cal = stock.calendar
+        if cal is None:
+            return {'status': 'success', 'data': {'earningsDate': None, 'symbol': symbol}}
+
+        earnings_date = None
+        if isinstance(cal, dict):
+            ed = cal.get('Earnings Date')
+            if ed is not None:
+                if hasattr(ed, '__iter__') and not isinstance(ed, str):
+                    ed_list = list(ed)
+                    if ed_list:
+                        earnings_date = str(ed_list[0])[:10]
+                else:
+                    earnings_date = str(ed)[:10]
+
+        return {'status': 'success', 'data': {'earningsDate': earnings_date, 'symbol': symbol}}
+    except Exception as e:
+        return {'status': 'error', 'error': str(e)}
+
+
+SECTOR_ETFS = {
+    'XLK': 'Technology',
+    'XLF': 'Financials',
+    'XLV': 'Health Care',
+    'XLE': 'Energy',
+    'XLI': 'Industrials',
+    'XLY': 'Cons. Discretionary',
+    'XLP': 'Cons. Staples',
+    'XLB': 'Materials',
+    'XLRE': 'Real Estate',
+    'XLU': 'Utilities',
+    'XLC': 'Comm. Services',
+}
+
+def get_sector_performance():
+    """Get 1M, 3M, 6M performance for each sector ETF"""
+    try:
+        results = []
+        for ticker, sector_name in SECTOR_ETFS.items():
+            try:
+                etf = yf.Ticker(ticker)
+                hist = etf.history(period='6mo')
+                if hist.empty or len(hist) < 5:
+                    continue
+                current = float(hist['Close'].iloc[-1])
+
+                def pct_change(days):
+                    idx = max(0, len(hist) - days)
+                    base = float(hist['Close'].iloc[idx])
+                    return round(((current - base) / base * 100), 2) if base else 0
+
+                results.append({
+                    'ticker': ticker,
+                    'name': sector_name,
+                    'change1M': pct_change(21),
+                    'change3M': pct_change(63),
+                    'change6M': pct_change(126),
+                    'price': round(current, 2),
+                })
+            except Exception:
+                continue
+        results.sort(key=lambda x: x['change1M'], reverse=True)
+        return {'status': 'success', 'data': results}
+    except Exception as e:
+        return {'status': 'error', 'error': str(e)}
+
 
 def get_demo_technical(symbol):
     """Return demo technical indicators"""
@@ -1065,6 +1136,10 @@ def main():
         result = {'status': 'success', 'message': 'Universe cache updated'}
     elif action == 'market_direction':
         result = detect_market_direction(request.get('index', '^IXIC'))
+    elif action == 'earnings':
+        result = get_earnings_calendar(symbol)
+    elif action == 'sectors':
+        result = get_sector_performance()
     else:
         result = {'status': 'error', 'error': f'Unknown action: {action}'}
     

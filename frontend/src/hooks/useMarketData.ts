@@ -135,3 +135,25 @@ export function useCANSLIMData(symbol: string) {
     enabled: Boolean(symbol),
   })
 }
+
+/**
+ * React Query hook to load the upcoming earnings date for a ticker.
+ * Caches for 24 hours since earnings dates rarely change once announced.
+ *
+ * @param symbol - Stock ticker symbol (e.g. "AAPL"), or null to disable
+ */
+export function useEarningsDate(symbol: string | null) {
+  return useQuery({
+    queryKey: ['earnings', symbol],
+    queryFn: async () => {
+      if (!symbol) return null
+      const res = await fetch(`/api/stock/${encodeURIComponent(symbol)}/earnings`)
+      const json = await res.json()
+      if (json.status !== 'success') throw new Error(json.error || 'Earnings fetch failed')
+      return json.data as { earningsDate: string | null; symbol: string }
+    },
+    enabled: Boolean(symbol),
+    staleTime: 24 * 60 * 60 * 1000,
+    retry: 1,
+  })
+}

@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useWatchlist, useAddToWatchlist, useRemoveFromWatchlist, searchStocks } from '@/hooks/useWatchlist'
+import { useEarningsDate } from '@/hooks/useMarketData'
+import { useTodaySnapshotMap } from '@/hooks/useHistory'
 import { useAnalysisWorker } from '@/hooks/useAnalysisWorker'
 import { useTickerStore } from '@/lib/store'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -21,6 +23,15 @@ function formatPrice(n: number | undefined): string {
   return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
+function SnapshotCell({ label, value }: { label: string; value?: { price: number; captured_at: string } }) {
+  return (
+    <div className="min-w-[62px] rounded-md border border-border/70 bg-background/70 px-2 py-1">
+      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="mt-0.5 font-mono text-[11px] text-foreground">{value ? `$${formatPrice(value.price)}` : '—'}</p>
+    </div>
+  )
+}
+
 interface WatchlistRowProps {
   entry: WatchlistEntry
   isSelected: boolean
@@ -28,11 +39,30 @@ interface WatchlistRowProps {
   onRemove: (symbol: string) => void
   isRemoving: boolean
   displayMode: SortField
+  snapshots?: Partial<Record<'openish' | 'midday' | 'closeish' | 'manual-open', { price: number; captured_at: string }>>
 }
 
-function WatchlistRow({ entry, isSelected, onSelect, onRemove, isRemoving, displayMode }: WatchlistRowProps) {
+function WatchlistRow({ entry, isSelected, onSelect, onRemove, isRemoving, displayMode, snapshots }: WatchlistRowProps) {
   const isPositive = (entry.changePercent ?? 0) >= 0
   const hasPriceData = entry.price !== undefined
+
+  // Earnings date badge
+  const { data: earningsData } = useEarningsDate(entry.symbol)
+  const earningsDate = earningsData?.earningsDate ?? null
+  const earningsDaysAway = earningsDate
+    ? Math.ceil((new Date(earningsDate).getTime() - Date.now()) / 86_400_000)
+    : null
+  const showEarningsBadge = earningsDaysAway != null && earningsDaysAway >= 0 && earningsDaysAway <= 30
+
+  // 52-week high proximity badge (within 5% is a CANSLIM buy signal)
+  const pctFrom52High = entry.week52High && entry.price
+    ? ((entry.price - entry.week52High) / entry.week52High) * 100
+    : null
+  const nearHigh = pctFrom52High != null && pctFrom52High >= -5
+
+  // Volume surge badge (1.5x average = institutional buying signal)
+  const isVolumeSurge = entry.volume != null && entry.avgVolume != null && entry.avgVolume > 0
+    && (entry.volume / entry.avgVolume) >= 1.5
 
   /** Render the right-side value based on active display mode */
   function renderValue() {
@@ -86,15 +116,41 @@ function WatchlistRow({ entry, isSelected, onSelect, onRemove, isRemoving, displ
       <button
         type="button"
         onClick={() => onSelect(entry.symbol)}
-        className="flex-1 flex items-center justify-between min-w-0"
+        className="flex-1 flex items-center justify-between min-w-0 gap-3"
         aria-pressed={isSelected}
         aria-label={`Select ${entry.symbol}`}
       >
-        <div>
-          <p className="font-semibold text-sm text-foreground">{entry.symbol}</p>
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <p className="font-semibold text-sm text-foreground">{entry.symbol}</p>
+            {showEarningsBadge && earningsDaysAway != null && (
+              <Badge variant="outline" className="text-[9px] py-0 px-1 text-amber-400 border-amber-400/40">
+                ER {earningsDaysAway === 0 ? 'today' : `in ${earningsDaysAway}d`}
+              </Badge>
+            )}
+          </div>
           <p className="text-xs text-muted-foreground truncate max-w-[120px]">
             {entry.name ?? entry.symbol}
           </p>
+          {(nearHigh || isVolumeSurge) && (
+            <div className="flex items-center gap-1 flex-wrap">
+              {nearHigh && pctFrom52High != null && (
+                <Badge variant="outline" className="text-[9px] py-0 px-1 text-green-400 border-green-400/40">
+                  {pctFrom52High >= 0 ? 'NEW HIGH' : `${pctFrom52High.toFixed(1)}% 52w`}
+                </Badge>
+              )}
+              {isVolumeSurge && entry.volume != null && entry.avgVolume != null && (
+                <Badge variant="outline" className="text-[9px] py-0 px-1 text-blue-400 border-blue-400/40">
+                  VOL {(entry.volume / entry.avgVolume).toFixed(1)}x
+                </Badge>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="hidden xl:flex items-center gap-1.5 shrink-0">
+          <SnapshotCell label="Morning" value={snapshots?.openish} />
+          <SnapshotCell label="Midday" value={snapshots?.midday} />
+          <SnapshotCell label="Close" value={snapshots?.closeish} />
         </div>
         <div className="text-right shrink-0 ml-2">
           {renderValue()}
@@ -133,7 +189,7 @@ function AddStockSearch({ onClose }: { onClose: () => void }) {
   const [isSearching, setIsSearching] = useState(false)
   const addMutation = useAddToWatchlist()
   const inputRef = useRef<HTMLInputElement>(null)
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   // Auto-focus on mount
   useEffect(() => {
@@ -268,6 +324,7 @@ function AddStockSearch({ onClose }: { onClose: () => void }) {
  */
 export function Watchlist() {
   const { data, isLoading, isError, error } = useWatchlist()
+  const { data: snapshotMap } = useTodaySnapshotMap()
   const selectedTicker = useTickerStore((s) => s.selectedTicker)
   const setSelectedTicker = useTickerStore((s) => s.setSelectedTicker)
   const removeMutation = useRemoveFromWatchlist()
@@ -364,6 +421,15 @@ export function Watchlist() {
         <div className="flex items-center justify-between gap-2">
           <CardTitle>Watchlist</CardTitle>
           <div className="flex items-center gap-1 flex-wrap justify-end">
+            {/* CSV export link */}
+            <a
+              href="/api/watchlist/export/csv"
+              download="watchlist.csv"
+              className="text-xs px-2 py-0.5 rounded-md border border-border text-muted-foreground hover:text-foreground hover:border-primary transition-colors"
+              title="Export watchlist to CSV"
+            >
+              CSV
+            </a>
             {/* Add stock button */}
             <button
               type="button"
@@ -443,6 +509,7 @@ export function Watchlist() {
                     onRemove={handleRemove}
                     isRemoving={removeMutation.isPending}
                     displayMode={SORT_OPTIONS[activeSortIdx].field}
+                    snapshots={snapshotMap?.get(entry.symbol)}
                   />
                 </motion.div>
               ))}
