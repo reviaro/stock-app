@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { usePortfolio, useAddPosition, useRemovePosition } from '@/hooks/usePortfolio'
+import { MemoDrawer } from '@/components/MemoDrawer'
+import { useMemosListQuery } from '@/hooks/useMemo'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 
@@ -20,17 +22,38 @@ function AddPositionForm({ onClose }: { onClose: () => void }) {
   const [shares, setShares] = useState('')
   const [buyPrice, setBuyPrice] = useState('')
   const [buyDate, setBuyDate] = useState('')
+  const [gateWarning, setGateWarning] = useState<string | null>(null)
+  const [gateAcknowledged, setGateAcknowledged] = useState(false)
+
+  async function fetchMemoQuick(sym: string) {
+    const res = await fetch(`/api/memos/${encodeURIComponent(sym)}`)
+    if (res.status === 404) return null
+    if (!res.ok) return null
+    const j = await res.json()
+    return j.data as { buy_below: number | null } | null
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!symbol || !shares || !buyPrice) return
+    const sym = symbol.toUpperCase()
+
+    if (!gateAcknowledged) {
+      const memo = await fetchMemoQuick(sym)
+      const price = Number(buyPrice)
+      if (!memo) {
+        setGateWarning(`No memo for ${sym}. Add one or acknowledge to continue.`)
+        return
+      }
+      if (memo.buy_below != null && price > memo.buy_below) {
+        const pct = ((price - memo.buy_below) / memo.buy_below) * 100
+        setGateWarning(`${sym} at $${price.toFixed(2)} is ${pct.toFixed(1)}% above your buy_below of $${memo.buy_below.toFixed(2)}.`)
+        return
+      }
+    }
+
     try {
-      await addMutation.mutateAsync({
-        symbol: symbol.toUpperCase(),
-        shares: Number(shares),
-        buy_price: Number(buyPrice),
-        buy_date: buyDate || undefined,
-      })
+      await addMutation.mutateAsync({ symbol: sym, shares: Number(shares), buy_price: Number(buyPrice), buy_date: buyDate || undefined })
       onClose()
     } catch { /* error shown via mutation.isError */ }
   }
@@ -70,10 +93,20 @@ function AddPositionForm({ onClose }: { onClose: () => void }) {
             className="col-span-2 text-xs px-2 py-1.5 rounded-md bg-secondary border border-border focus:border-primary focus:outline-none text-muted-foreground"
           />
         </div>
+        {gateWarning && (
+          <div className="text-xs p-2 rounded border border-amber-500/50 bg-amber-500/10 space-y-1 mt-2">
+            <p>{gateWarning}</p>
+            <button type="button"
+              onClick={() => { setGateAcknowledged(true); setGateWarning(null) }}
+              className="text-xs underline text-amber-500 hover:text-amber-400">
+              Acknowledge and continue
+            </button>
+          </div>
+        )}
         {addMutation.isError && (
           <p className="text-xs text-destructive">{addMutation.error instanceof Error ? addMutation.error.message : 'Error'}</p>
         )}
-        <div className="flex gap-2">
+        <div className="flex gap-2 mt-2">
           <button type="submit" disabled={addMutation.isPending}
             className="text-xs px-3 py-1 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
             {addMutation.isPending ? 'Adding…' : 'Add'}
@@ -92,6 +125,9 @@ export function PortfolioPanel() {
   const { data, isLoading, isError } = usePortfolio()
   const removeMutation = useRemovePosition()
   const [showAdd, setShowAdd] = useState(false)
+  const [memoSymbol, setMemoSymbol] = useState<string | null>(null)
+  const { data: memos } = useMemosListQuery()
+  const memoMap = new Map((memos ?? []).map(m => [m.symbol, m]))
 
   const totalValue = data?.reduce((sum, p) => sum + (p.currentValue ?? p.costBasis), 0) ?? 0
   const totalCost = data?.reduce((sum, p) => sum + p.costBasis, 0) ?? 0
@@ -177,21 +213,35 @@ export function PortfolioPanel() {
                   <span className="text-[10px] text-muted-foreground">Cost ${fmt(pos.costBasis)}</span>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => removeMutation.mutate(pos.symbol)}
-                disabled={removeMutation.isPending}
-                className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive p-1 rounded shrink-0"
-                aria-label={`Remove ${pos.symbol} from portfolio`}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); setMemoSymbol(pos.symbol) }}
+                  title={memoMap.has(pos.symbol) ? 'Edit memo' : 'Add memo'}
+                  className={[
+                    'text-[10px] px-1.5 py-0.5 rounded border shrink-0',
+                    memoMap.has(pos.symbol) ? 'border-primary text-primary' : 'border-border text-muted-foreground',
+                  ].join(' ')}
+                >
+                  📝
+                </button>
+                <button
+                  type="button"
+                  onClick={() => removeMutation.mutate(pos.symbol)}
+                  disabled={removeMutation.isPending}
+                  className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive p-1 rounded shrink-0"
+                  aria-label={`Remove ${pos.symbol} from portfolio`}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
             </motion.div>
           )
         })}
       </CardContent>
+      <MemoDrawer symbol={memoSymbol} open={!!memoSymbol} onOpenChange={(o) => { if (!o) setMemoSymbol(null) }} />
     </Card>
   )
 }
