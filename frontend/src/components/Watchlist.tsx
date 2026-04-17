@@ -2,14 +2,14 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { MemoDrawer } from '@/components/MemoDrawer'
 import { useMemosListQuery } from '@/hooks/useMemo'
-import { useWatchlist, useAddToWatchlist, useRemoveFromWatchlist, searchStocks } from '@/hooks/useWatchlist'
+import { useWatchlist, useAddToWatchlist, useRemoveFromWatchlist, useSetWatchlistBucket, searchStocks } from '@/hooks/useWatchlist'
 import { useEarningsDate } from '@/hooks/useMarketData'
 import { useTodaySnapshotMap } from '@/hooks/useHistory'
 import { useAnalysisWorker } from '@/hooks/useAnalysisWorker'
 import { useTickerStore } from '@/lib/store'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import type { WatchlistEntry, StockSearchResult } from '@/types'
+import { BUCKETS, BUCKET_LABELS, type Bucket, type WatchlistEntry, type StockSearchResult } from '@/types'
 import type { SortCriteria, SortField, SortDirection } from '../workers/analysis.worker.ts'
 
 /** Format a change percent with sign (e.g. +0.47%) */
@@ -40,6 +40,7 @@ interface WatchlistRowProps {
   onSelect: (symbol: string) => void
   onRemove: (symbol: string) => void
   onMemo: (symbol: string) => void
+  onBucketChange: (symbol: string, bucket: Bucket) => void
   hasMemo: boolean
   isMemoStale: boolean
   isRemoving: boolean
@@ -47,7 +48,7 @@ interface WatchlistRowProps {
   snapshots?: Partial<Record<'openish' | 'midday' | 'closeish' | 'manual-open', { price: number; captured_at: string }>>
 }
 
-function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, hasMemo, isMemoStale, isRemoving, displayMode, snapshots }: WatchlistRowProps) {
+function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketChange, hasMemo, isMemoStale, isRemoving, displayMode, snapshots }: WatchlistRowProps) {
   const isPositive = (entry.changePercent ?? 0) >= 0
   const hasPriceData = entry.price !== undefined
 
@@ -161,6 +162,16 @@ function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, hasMemo, 
           {renderValue()}
         </div>
       </button>
+
+      <select
+        value={entry.bucket}
+        onChange={(e) => onBucketChange(entry.symbol, e.target.value as Bucket)}
+        onClick={(e) => e.stopPropagation()}
+        className="text-[10px] px-1 py-0.5 rounded bg-secondary border border-border shrink-0 ml-1"
+      >
+        {BUCKETS.map(b => <option key={b} value={b}>{BUCKET_LABELS[b]}</option>)}
+      </select>
+
       <button
         type="button"
         onClick={(e) => { e.stopPropagation(); onMemo(entry.symbol) }}
@@ -354,6 +365,15 @@ export function Watchlist() {
   const selectedTicker = useTickerStore((s) => s.selectedTicker)
   const setSelectedTicker = useTickerStore((s) => s.setSelectedTicker)
   const removeMutation = useRemoveFromWatchlist()
+  const setBucket = useSetWatchlistBucket()
+
+  const [bucketFilter, setBucketFilter] = useState<Bucket | 'all'>('all')
+
+  const bucketCounts: Record<string, number> = { all: data?.length ?? 0 }
+  for (const b of BUCKETS) bucketCounts[b] = 0
+  for (const row of data ?? []) bucketCounts[row.bucket] = (bucketCounts[row.bucket] ?? 0) + 1
+
+  const filteredData = bucketFilter === 'all' ? (data ?? []) : (data ?? []).filter(r => r.bucket === bucketFilter)
 
   const { workerApi } = useAnalysisWorker()
   const [sortedData, setSortedData] = useState<WatchlistEntry[]>([])
@@ -426,12 +446,13 @@ export function Watchlist() {
   )
 
   useEffect(() => {
-    if (!data) {
+    if (!filteredData.length) {
       setSortedData([])
-      return
+      // Don't return here if data exists but filtered is empty, 
+      // otherwise sortedData won't clear when switching buckets
     }
-    void runSort(data, activeSortIdx)
-  }, [data, activeSortIdx, runSort])
+    void runSort(filteredData, activeSortIdx)
+  }, [filteredData, activeSortIdx, runSort])
 
   const handleRemove = async (symbol: string) => {
     try {
@@ -493,6 +514,24 @@ export function Watchlist() {
         </div>
       </CardHeader>
       <CardContent className="px-3 flex-1 overflow-y-auto min-h-0 pb-4">
+        <div className="flex flex-wrap gap-1 mb-3">
+          {(['all', ...BUCKETS] as const).map(b => {
+            const count = bucketCounts[b] ?? 0
+            const active = bucketFilter === b
+            return (
+              <button key={b}
+                onClick={() => setBucketFilter(b)}
+                className={[
+                  'text-[10px] px-2 py-0.5 rounded-full border transition-colors',
+                  active ? 'bg-primary text-primary-foreground border-primary' : 'border-border text-muted-foreground hover:border-primary',
+                ].join(' ')}
+              >
+                {b === 'all' ? 'All' : BUCKET_LABELS[b as Bucket]} ({count})
+              </button>
+            )
+          })}
+        </div>
+
         {/* Add stock search bar */}
         <AnimatePresence>
           {showAddSearch && (
@@ -534,6 +573,7 @@ export function Watchlist() {
                     onSelect={setSelectedTicker}
                     onRemove={handleRemove}
                     onMemo={setMemoSymbol}
+                    onBucketChange={(symbol, bucket) => setBucket.mutate({ symbol, bucket })}
                     hasMemo={memoMap.has(entry.symbol)}
                     isMemoStale={isStale(memoMap.get(entry.symbol))}
                     isRemoving={removeMutation.isPending}
