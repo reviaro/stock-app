@@ -74,9 +74,19 @@ router.post('/', async (req, res) => {
 router.delete('/:symbol', async (req, res) => {
     try {
         const result = await db.removeFromPortfolio(req.params.symbol);
+        try {
+            if (await db.isInWatchlist(req.params.symbol.toUpperCase())) {
+                await db.setWatchlistBucket(req.params.symbol.toUpperCase(), 'unsorted');
+            }
+        } catch { /* non-fatal */ }
         res.json({ status: 'success', data: result });
     } catch (err) {
         res.status(500).json({ status: 'error', error: err.message });
+    }
+});
+
+module.exports = router;
+', error: err.message });
     }
 });
 
