@@ -2,7 +2,7 @@ const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
 
-const DB_PATH = path.join(__dirname, '..', 'database', 'stocks.db');
+const DB_PATH = process.env.DB_PATH_OVERRIDE || path.join(__dirname, '..', 'database', 'stocks.db');
 
 function getDb() {
     const dbDir = path.dirname(DB_PATH);
@@ -88,6 +88,23 @@ function initDb() {
                     session_id TEXT NOT NULL DEFAULT 'default',
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            `);
+
+            db.run(`
+                CREATE TABLE IF NOT EXISTS stock_memos (
+                    symbol TEXT PRIMARY KEY,
+                    thesis TEXT,
+                    fair_value_low REAL,
+                    fair_value_high REAL,
+                    buy_below REAL,
+                    sell_rule TEXT,
+                    invalidation TEXT,
+                    risks TEXT,
+                    conviction INTEGER,
+                    last_reviewed_at DATETIME,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             `);
@@ -339,6 +356,68 @@ function clearChatHistory(sessionId = 'default') {
     });
 }
 
+function upsertMemo(symbol, fields) {
+    const cols = ['thesis','fair_value_low','fair_value_high','buy_below','sell_rule','invalidation','risks','conviction'];
+    const values = cols.map(c => fields[c] ?? null);
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            `INSERT INTO stock_memos (symbol, ${cols.join(',')}, updated_at)
+             VALUES (?, ${cols.map(() => '?').join(',')}, CURRENT_TIMESTAMP)
+             ON CONFLICT(symbol) DO UPDATE SET
+               thesis=excluded.thesis,
+               fair_value_low=excluded.fair_value_low,
+               fair_value_high=excluded.fair_value_high,
+               buy_below=excluded.buy_below,
+               sell_rule=excluded.sell_rule,
+               invalidation=excluded.invalidation,
+               risks=excluded.risks,
+               conviction=excluded.conviction,
+               updated_at=CURRENT_TIMESTAMP`,
+            [symbol.toUpperCase(), ...values],
+            function(err) { sqlite.close(); err ? reject(err) : resolve({ symbol: symbol.toUpperCase() }); }
+        );
+    });
+}
+
+function getMemo(symbol) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.get('SELECT * FROM stock_memos WHERE symbol = ?', [symbol.toUpperCase()], (err, row) => {
+            sqlite.close(); err ? reject(err) : resolve(row || null);
+        });
+    });
+}
+
+function listMemos() {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.all('SELECT * FROM stock_memos ORDER BY updated_at DESC', [], (err, rows) => {
+            sqlite.close(); err ? reject(err) : resolve(rows || []);
+        });
+    });
+}
+
+function markMemoReviewed(symbol) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            `UPDATE stock_memos SET last_reviewed_at = CURRENT_TIMESTAMP WHERE symbol = ?`,
+            [symbol.toUpperCase()],
+            function(err) { sqlite.close(); err ? reject(err) : resolve({ changed: this.changes }); }
+        );
+    });
+}
+
+function deleteMemo(symbol) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run('DELETE FROM stock_memos WHERE symbol = ?', [symbol.toUpperCase()], function(err) {
+            sqlite.close(); err ? reject(err) : resolve({ deleted: this.changes });
+        });
+    });
+}
+
 module.exports = {
     getDb,
     initDb,
@@ -355,4 +434,9 @@ module.exports = {
     saveChatMessage,
     getChatHistory,
     clearChatHistory,
+    upsertMemo,
+    getMemo,
+    listMemos,
+    markMemoReviewed,
+    deleteMemo,
 };
