@@ -2,6 +2,8 @@ const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
 
+const VALID_BUCKETS = ['compounders', 'buy_soon', 'expensive', 'speculative', 'owned', 'unsorted'];
+
 const DB_PATH = process.env.DB_PATH_OVERRIDE || path.join(__dirname, '..', 'database', 'stocks.db');
 
 function getDb() {
@@ -30,6 +32,14 @@ function initDb() {
                     notes TEXT
                 )
             `);
+
+            db.all("PRAGMA table_info(watchlist)", (err, cols) => {
+                if (err) return;
+                const hasBucket = (cols || []).some(c => c.name === 'bucket');
+                if (!hasBucket) {
+                    db.run("ALTER TABLE watchlist ADD COLUMN bucket TEXT NOT NULL DEFAULT 'unsorted'");
+                }
+            });
 
             db.run(`
                 CREATE TABLE IF NOT EXISTS universe_cache (
@@ -137,14 +147,17 @@ function getWatchlist() {
     });
 }
 
-function addToWatchlist(symbol, notes = '') {
+function addToWatchlist(symbol, notes = '', bucket = 'unsorted') {
+    if (!VALID_BUCKETS.includes(bucket)) {
+        return Promise.reject(new Error(`invalid bucket: ${bucket}`));
+    }
     return new Promise((resolve, reject) => {
-        const db = getDb();
-        db.run(
-            'INSERT OR IGNORE INTO watchlist (symbol, notes) VALUES (?, ?)',
-            [symbol.toUpperCase(), notes],
+        const sqlite = getDb();
+        sqlite.run(
+            'INSERT OR IGNORE INTO watchlist (symbol, notes, bucket) VALUES (?, ?, ?)',
+            [symbol.toUpperCase(), notes, bucket],
             function(err) {
-                db.close();
+                sqlite.close();
                 if (err) reject(err);
                 else resolve({ id: this.lastID, symbol: symbol.toUpperCase() });
             }
@@ -418,13 +431,29 @@ function deleteMemo(symbol) {
     });
 }
 
+function setWatchlistBucket(symbol, bucket) {
+    if (!VALID_BUCKETS.includes(bucket)) {
+        return Promise.reject(new Error(`invalid bucket: ${bucket}`));
+    }
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            'UPDATE watchlist SET bucket = ? WHERE symbol = ?',
+            [bucket, symbol.toUpperCase()],
+            function(err) { sqlite.close(); err ? reject(err) : resolve({ changed: this.changes }); }
+        );
+    });
+}
+
 module.exports = {
+    VALID_BUCKETS,
     getDb,
     initDb,
     getWatchlist,
     addToWatchlist,
     removeFromWatchlist,
     isInWatchlist,
+    setWatchlistBucket,
     upsertStockSnapshot,
     getStockHistory,
     getLatestSnapshotsForWatchlist,
