@@ -1,6 +1,7 @@
 const express = require('express');
 const { streamText, convertToModelMessages } = require('ai');
-const { model, backupModel, localModel, tools, chatTools } = require('../services/ai_service');
+const { model, backupModel, localModel, tools, chatTools, memoPrompts } = require('../services/ai_service');
+const pybridgeAI = require('../services/pybridge');
 
 const router = express.Router();
 
@@ -221,6 +222,57 @@ router.post('/chat', async (req, res) => {
     if (!res.headersSent) {
       res.status(500).json({ error: 'AI service error. Please try again.' });
     }
+  }
+});
+
+// POST /api/ai/memo-draft — generate a memo draft for a symbol
+router.post('/memo-draft', async (req, res) => {
+  const symbol = (req.body?.symbol || '').toUpperCase();
+  if (!symbol) return res.status(400).json({ status: 'error', error: 'symbol required' });
+
+  try {
+    const [info, tech, news] = await Promise.all([
+      pybridgeAI.getStockInfo(symbol).catch(() => null),
+      pybridgeAI.getTechnicalIndicators(symbol).catch(() => null),
+      pybridgeAI.getNews(symbol).catch(() => null),
+    ]);
+
+    const userPrompt = `Symbol: ${symbol}\n\nInfo:\n${JSON.stringify(info, null, 2)}\n\nTechnicals:\n${JSON.stringify(tech, null, 2)}\n\nNews:\n${JSON.stringify(news, null, 2)}`;
+
+    const result = await streamText({
+      model,
+      system: memoPrompts.draftSystem,
+      prompt: userPrompt,
+    });
+    result.pipeUIMessageStreamToResponse(res);
+  } catch (err) {
+    res.status(500).json({ status: 'error', error: err.message });
+  }
+});
+
+// POST /api/ai/pressure-test — write a bear case against the saved memo
+router.post('/pressure-test', async (req, res) => {
+  const symbol = (req.body?.symbol || '').toUpperCase();
+  if (!symbol) return res.status(400).json({ status: 'error', error: 'symbol required' });
+
+  try {
+    const [memo, info, news] = await Promise.all([
+      db.getMemo(symbol),
+      pybridgeAI.getStockInfo(symbol).catch(() => null),
+      pybridgeAI.getNews(symbol).catch(() => null),
+    ]);
+    if (!memo) return res.status(404).json({ status: 'error', error: 'no memo to pressure-test' });
+
+    const userPrompt = `Current memo:\n${JSON.stringify(memo, null, 2)}\n\nLatest info:\n${JSON.stringify(info, null, 2)}\n\nNews:\n${JSON.stringify(news, null, 2)}`;
+
+    const result = await streamText({
+      model,
+      system: memoPrompts.pressureTestSystem,
+      prompt: userPrompt,
+    });
+    result.pipeUIMessageStreamToResponse(res);
+  } catch (err) {
+    res.status(500).json({ status: 'error', error: err.message });
   }
 });
 

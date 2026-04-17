@@ -3,6 +3,7 @@ const { createOpenAI } = require('@ai-sdk/openai');
 const { tool } = require('ai');
 const { z } = require('zod');
 const pybridge = require('./pybridge');
+const dbModule = require('../database/db');
 
 const model = google('gemini-2.5-flash-preview-04-17');
 const backupModel = google('gemini-2.5-flash');
@@ -77,6 +78,20 @@ const tools = {
       return await pybridge.getNews(ticker);
     },
   }),
+
+  getMemo: tool({
+    description:
+      'Fetches the user\'s saved research memo for a stock, including their thesis, fair-value band, buy-below price, sell rule, invalidation criteria, risks, and conviction level. Returns null if no memo exists.',
+    parameters: z.object({
+      symbol: z.string().describe('The stock ticker symbol (e.g. AAPL, MSFT)'),
+    }),
+    execute: async (args) => {
+      const symbol = args?.symbol;
+      if (!symbol || typeof symbol !== 'string') return { error: 'Symbol required' };
+      const memo = await dbModule.getMemo(symbol.toUpperCase());
+      return memo ? { data: memo } : { data: null };
+    },
+  }),
 };
 
 // chatTools is what the AI is allowed to call during chat.
@@ -86,6 +101,24 @@ const chatTools = {
   getTechnicalIndicators: tools.getTechnicalIndicators,
   getMarketDirection: tools.getMarketDirection,
   getNews: tools.getNews,
+  getMemo: tools.getMemo,
 };
 
-module.exports = { model, backupModel, localModel, tools, chatTools };
+const memoPrompts = {
+  draftSystem: `You are a disciplined value investor helping the user write a research memo for a single stock. You will be given the stock's basic info, technicals, and recent news. Respond with a JSON object matching this shape exactly (no prose, no code fences):
+{
+  "thesis": "<2–4 sentence business thesis>",
+  "fair_value_low": <number|null>,
+  "fair_value_high": <number|null>,
+  "buy_below": <number|null>,
+  "sell_rule": "<string>",
+  "invalidation": "<string>",
+  "risks": "<bulleted markdown list of top 3–5 risks>",
+  "conviction": <1–5>
+}
+Fields you cannot justify from the data MUST be null (numbers) or empty string (strings). Do not invent numbers.`,
+
+  pressureTestSystem: `You are a skeptical bear who will pressure-test the user's investment thesis. You will receive the user's current memo and the latest stock info/news. Write a focused bear case with 3–5 specific, falsifiable risks that would invalidate the thesis, and 2–3 conditions under which you would become bullish. Output as markdown only. Do not hedge with "on the other hand".`,
+};
+
+module.exports = { model, backupModel, localModel, tools, chatTools, memoPrompts };
