@@ -159,7 +159,7 @@ router.get('/', async (req, res) => {
 // POST /api/watchlist - Add stock to watchlist
 router.post('/', async (req, res) => {
     try {
-        const { symbol, notes } = req.body;
+        const { symbol, notes, bucket } = req.body;
 
         if (!symbol) {
             return res.status(400).json({ status: 'error', error: 'Symbol is required' });
@@ -183,7 +183,7 @@ router.post('/', async (req, res) => {
             return res.status(404).json({ status: 'error', error: `Stock symbol "${ticker}" not found` });
         }
 
-        const added = await db.addToWatchlist(ticker, notes || '');
+        const added = await db.addToWatchlist(ticker, notes || '', bucket || 'unsorted');
         res.json({ status: 'success', data: added });
     } catch (err) {
         if (err.message && err.message.includes('UNIQUE constraint')) {
@@ -207,6 +207,19 @@ router.delete('/:symbol', async (req, res) => {
         res.json({ status: 'success', data: result });
     } catch (err) {
         res.status(500).json({ status: 'error', error: err.message });
+    }
+});
+
+router.patch('/:symbol', async (req, res) => {
+    try {
+        const { bucket } = req.body;
+        if (!bucket) return res.status(400).json({ status: 'error', error: 'bucket required' });
+        const result = await db.setWatchlistBucket(req.params.symbol, bucket);
+        if (result.changed === 0) return res.status(404).json({ status: 'error', error: 'not found' });
+        res.json({ status: 'success', data: result });
+    } catch (err) {
+        const code = /invalid bucket/.test(err.message) ? 400 : 500;
+        res.status(code).json({ status: 'error', error: err.message });
     }
 });
 
