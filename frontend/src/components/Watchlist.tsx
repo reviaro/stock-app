@@ -1,5 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { MemoDrawer } from '@/components/MemoDrawer'
+import { useMemosListQuery } from '@/hooks/useMemo'
 import { useWatchlist, useAddToWatchlist, useRemoveFromWatchlist, searchStocks } from '@/hooks/useWatchlist'
 import { useEarningsDate } from '@/hooks/useMarketData'
 import { useTodaySnapshotMap } from '@/hooks/useHistory'
@@ -37,12 +39,15 @@ interface WatchlistRowProps {
   isSelected: boolean
   onSelect: (symbol: string) => void
   onRemove: (symbol: string) => void
+  onMemo: (symbol: string) => void
+  hasMemo: boolean
+  isMemoStale: boolean
   isRemoving: boolean
   displayMode: SortField
   snapshots?: Partial<Record<'openish' | 'midday' | 'closeish' | 'manual-open', { price: number; captured_at: string }>>
 }
 
-function WatchlistRow({ entry, isSelected, onSelect, onRemove, isRemoving, displayMode, snapshots }: WatchlistRowProps) {
+function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, hasMemo, isMemoStale, isRemoving, displayMode, snapshots }: WatchlistRowProps) {
   const isPositive = (entry.changePercent ?? 0) >= 0
   const hasPriceData = entry.price !== undefined
 
@@ -155,6 +160,18 @@ function WatchlistRow({ entry, isSelected, onSelect, onRemove, isRemoving, displ
         <div className="text-right shrink-0 ml-2">
           {renderValue()}
         </div>
+      </button>
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onMemo(entry.symbol) }}
+        title={hasMemo ? 'Edit memo' : 'Add memo'}
+        className={[
+          'text-[10px] px-1.5 py-0.5 rounded border shrink-0 opacity-0 group-hover:opacity-100 transition-opacity ml-1',
+          hasMemo ? 'border-primary text-primary' : 'border-border text-muted-foreground',
+          isMemoStale ? 'ring-1 ring-amber-500/60' : '',
+        ].join(' ')}
+      >
+        📝
       </button>
       {/* Delete button — visible on hover */}
       <button
@@ -323,6 +340,15 @@ function AddStockSearch({ onClose }: { onClose: () => void }) {
  * Includes add-stock search and per-row delete functionality.
  */
 export function Watchlist() {
+  const [memoSymbol, setMemoSymbol] = useState<string | null>(null)
+  const { data: memos } = useMemosListQuery()
+  const memoMap = new Map((memos ?? []).map(m => [m.symbol, m]))
+
+  function isStale(m: { last_reviewed_at: string | null } | undefined) {
+    if (!m || !m.last_reviewed_at) return false
+    return Date.now() - new Date(m.last_reviewed_at).getTime() > 30 * 86400000
+  }
+
   const { data, isLoading, isError, error } = useWatchlist()
   const { data: snapshotMap } = useTodaySnapshotMap()
   const selectedTicker = useTickerStore((s) => s.selectedTicker)
@@ -507,6 +533,9 @@ export function Watchlist() {
                     isSelected={selectedTicker === entry.symbol}
                     onSelect={setSelectedTicker}
                     onRemove={handleRemove}
+                    onMemo={setMemoSymbol}
+                    hasMemo={memoMap.has(entry.symbol)}
+                    isMemoStale={isStale(memoMap.get(entry.symbol))}
                     isRemoving={removeMutation.isPending}
                     displayMode={SORT_OPTIONS[activeSortIdx].field}
                     snapshots={snapshotMap?.get(entry.symbol)}
@@ -517,6 +546,7 @@ export function Watchlist() {
           </div>
         )}
       </CardContent>
+      <MemoDrawer symbol={memoSymbol} open={!!memoSymbol} onOpenChange={(o) => { if (!o) setMemoSymbol(null) }} />
     </Card>
   )
 }
