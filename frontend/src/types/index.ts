@@ -57,6 +57,18 @@ export interface Stock {
   debtToEquity: number
 }
 
+export const BUCKETS = ['compounders', 'buy_soon', 'expensive', 'speculative', 'owned', 'unsorted'] as const
+export type Bucket = typeof BUCKETS[number]
+
+export const BUCKET_LABELS: Record<Bucket, string> = {
+  compounders: 'Compounders',
+  buy_soon: 'Buy-Soon',
+  expensive: 'Expensive',
+  speculative: 'Speculative',
+  owned: 'Owned',
+  unsorted: 'Unsorted',
+}
+
 /**
  * A saved watchlist row as returned by GET /api/watchlist.
  * The backend merges DB row (id, symbol, added_at, notes) with live stock data,
@@ -68,6 +80,7 @@ export interface WatchlistEntry extends Partial<Stock> {
   name: string
   added_at?: string
   notes?: string
+  bucket: Bucket
 }
 
 /**

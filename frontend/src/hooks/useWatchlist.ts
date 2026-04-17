@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { ApiResponse, WatchlistEntry, StockSearchResult } from '@/types'
+import type { ApiResponse, WatchlistEntry, StockSearchResult, Bucket } from '@/types'
 
 /**
  * Fetches the watchlist from /api/watchlist.
@@ -84,6 +84,25 @@ export function useRemoveFromWatchlist() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['watchlist'] })
+    },
+  })
+}
+
+async function setBucket(symbol: string, bucket: Bucket): Promise<void> {
+  const res = await fetch(`/api/watchlist/${encodeURIComponent(symbol)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bucket }),
+  })
+  if (!res.ok) throw new Error('Failed to set bucket')
+}
+
+export function useSetWatchlistBucket() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ symbol, bucket }: { symbol: string; bucket: Bucket }) => setBucket(symbol, bucket),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['watchlist'] })
     },
   })
 }
