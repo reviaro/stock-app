@@ -11,6 +11,7 @@ const marketRoutes = require('./routes/market');
 const aiRoutes = require('./routes/ai');
 const historyRoutes = require('./routes/history');
 const portfolioRoutes = require('./routes/portfolio');
+const memosRoutes = require('./routes/memos');
 const { initUniverseScheduler } = require('./services/universeCache');
 const { initSnapshotScheduler } = require('./services/snapshotScheduler');
 
@@ -36,6 +37,7 @@ app.use('/api/market', marketRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/history', historyRoutes);
 app.use('/api/portfolio', portfolioRoutes);
+app.use('/api/memos', memosRoutes);
 
 // Serve frontend for all other routes (SPA)
 app.get('*', (req, res) => {
