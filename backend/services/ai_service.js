@@ -4,6 +4,15 @@ const { tool } = require('ai');
 const { z } = require('zod');
 const pybridge = require('./pybridge');
 const dbModule = require('../database/db');
+const { buildSummary } = require('./portfolio_ledger');
+const { computeBreaches } = require('./risk_engine');
+const {
+    computeLotsForSymbol,
+    computeTaxPreview,
+    computeHoldings,
+    computeCashBalance,
+    computeRealizedPnl,
+} = require('./simulator_ledger');
 
 const model = google('gemini-2.5-flash-preview-04-17');
 const backupModel = google('gemini-2.5-flash');
@@ -92,6 +101,233 @@ const tools = {
       return memo ? { data: memo } : { data: null };
     },
   }),
+
+  getQualityMetrics: tool({
+    description:
+      'Fetches Buffett-style business quality metrics for a stock, including ROIC, FCF margin, debt/equity, interest coverage, earnings consistency, gross margin stability, revenue CAGR, and a composite quality score.',
+    parameters: z.object({
+      symbol: z.string().describe('The stock ticker symbol (e.g. AAPL, MSFT)'),
+    }),
+    execute: async (args) => {
+      const symbol = args?.symbol;
+      if (!symbol || typeof symbol !== 'string') return { error: 'Symbol required' };
+      return await pybridge.getQualityMetrics(symbol.toUpperCase());
+    },
+  }),
+
+  getRiskRules: tool({
+    description:
+      'Fetches the current portfolio risk rules including max position size, max sector size, max risk per trade, and target cash percentage.',
+    parameters: z.object({}),
+    execute: async () => {
+      return { status: 'success', data: await dbModule.getRiskRules() };
+    },
+  }),
+
+  checkPortfolioRisk: tool({
+    description:
+      'Checks the current portfolio against risk rules and returns any active breaches for position size, sector concentration, risk per trade, and cash target.',
+    parameters: z.object({}),
+    execute: async () => {
+      const [transactions, rules, stops] = await Promise.all([
+        dbModule.listTransactions ? dbModule.listTransactions() : Promise.resolve([]),
+        dbModule.getRiskRules ? dbModule.getRiskRules() : Promise.resolve(null),
+        dbModule.listPositionStops ? dbModule.listPositionStops() : Promise.resolve([]),
+      ]);
+
+      if (!rules) return { status: 'success', data: { breaches: [] } };
+
+      const stopBySymbol = Object.fromEntries((stops || []).map((stop) => [stop.symbol, stop.stop_loss]));
+      const symbols = [...new Set(transactions.map((txn) => txn.symbol).filter(Boolean))];
+      const prices = {};
+      const sectors = {};
+
+      await Promise.all(symbols.map(async (symbol) => {
+        try {
+          const info = await pybridge.getStockInfo(symbol);
+          if (typeof info?.data?.price === 'number') prices[symbol] = info.data.price;
+          sectors[symbol] = info?.data?.sector ?? null;
+        } catch {
+          sectors[symbol] = null;
+        }
+      }));
+
+      const summary = buildSummary(transactions, prices);
+      const positions = Object.entries(summary.holdings).map(([symbol, holding]) => ({
+        symbol,
+        shares: holding.shares,
+        currentPrice: prices[symbol] ?? null,
+        currentValue: prices[symbol] != null ? prices[symbol] * holding.shares : null,
+        sector: sectors[symbol] ?? null,
+        stop_loss: stopBySymbol[symbol] ?? null,
+      }));
+
+      return {
+        status: 'success',
+        data: computeBreaches({ positions, cash: summary.cash, rules }),
+      };
+    },
+  }),
+
+  simulator_get_account: tool({
+    description: 'Fetches the paper trading simulator account: cash balance, total portfolio value, unrealized and realized P&L, and the configured tax bracket.',
+    parameters: z.object({}),
+    execute: async () => {
+      try {
+        const [account, txns] = await Promise.all([dbModule.getSimAccount(), dbModule.listSimTransactions()]);
+        const cash = computeCashBalance(txns);
+        const realized = computeRealizedPnl(txns).total;
+        return { status: 'success', data: { ...account, cash, realized_pnl: Math.round(realized * 100) / 100 } };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+  }),
+
+  simulator_get_holdings: tool({
+    description: 'Lists all open positions in the paper trading simulator with shares, average cost, current price (live), unrealized P&L, and holding period.',
+    parameters: z.object({}),
+    execute: async () => {
+      try {
+        const txns = await dbModule.listSimTransactions();
+        const holdings = computeHoldings(txns);
+        const symbols = Object.keys(holdings);
+        const prices = {};
+        await Promise.all(symbols.map(async (s) => {
+          try {
+            const info = await pybridge.getStockInfo(s);
+            if (typeof info?.data?.price === 'number') prices[s] = info.data.price;
+          } catch { /* non-fatal */ }
+        }));
+        const result = symbols.map((s) => {
+          const h = holdings[s];
+          const price = prices[s] ?? null;
+          const pnl = price != null ? price * h.shares - h.total_cost : null;
+          const lots = computeLotsForSymbol(txns, s);
+          return { symbol: s, shares: h.shares, avg_cost: h.avg_cost, currentPrice: price, pnl, oldest_lot_date: lots[0]?.txn_date ?? null };
+        });
+        return { status: 'success', data: result };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+  }),
+
+  simulator_buy: tool({
+    description: 'Places a simulated buy order in the paper trading simulator. Deducts cash and records the trade.',
+    parameters: z.object({
+      symbol: z.string().describe('Ticker symbol (e.g. AAPL)'),
+      shares: z.number().describe('Number of shares to buy'),
+      price: z.number().describe('Price per share'),
+    }),
+    execute: async ({ symbol, shares, price }) => {
+      try {
+        const result = await dbModule.addSimTransaction({
+          type: 'buy', symbol, shares, price,
+          txn_date: new Date().toISOString().slice(0, 10),
+        });
+        return { status: 'success', data: result };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+  }),
+
+  simulator_sell: tool({
+    description: 'Places a simulated sell order in the paper trading simulator. Credits cash and records the trade.',
+    parameters: z.object({
+      symbol: z.string().describe('Ticker symbol (e.g. AAPL)'),
+      shares: z.number().describe('Number of shares to sell'),
+      price: z.number().describe('Price per share'),
+    }),
+    execute: async ({ symbol, shares, price }) => {
+      try {
+        const txns = await dbModule.listSimTransactions();
+        const holdings = computeHoldings(txns);
+        const owned = holdings[symbol.toUpperCase()]?.shares ?? 0;
+        if (shares > owned + 0.000001) {
+          return { error: `insufficient shares: own ${owned}, tried to sell ${shares}` };
+        }
+        const result = await dbModule.addSimTransaction({
+          type: 'sell', symbol, shares, price,
+          txn_date: new Date().toISOString().slice(0, 10),
+        });
+        return { status: 'success', data: result };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+  }),
+
+  simulator_tax_preview: tool({
+    description: 'Returns a detailed tax breakdown for selling a given number of shares in the simulator: proceeds, cost basis, gross gain, ST/LT split, total tax owed, after-tax net gain, and whether it is worth selling. Uses FIFO lot matching and the account\'s configured US tax bracket.',
+    parameters: z.object({
+      symbol: z.string().describe('Ticker symbol'),
+      shares: z.number().describe('Shares to sell'),
+      price: z.number().describe('Current price per share'),
+    }),
+    execute: async ({ symbol, shares, price }) => {
+      try {
+        const [txns, account] = await Promise.all([dbModule.listSimTransactions(), dbModule.getSimAccount()]);
+        const lots = computeLotsForSymbol(txns, symbol);
+        if (lots.length === 0) return { error: `no open position in ${symbol}` };
+        const preview = computeTaxPreview({
+          lots, sharesToSell: shares, currentPrice: price,
+          taxBracket: account.tax_bracket,
+          sellDate: new Date().toISOString().slice(0, 10),
+        });
+        return { status: 'success', data: preview };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+  }),
+
+  simulator_get_transactions: tool({
+    description: 'Returns the full trade history for the paper trading simulator: all buys, sells, deposits, and withdrawals.',
+    parameters: z.object({}),
+    execute: async () => {
+      try {
+        const txns = await dbModule.listSimTransactions();
+        return { status: 'success', data: txns.reverse() };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+  }),
+
+  simulator_deposit: tool({
+    description: 'Adds cash to the paper trading simulator account.',
+    parameters: z.object({
+      amount: z.number().describe('Dollar amount to deposit'),
+    }),
+    execute: async ({ amount }) => {
+      try {
+        if (amount <= 0) return { error: 'amount must be positive' };
+        await dbModule.addSimTransaction({
+          type: 'deposit', amount,
+          txn_date: new Date().toISOString().slice(0, 10),
+        });
+        const txns = await dbModule.listSimTransactions();
+        return { status: 'success', data: { cash: computeCashBalance(txns) } };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+  }),
+
+  simulator_reset: tool({
+    description: 'Wipes all transactions in the paper trading simulator, resetting cash to $0. Use with caution.',
+    parameters: z.object({}),
+    execute: async () => {
+      try {
+        const result = await dbModule.deleteAllSimTransactions();
+        return { status: 'success', data: result };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+  }),
 };
 
 // chatTools is what the AI is allowed to call during chat.
@@ -102,6 +338,17 @@ const chatTools = {
   getMarketDirection: tools.getMarketDirection,
   getNews: tools.getNews,
   getMemo: tools.getMemo,
+  getQualityMetrics: tools.getQualityMetrics,
+  getRiskRules: tools.getRiskRules,
+  checkPortfolioRisk: tools.checkPortfolioRisk,
+  simulator_get_account: tools.simulator_get_account,
+  simulator_get_holdings: tools.simulator_get_holdings,
+  simulator_buy: tools.simulator_buy,
+  simulator_sell: tools.simulator_sell,
+  simulator_tax_preview: tools.simulator_tax_preview,
+  simulator_get_transactions: tools.simulator_get_transactions,
+  simulator_deposit: tools.simulator_deposit,
+  simulator_reset: tools.simulator_reset,
 };
 
 const memoPrompts = {
