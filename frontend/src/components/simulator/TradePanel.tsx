@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { TaxPreview } from '@/components/simulator/TaxPreview'
 import { useSimTrade, useTaxPreview, useSimAccount } from '@/hooks/useSimulator'
@@ -14,26 +15,37 @@ function BuyForm() {
   const { data: account } = useSimAccount()
   const [symbol, setSymbol] = useState('')
   const [shares, setShares] = useState('')
-  const [price, setPrice] = useState('')
   const today = new Date().toISOString().slice(0, 10)
 
-  const estimatedCost = Number(shares) > 0 && Number(price) > 0
-    ? Number(shares) * Number(price)
+  const { data: priceData } = useQuery({
+    queryKey: ['stock-price', symbol],
+    queryFn: async () => {
+      const r = await fetch(`/api/stock/${symbol.trim().toUpperCase()}`)
+      if (!r.ok) return null
+      const j = await r.json()
+      return typeof j?.data?.price === 'number' ? j.data.price : null
+    },
+    enabled: symbol.trim().length > 0,
+    refetchInterval: 60_000,
+  })
+  const currentPrice = priceData ?? null
+
+  const estimatedCost = Number(shares) > 0 && currentPrice != null
+    ? Number(shares) * currentPrice
     : null
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!symbol || !shares || !price) return
+    if (!symbol || !shares || currentPrice == null) return
     await trade.mutateAsync({
       type: 'buy',
       symbol: symbol.toUpperCase(),
       shares: Number(shares),
-      price: Number(price),
+      price: currentPrice,
       txn_date: today,
     })
     setSymbol('')
     setShares('')
-    setPrice('')
   }
 
   return (
@@ -45,23 +57,16 @@ function BuyForm() {
         placeholder="Symbol (e.g. AAPL)"
         className="w-full rounded-md border border-border bg-secondary px-2 py-1.5 text-xs"
       />
-      <div className="grid grid-cols-2 gap-2">
-        <input
-          type="number"
-          step="any"
-          value={shares}
-          onChange={(e) => setShares(e.target.value)}
-          placeholder="Shares"
-          className="rounded-md border border-border bg-secondary px-2 py-1.5 text-xs"
-        />
-        <input
-          type="number"
-          step="any"
-          value={price}
-          onChange={(e) => setPrice(e.target.value)}
-          placeholder="Price / share"
-          className="rounded-md border border-border bg-secondary px-2 py-1.5 text-xs"
-        />
+      <input
+        type="number"
+        step="any"
+        value={shares}
+        onChange={(e) => setShares(e.target.value)}
+        placeholder="Shares"
+        className="w-full rounded-md border border-border bg-secondary px-2 py-1.5 text-xs"
+      />
+      <div className="text-sm text-muted-foreground">
+        Current price: {currentPrice != null ? `$${currentPrice.toFixed(2)}` : '—'}
       </div>
       {estimatedCost != null && (
         <div className="flex justify-between text-xs text-muted-foreground">
@@ -82,7 +87,7 @@ function BuyForm() {
       )}
       <button
         type="submit"
-        disabled={trade.isPending || !symbol || !shares || !price}
+        disabled={trade.isPending || !symbol || !shares || currentPrice == null}
         className="w-full rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground disabled:opacity-50"
       >
         {trade.isPending ? 'Placing order…' : 'Buy'}
@@ -107,7 +112,6 @@ function SellForm({ holding, onClose }: SellFormProps) {
   const { data: taxPreview, isLoading: taxLoading } = useTaxPreview(
     holding.symbol,
     sharesNum,
-    price,
   )
 
   const handleSubmit = async (e: React.FormEvent) => {

@@ -36,6 +36,9 @@ export interface SimTransaction {
 }
 
 export interface TaxPreview {
+  symbol: string
+  shares: number
+  current_price: number
   proceeds: number
   cost_basis: number
   gross_gain: number

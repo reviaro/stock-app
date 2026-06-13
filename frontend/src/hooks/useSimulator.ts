@@ -32,12 +32,12 @@ export function useSimTransactions() {
   })
 }
 
-export function useTaxPreview(symbol: string | null, shares: number, price: number | null) {
+export function useTaxPreview(symbol: string | null, shares: number) {
   return useQuery<TaxPreview>({
-    queryKey: ['sim-tax-preview', symbol, shares, price],
+    queryKey: ['sim-tax-preview', symbol, shares],
     queryFn: () =>
-      apiFetch(`/api/simulator/tax-preview?symbol=${symbol}&shares=${shares}&price=${price}`),
-    enabled: Boolean(symbol && shares > 0 && price != null && price > 0),
+      apiFetch(`/api/simulator/tax-preview?symbol=${symbol}&shares=${shares}`),
+    enabled: Boolean(symbol && shares > 0),
   })
 }
 

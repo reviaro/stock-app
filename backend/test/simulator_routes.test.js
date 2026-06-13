@@ -142,15 +142,18 @@ test('GET /api/simulator/tax-preview returns breakdown', async () => {
     await request('POST', '/api/simulator/trade', {
         type: 'buy', symbol: 'AAPL', shares: 10, price: 100, txn_date: '2024-01-01',
     });
-    const res = await request('GET', '/api/simulator/tax-preview?symbol=AAPL&shares=5&price=200');
+    const res = await request('GET', '/api/simulator/tax-preview?symbol=AAPL&shares=5');
     assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.body.data.symbol, 'AAPL');
+    assert.strictEqual(res.body.data.shares, 5);
+    assert.strictEqual(res.body.data.current_price, 200);
     assert.ok(typeof res.body.data.total_tax === 'number');
     assert.ok(typeof res.body.data.after_tax_net_gain === 'number');
     assert.ok(typeof res.body.data.breakeven_price === 'number');
 });
 
 test('GET /api/simulator/tax-preview no position -> 400', async () => {
-    const res = await request('GET', '/api/simulator/tax-preview?symbol=AAPL&shares=5&price=200');
+    const res = await request('GET', '/api/simulator/tax-preview?symbol=AAPL&shares=5');
     assert.strictEqual(res.status, 400);
 });
 

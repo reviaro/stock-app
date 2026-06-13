@@ -181,12 +181,19 @@ router.get('/transactions', async (req, res) => {
     }
 });
 
-// GET /api/simulator/tax-preview?symbol=AAPL&shares=10&price=195.42
+// GET /api/simulator/tax-preview?symbol=AAPL&shares=10
 router.get('/tax-preview', async (req, res) => {
     try {
-        const { symbol, shares, price } = req.query;
-        if (!symbol || !shares || !price) {
-            return res.status(400).json({ status: 'error', error: 'symbol, shares, and price are required' });
+        const { symbol, shares } = req.query;
+        const sharesNum = Number(shares);
+        if (!symbol || typeof symbol !== 'string' || !symbol.trim() || !(sharesNum > 0)) {
+            return res.status(400).json({ status: 'error', error: 'symbol and shares (> 0) are required' });
+        }
+
+        const info = await pybridge.getStockInfo(symbol);
+        const currentPrice = info?.data?.price;
+        if (typeof currentPrice !== 'number' || !isFinite(currentPrice)) {
+            return res.status(503).json({ status: 'error', error: 'price unavailable for symbol' });
         }
 
         const txns = await db.listSimTransactions();
@@ -199,13 +206,13 @@ router.get('/tax-preview', async (req, res) => {
 
         const preview = computeTaxPreview({
             lots,
-            sharesToSell: Number(shares),
-            currentPrice: Number(price),
+            sharesToSell: sharesNum,
+            currentPrice,
             taxBracket: account.tax_bracket,
             sellDate: new Date().toISOString().slice(0, 10),
         });
 
-        res.json({ status: 'success', data: preview });
+        res.json({ status: 'success', data: { symbol, shares: sharesNum, current_price: currentPrice, ...preview } });
     } catch (err) {
         res.status(500).json({ status: 'error', error: err.message });
     }

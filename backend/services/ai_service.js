@@ -214,14 +214,18 @@ const tools = {
   }),
 
   simulator_buy: tool({
-    description: 'Places a simulated buy order in the paper trading simulator. Deducts cash and records the trade.',
+    description: 'Places a simulated buy order in the paper trading simulator. Deducts cash and records the trade. Price is fetched live from the market.',
     parameters: z.object({
       symbol: z.string().describe('Ticker symbol (e.g. AAPL)'),
       shares: z.number().describe('Number of shares to buy'),
-      price: z.number().describe('Price per share'),
     }),
-    execute: async ({ symbol, shares, price }) => {
+    execute: async ({ symbol, shares }) => {
       try {
+        const info = await pybridge.getStockInfo(symbol);
+        const price = info?.data?.price;
+        if (typeof price !== 'number' || !isFinite(price)) {
+          return { error: 'price unavailable for ' + symbol };
+        }
         const txns = await dbModule.listSimTransactions();
         const cash = computeCashBalance(txns);
         const cost = shares * price;
@@ -240,14 +244,18 @@ const tools = {
   }),
 
   simulator_sell: tool({
-    description: 'Places a simulated sell order in the paper trading simulator. Credits cash and records the trade.',
+    description: 'Places a simulated sell order in the paper trading simulator. Credits cash and records the trade. Price is fetched live from the market.',
     parameters: z.object({
       symbol: z.string().describe('Ticker symbol (e.g. AAPL)'),
       shares: z.number().describe('Number of shares to sell'),
-      price: z.number().describe('Price per share'),
     }),
-    execute: async ({ symbol, shares, price }) => {
+    execute: async ({ symbol, shares }) => {
       try {
+        const info = await pybridge.getStockInfo(symbol);
+        const price = info?.data?.price;
+        if (typeof price !== 'number' || !isFinite(price)) {
+          return { error: 'price unavailable for ' + symbol };
+        }
         const txns = await dbModule.listSimTransactions();
         const holdings = computeHoldings(txns);
         const owned = holdings[symbol.toUpperCase()]?.shares ?? 0;
@@ -266,14 +274,18 @@ const tools = {
   }),
 
   simulator_tax_preview: tool({
-    description: 'Returns a detailed tax breakdown for selling a given number of shares in the simulator: proceeds, cost basis, gross gain, ST/LT split, total tax owed, after-tax net gain, and whether it is worth selling. Uses FIFO lot matching and the account\'s configured US tax bracket.',
+    description: 'Returns a detailed tax breakdown for selling a given number of shares in the simulator: proceeds, cost basis, gross gain, ST/LT split, total tax owed, after-tax net gain, and whether it is worth selling. Uses FIFO lot matching and the account\'s configured US tax bracket. Price is fetched live from the market.',
     parameters: z.object({
       symbol: z.string().describe('Ticker symbol'),
       shares: z.number().describe('Shares to sell'),
-      price: z.number().describe('Current price per share'),
     }),
-    execute: async ({ symbol, shares, price }) => {
+    execute: async ({ symbol, shares }) => {
       try {
+        const info = await pybridge.getStockInfo(symbol);
+        const price = info?.data?.price;
+        if (typeof price !== 'number' || !isFinite(price)) {
+          return { error: 'price unavailable for ' + symbol };
+        }
         const [txns, account] = await Promise.all([dbModule.listSimTransactions(), dbModule.getSimAccount()]);
         const lots = computeLotsForSymbol(txns, symbol);
         if (lots.length === 0) return { error: `no open position in ${symbol}` };
@@ -282,7 +294,7 @@ const tools = {
           taxBracket: account.tax_bracket,
           sellDate: new Date().toISOString().slice(0, 10),
         });
-        return { status: 'success', data: preview };
+        return { status: 'success', data: { symbol, shares, current_price: price, ...preview } };
       } catch (err) {
         return { error: err.message };
       }
