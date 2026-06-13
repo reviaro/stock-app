@@ -170,7 +170,7 @@ const tools = {
   }),
 
   simulator_get_account: tool({
-    description: 'Fetches the paper trading simulator account: cash balance, total portfolio value, unrealized and realized P&L, and the configured tax bracket.',
+    description: 'Fetches the paper trading simulator account: cash balance, realized P&L, and configured tax bracket. For live portfolio value and unrealized P&L, use simulator_get_holdings instead.',
     parameters: z.object({}),
     execute: async () => {
       try {
@@ -222,6 +222,12 @@ const tools = {
     }),
     execute: async ({ symbol, shares, price }) => {
       try {
+        const txns = await dbModule.listSimTransactions();
+        const cash = computeCashBalance(txns);
+        const cost = shares * price;
+        if (cash < cost) {
+          return { error: `insufficient cash: have $${Math.round(cash * 100) / 100}, need $${Math.round(cost * 100) / 100}` };
+        }
         const result = await dbModule.addSimTransaction({
           type: 'buy', symbol, shares, price,
           txn_date: new Date().toISOString().slice(0, 10),
