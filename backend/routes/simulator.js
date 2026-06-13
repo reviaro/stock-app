@@ -143,8 +143,8 @@ router.post('/trade', async (req, res) => {
         if (!['buy', 'sell'].includes(txn.type)) {
             return res.status(400).json({ status: 'error', error: 'type must be buy or sell' });
         }
-        if (!txn.symbol || !txn.shares || !txn.price) {
-            return res.status(400).json({ status: 'error', error: 'symbol, shares, and price are required' });
+        if (!txn.symbol || !(txn.shares > 0) || !(txn.price > 0)) {
+            return res.status(400).json({ status: 'error', error: 'symbol, shares, and price are required and must be positive' });
         }
 
         const txns = await db.listSimTransactions();
