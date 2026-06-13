@@ -3,15 +3,24 @@ const path = require('path');
 const fs = require('fs');
 
 const VALID_BUCKETS = ['compounders', 'buy_soon', 'expensive', 'speculative', 'owned', 'unsorted'];
+const VALID_TXN_TYPES = ['buy', 'sell', 'dividend', 'deposit', 'withdrawal'];
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const RULE_FIELDS = ['max_position_pct', 'max_sector_pct', 'max_risk_per_trade_pct', 'target_cash_pct'];
 
 const DB_PATH = process.env.DB_PATH_OVERRIDE || path.join(__dirname, '..', 'database', 'stocks.db');
+
+function ignoreDuplicateColumnError(err) {
+    if (err && !/duplicate column name/i.test(err.message)) {
+        console.error('Schema update error:', err.message);
+    }
+}
 
 function getDb() {
     const dbDir = path.dirname(DB_PATH);
     if (!fs.existsSync(dbDir)) {
         fs.mkdirSync(dbDir, { recursive: true });
     }
-    
+
     return new sqlite3.Database(DB_PATH, (err) => {
         if (err) {
             console.error('Database connection error:', err.message);
@@ -22,7 +31,7 @@ function getDb() {
 function initDb() {
     return new Promise((resolve, reject) => {
         const db = getDb();
-        
+
         db.serialize(() => {
             db.run(`
                 CREATE TABLE IF NOT EXISTS watchlist (
@@ -33,9 +42,9 @@ function initDb() {
                 )
             `);
 
-            db.all("PRAGMA table_info(watchlist)", (err, cols) => {
+            db.all('PRAGMA table_info(watchlist)', (err, cols) => {
                 if (err) return;
-                const hasBucket = (cols || []).some(c => c.name === 'bucket');
+                const hasBucket = (cols || []).some((c) => c.name === 'bucket');
                 if (!hasBucket) {
                     db.run("ALTER TABLE watchlist ADD COLUMN bucket TEXT NOT NULL DEFAULT 'unsorted'");
                 }
@@ -61,6 +70,14 @@ function initDb() {
                     previous_close REAL,
                     change_amount REAL,
                     change_percent REAL,
+                    open_price REAL,
+                    day_high REAL,
+                    fifty_two_week_high REAL,
+                    fifty_two_week_low REAL,
+                    change_from_open_percent REAL,
+                    gap_apr22_percent REAL,
+                    dist_from_52wh_percent REAL,
+                    dist_from_52wl_percent REAL,
                     currency TEXT DEFAULT 'USD',
                     source TEXT DEFAULT 'yfinance',
                     is_market_closed INTEGER DEFAULT 0,
@@ -69,6 +86,15 @@ function initDb() {
                     UNIQUE(symbol, market_date, slot)
                 )
             `);
+
+            db.run('ALTER TABLE stock_snapshots ADD COLUMN open_price REAL', ignoreDuplicateColumnError);
+            db.run('ALTER TABLE stock_snapshots ADD COLUMN day_high REAL', ignoreDuplicateColumnError);
+            db.run('ALTER TABLE stock_snapshots ADD COLUMN fifty_two_week_high REAL', ignoreDuplicateColumnError);
+            db.run('ALTER TABLE stock_snapshots ADD COLUMN fifty_two_week_low REAL', ignoreDuplicateColumnError);
+            db.run('ALTER TABLE stock_snapshots ADD COLUMN change_from_open_percent REAL', ignoreDuplicateColumnError);
+            db.run('ALTER TABLE stock_snapshots ADD COLUMN gap_apr22_percent REAL', ignoreDuplicateColumnError);
+            db.run('ALTER TABLE stock_snapshots ADD COLUMN dist_from_52wh_percent REAL', ignoreDuplicateColumnError);
+            db.run('ALTER TABLE stock_snapshots ADD COLUMN dist_from_52wl_percent REAL', ignoreDuplicateColumnError);
 
             db.run(`
                 CREATE INDEX IF NOT EXISTS idx_stock_snapshots_symbol_captured
@@ -80,6 +106,7 @@ function initDb() {
                 ON stock_snapshots(market_date, slot)
             `);
 
+            // Legacy table retained so migration 001 can lift rows into transactions.
             db.run(`
                 CREATE TABLE IF NOT EXISTS portfolio (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,6 +118,23 @@ function initDb() {
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             `);
+
+            db.run(`
+                CREATE TABLE IF NOT EXISTS transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT,
+                    type TEXT NOT NULL CHECK (type IN ('buy','sell','dividend','deposit','withdrawal')),
+                    shares REAL,
+                    price REAL,
+                    amount REAL NOT NULL,
+                    fees REAL NOT NULL DEFAULT 0,
+                    txn_date TEXT NOT NULL,
+                    notes TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            `);
+
+            db.run('CREATE INDEX IF NOT EXISTS idx_transactions_symbol_date ON transactions(symbol, txn_date)');
 
             db.run(`
                 CREATE TABLE IF NOT EXISTS chat_history (
@@ -120,17 +164,104 @@ function initDb() {
             `);
 
             db.run(`
+                CREATE TABLE IF NOT EXISTS risk_rules (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    max_position_pct REAL NOT NULL DEFAULT 10,
+                    max_sector_pct REAL NOT NULL DEFAULT 30,
+                    max_risk_per_trade_pct REAL NOT NULL DEFAULT 1,
+                    target_cash_pct REAL NOT NULL DEFAULT 20,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            `);
+
+            db.run('INSERT OR IGNORE INTO risk_rules (id) VALUES (1)');
+
+            db.run(`
+                CREATE TABLE IF NOT EXISTS position_stops (
+                    symbol TEXT PRIMARY KEY,
+                    stop_loss REAL NOT NULL,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            `);
+
+            db.run(`
+                CREATE TABLE IF NOT EXISTS sim_accounts (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    name TEXT NOT NULL DEFAULT 'default',
+                    tax_bracket INTEGER NOT NULL DEFAULT 22,
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            `);
+
+            db.run('INSERT OR IGNORE INTO sim_accounts (id) VALUES (1)');
+
+            db.run(`
+                CREATE TABLE IF NOT EXISTS sim_transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL DEFAULT 1,
+                    symbol TEXT,
+                    type TEXT NOT NULL CHECK (type IN ('buy','sell','deposit','withdrawal')),
+                    shares REAL,
+                    price REAL,
+                    amount REAL NOT NULL,
+                    fees REAL NOT NULL DEFAULT 0,
+                    txn_date TEXT NOT NULL,
+                    notes TEXT,
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            `);
+
+            db.run('CREATE INDEX IF NOT EXISTS idx_sim_transactions_symbol ON sim_transactions(symbol, txn_date)');
+
+            db.run(`
                 CREATE INDEX IF NOT EXISTS idx_chat_history_session
                 ON chat_history(session_id, created_at DESC)
-            `, (err) => {
+            `, async (err) => {
                 if (err) {
                     db.close();
                     reject(err);
-                } else {
-                    console.log('Database initialized');
-                    db.close();
-                    resolve();
+                    return;
                 }
+
+                db.close();
+
+                if (process.env.ENABLE_LEDGER_MIGRATION === '1') {
+                    try {
+                        const { runMigration001 } = require('./migrations/001_portfolio_to_ledger');
+                        const result = await runMigration001({ dbPath: DB_PATH });
+                        if (result && result.migrated > 0) {
+                            console.log(`[migration 001] migrated ${result.migrated} portfolio rows; backup at ${result.backupPath}`);
+                            // Reconcile watchlist buckets for migrated symbols
+                            try {
+                                const txns = await listTransactions();
+                                const net = {};
+                                for (const t of txns) {
+                                    if (!t.symbol) continue;
+                                    const s = t.symbol.toUpperCase();
+                                    if (t.type === 'buy') net[s] = (net[s] ?? 0) + Number(t.shares);
+                                    else if (t.type === 'sell') net[s] = (net[s] ?? 0) - Number(t.shares);
+                                }
+                                const watchlist = await getWatchlist();
+                                for (const row of watchlist) {
+                                    const shares = net[row.symbol] ?? 0;
+                                    await setWatchlistBucket(row.symbol, shares > 0 ? 'owned' : 'unsorted');
+                                }
+                                console.log('[migration 001] bucket reconciliation complete');
+                            } catch (reconcileErr) {
+                                console.error('[migration 001] bucket reconciliation non-fatal:', reconcileErr.message);
+                            }
+                        }
+                    } catch (migrationError) {
+                        console.error('[migration 001] FAILED:', migrationError.message);
+                        reject(migrationError);
+                        return;
+                    }
+                } else {
+                    console.log('[migration 001] skipped; set ENABLE_LEDGER_MIGRATION=1 to run the portfolio -> transactions migration');
+                }
+
+                console.log('Database initialized');
+                resolve();
             });
         });
     });
@@ -142,7 +273,7 @@ function getWatchlist() {
         db.all('SELECT * FROM watchlist ORDER BY added_at DESC', [], (err, rows) => {
             db.close();
             if (err) reject(err);
-            else resolve(rows);
+            else resolve(rows || []);
         });
     });
 }
@@ -151,6 +282,7 @@ function addToWatchlist(symbol, notes = '', bucket = 'unsorted') {
     if (!VALID_BUCKETS.includes(bucket)) {
         return Promise.reject(new Error(`invalid bucket: ${bucket}`));
     }
+
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
         sqlite.run(
@@ -168,28 +300,38 @@ function addToWatchlist(symbol, notes = '', bucket = 'unsorted') {
 function removeFromWatchlist(symbol) {
     return new Promise((resolve, reject) => {
         const db = getDb();
-        db.run(
-            'DELETE FROM watchlist WHERE symbol = ?',
-            [symbol.toUpperCase()],
-            function(err) {
-                db.close();
-                if (err) reject(err);
-                else resolve({ deleted: this.changes });
-            }
-        );
+        db.run('DELETE FROM watchlist WHERE symbol = ?', [symbol.toUpperCase()], function(err) {
+            db.close();
+            if (err) reject(err);
+            else resolve({ deleted: this.changes });
+        });
     });
 }
 
 function isInWatchlist(symbol) {
     return new Promise((resolve, reject) => {
         const db = getDb();
-        db.get(
-            'SELECT 1 FROM watchlist WHERE symbol = ?',
-            [symbol.toUpperCase()],
-            (err, row) => {
-                db.close();
-                if (err) reject(err);
-                else resolve(!!row);
+        db.get('SELECT 1 FROM watchlist WHERE symbol = ?', [symbol.toUpperCase()], (err, row) => {
+            db.close();
+            if (err) reject(err);
+            else resolve(Boolean(row));
+        });
+    });
+}
+
+function setWatchlistBucket(symbol, bucket) {
+    if (!VALID_BUCKETS.includes(bucket)) {
+        return Promise.reject(new Error(`invalid bucket: ${bucket}`));
+    }
+
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            'UPDATE watchlist SET bucket = ? WHERE symbol = ?',
+            [bucket, symbol.toUpperCase()],
+            function(err) {
+                sqlite.close();
+                err ? reject(err) : resolve({ changed: this.changes });
             }
         );
     });
@@ -202,8 +344,11 @@ function upsertStockSnapshot(snapshot) {
             `INSERT INTO stock_snapshots (
                 symbol, slot, market_date, quote_timestamp, price, previous_close,
                 change_amount, change_percent, currency, source,
-                is_market_closed, is_carry_forward, raw_payload
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                is_market_closed, is_carry_forward, raw_payload,
+                open_price, day_high, fifty_two_week_high, fifty_two_week_low,
+                change_from_open_percent, gap_apr22_percent,
+                dist_from_52wh_percent, dist_from_52wl_percent
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol, market_date, slot)
             DO UPDATE SET
                 quote_timestamp=excluded.quote_timestamp,
@@ -216,6 +361,14 @@ function upsertStockSnapshot(snapshot) {
                 is_market_closed=excluded.is_market_closed,
                 is_carry_forward=excluded.is_carry_forward,
                 raw_payload=excluded.raw_payload,
+                open_price=excluded.open_price,
+                day_high=excluded.day_high,
+                fifty_two_week_high=excluded.fifty_two_week_high,
+                fifty_two_week_low=excluded.fifty_two_week_low,
+                change_from_open_percent=excluded.change_from_open_percent,
+                gap_apr22_percent=excluded.gap_apr22_percent,
+                dist_from_52wh_percent=excluded.dist_from_52wh_percent,
+                dist_from_52wl_percent=excluded.dist_from_52wl_percent,
                 captured_at=CURRENT_TIMESTAMP`,
             [
                 snapshot.symbol.toUpperCase(),
@@ -231,11 +384,38 @@ function upsertStockSnapshot(snapshot) {
                 snapshot.isMarketClosed ? 1 : 0,
                 snapshot.isCarryForward ? 1 : 0,
                 snapshot.rawPayload ?? null,
+                snapshot.openPrice ?? null,
+                snapshot.dayHigh ?? null,
+                snapshot.fiftyTwoWeekHigh ?? null,
+                snapshot.fiftyTwoWeekLow ?? null,
+                snapshot.changeFromOpenPercent ?? null,
+                snapshot.gapApr22Percent ?? null,
+                snapshot.distFrom52whPercent ?? null,
+                snapshot.distFrom52wlPercent ?? null,
             ],
             function(err) {
                 db.close();
                 if (err) reject(err);
                 else resolve({ id: this.lastID, symbol: snapshot.symbol.toUpperCase() });
+            }
+        );
+    });
+}
+
+function getFirstStockSnapshot(symbol) {
+    return new Promise((resolve, reject) => {
+        const db = getDb();
+        db.get(
+            `SELECT *
+             FROM stock_snapshots
+             WHERE symbol = ?
+             ORDER BY datetime(captured_at) ASC
+             LIMIT 1`,
+            [symbol.toUpperCase()],
+            (err, row) => {
+                db.close();
+                if (err) reject(err);
+                else resolve(row || null);
             }
         );
     });
@@ -253,7 +433,7 @@ function getStockHistory(symbol, days = 30) {
             (err, rows) => {
                 db.close();
                 if (err) reject(err);
-                else resolve(rows);
+                else resolve(rows || []);
             }
         );
     });
@@ -276,19 +456,23 @@ function getLatestSnapshotsForWatchlist() {
             (err, rows) => {
                 db.close();
                 if (err) reject(err);
-                else resolve(rows);
+                else resolve(rows || []);
             }
         );
     });
 }
 
+// Legacy helpers retained for tests/migration compatibility.
 function getPortfolio() {
     return new Promise((resolve, reject) => {
         const db = getDb();
         db.all('SELECT * FROM portfolio ORDER BY symbol ASC', [], (err, rows) => {
             db.close();
-            if (err) reject(err);
-            else resolve(rows);
+            if (err) {
+                if (/no such table/i.test(err.message)) return resolve([]);
+                return reject(err);
+            }
+            resolve(rows || []);
         });
     });
 }
@@ -352,7 +536,7 @@ function getChatHistory(sessionId = 'default', limit = 50) {
             (err, rows) => {
                 db.close();
                 if (err) reject(err);
-                else resolve(rows);
+                else resolve(rows || []);
             }
         );
     });
@@ -370,8 +554,8 @@ function clearChatHistory(sessionId = 'default') {
 }
 
 function upsertMemo(symbol, fields) {
-    const cols = ['thesis','fair_value_low','fair_value_high','buy_below','sell_rule','invalidation','risks','conviction'];
-    const values = cols.map(c => fields[c] ?? null);
+    const cols = ['thesis', 'fair_value_low', 'fair_value_high', 'buy_below', 'sell_rule', 'invalidation', 'risks', 'conviction'];
+    const values = cols.map((col) => fields[col] ?? null);
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
         sqlite.run(
@@ -388,7 +572,10 @@ function upsertMemo(symbol, fields) {
                conviction=excluded.conviction,
                updated_at=CURRENT_TIMESTAMP`,
             [symbol.toUpperCase(), ...values],
-            function(err) { sqlite.close(); err ? reject(err) : resolve({ symbol: symbol.toUpperCase() }); }
+            function(err) {
+                sqlite.close();
+                err ? reject(err) : resolve({ symbol: symbol.toUpperCase() });
+            }
         );
     });
 }
@@ -397,7 +584,8 @@ function getMemo(symbol) {
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
         sqlite.get('SELECT * FROM stock_memos WHERE symbol = ?', [symbol.toUpperCase()], (err, row) => {
-            sqlite.close(); err ? reject(err) : resolve(row || null);
+            sqlite.close();
+            err ? reject(err) : resolve(row || null);
         });
     });
 }
@@ -406,7 +594,8 @@ function listMemos() {
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
         sqlite.all('SELECT * FROM stock_memos ORDER BY updated_at DESC', [], (err, rows) => {
-            sqlite.close(); err ? reject(err) : resolve(rows || []);
+            sqlite.close();
+            err ? reject(err) : resolve(rows || []);
         });
     });
 }
@@ -415,9 +604,12 @@ function markMemoReviewed(symbol) {
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
         sqlite.run(
-            `UPDATE stock_memos SET last_reviewed_at = CURRENT_TIMESTAMP WHERE symbol = ?`,
+            'UPDATE stock_memos SET last_reviewed_at = CURRENT_TIMESTAMP WHERE symbol = ?',
             [symbol.toUpperCase()],
-            function(err) { sqlite.close(); err ? reject(err) : resolve({ changed: this.changes }); }
+            function(err) {
+                sqlite.close();
+                err ? reject(err) : resolve({ changed: this.changes });
+            }
         );
     });
 }
@@ -426,27 +618,322 @@ function deleteMemo(symbol) {
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
         sqlite.run('DELETE FROM stock_memos WHERE symbol = ?', [symbol.toUpperCase()], function(err) {
-            sqlite.close(); err ? reject(err) : resolve({ deleted: this.changes });
+            sqlite.close();
+            err ? reject(err) : resolve({ deleted: this.changes });
         });
     });
 }
 
-function setWatchlistBucket(symbol, bucket) {
-    if (!VALID_BUCKETS.includes(bucket)) {
-        return Promise.reject(new Error(`invalid bucket: ${bucket}`));
+function getRiskRules() {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.get('SELECT * FROM risk_rules WHERE id = 1', [], (err, row) => {
+            sqlite.close();
+            if (err) return reject(err);
+            if (!row) {
+                return resolve({
+                    id: 1,
+                    max_position_pct: 10,
+                    max_sector_pct: 30,
+                    max_risk_per_trade_pct: 1,
+                    target_cash_pct: 20,
+                });
+            }
+            resolve(row);
+        });
+    });
+}
+
+function setRiskRules(fields) {
+    const updates = [];
+    const values = [];
+
+    for (const field of RULE_FIELDS) {
+        if (fields[field] !== undefined) {
+            const numeric = Number(fields[field]);
+            if (!Number.isFinite(numeric) || numeric < 0) {
+                return Promise.reject(new Error(`invalid value for ${field}: ${fields[field]}`));
+            }
+            updates.push(`${field} = ?`);
+            values.push(numeric);
+        }
     }
+
+    if (updates.length === 0) {
+        return Promise.resolve({ changed: 0 });
+    }
+
+    updates.push('updated_at = CURRENT_TIMESTAMP');
+
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
         sqlite.run(
-            'UPDATE watchlist SET bucket = ? WHERE symbol = ?',
-            [bucket, symbol.toUpperCase()],
-            function(err) { sqlite.close(); err ? reject(err) : resolve({ changed: this.changes }); }
+            `UPDATE risk_rules SET ${updates.join(', ')} WHERE id = 1`,
+            values,
+            function(err) {
+                sqlite.close();
+                err ? reject(err) : resolve({ changed: this.changes });
+            }
         );
+    });
+}
+
+function setPositionStop(symbol, stopLoss) {
+    const numeric = Number(stopLoss);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+        return Promise.reject(new Error(`invalid stop_loss: ${stopLoss}`));
+    }
+
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            `INSERT INTO position_stops (symbol, stop_loss, updated_at)
+             VALUES (?, ?, CURRENT_TIMESTAMP)
+             ON CONFLICT(symbol) DO UPDATE SET
+               stop_loss = excluded.stop_loss,
+               updated_at = CURRENT_TIMESTAMP`,
+            [symbol.toUpperCase(), numeric],
+            function(err) {
+                sqlite.close();
+                err ? reject(err) : resolve({ symbol: symbol.toUpperCase(), stop_loss: numeric });
+            }
+        );
+    });
+}
+
+function getPositionStop(symbol) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.get('SELECT * FROM position_stops WHERE symbol = ?', [symbol.toUpperCase()], (err, row) => {
+            sqlite.close();
+            err ? reject(err) : resolve(row || null);
+        });
+    });
+}
+
+function listPositionStops() {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.all('SELECT * FROM position_stops ORDER BY symbol ASC', [], (err, rows) => {
+            sqlite.close();
+            err ? reject(err) : resolve(rows || []);
+        });
+    });
+}
+
+function deletePositionStop(symbol) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run('DELETE FROM position_stops WHERE symbol = ?', [symbol.toUpperCase()], function(err) {
+            sqlite.close();
+            err ? reject(err) : resolve({ deleted: this.changes });
+        });
+    });
+}
+
+function validateTransaction(txn) {
+    if (!txn || typeof txn !== 'object') throw new Error('transaction object required');
+
+    const { type, symbol, shares, price, amount, fees, txn_date: txnDate } = txn;
+
+    if (!VALID_TXN_TYPES.includes(type)) throw new Error(`invalid type: ${type}`);
+    if (!txnDate || !DATE_RE.test(txnDate)) throw new Error('txn_date required as YYYY-MM-DD');
+
+    if (type === 'buy' || type === 'sell') {
+        const shareCount = Number(shares);
+        const tradePrice = Number(price);
+        if (!symbol || typeof symbol !== 'string') throw new Error('symbol required for trades');
+        if (!Number.isFinite(shareCount) || shareCount <= 0) throw new Error('shares must be > 0');
+        if (!Number.isFinite(tradePrice) || tradePrice <= 0) throw new Error('price must be > 0');
+    }
+
+    if (type === 'dividend') {
+        const cashAmount = Number(amount);
+        if (!symbol || typeof symbol !== 'string') throw new Error('symbol required for dividend');
+        if (!Number.isFinite(cashAmount) || cashAmount <= 0) throw new Error('amount must be > 0');
+    }
+
+    if (type === 'deposit' || type === 'withdrawal') {
+        const cashAmount = Number(amount);
+        if (!Number.isFinite(cashAmount) || cashAmount <= 0) throw new Error('amount must be > 0');
+    }
+
+    if (fees !== undefined && fees !== null) {
+        const feeAmount = Number(fees);
+        if (!Number.isFinite(feeAmount) || feeAmount < 0) throw new Error('fees must be >= 0');
+    }
+}
+
+function addTransaction(txn) {
+    return new Promise((resolve, reject) => {
+        try {
+            validateTransaction(txn);
+        } catch (err) {
+            reject(err);
+            return;
+        }
+
+        const { type, symbol = null, shares = null, price = null, txn_date: txnDate, notes = null } = txn;
+        const fees = Number(txn.fees ?? 0);
+
+        let amount;
+        if (type === 'buy' || type === 'sell') {
+            amount = Number(shares) * Number(price);
+        } else {
+            amount = Number(txn.amount);
+        }
+
+        const sqlite = getDb();
+        sqlite.run(
+            `INSERT INTO transactions (symbol, type, shares, price, amount, fees, txn_date, notes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [symbol ? symbol.toUpperCase() : null, type, shares, price, amount, fees, txnDate, notes],
+            function(err) {
+                sqlite.close();
+                err ? reject(err) : resolve({ id: this.lastID, symbol: symbol ? symbol.toUpperCase() : null, type });
+            }
+        );
+    });
+}
+
+function listTransactions({ symbol, type, from, to, limit } = {}) {
+    const where = [];
+    const args = [];
+
+    if (symbol) {
+        where.push('symbol = ?');
+        args.push(symbol.toUpperCase());
+    }
+    if (type) {
+        where.push('type = ?');
+        args.push(type);
+    }
+    if (from) {
+        where.push('txn_date >= ?');
+        args.push(from);
+    }
+    if (to) {
+        where.push('txn_date <= ?');
+        args.push(to);
+    }
+
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const limitSql = limit ? `LIMIT ${Number(limit)}` : '';
+
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.all(
+            `SELECT * FROM transactions ${whereSql} ORDER BY txn_date DESC, id DESC ${limitSql}`,
+            args,
+            (err, rows) => {
+                sqlite.close();
+                err ? reject(err) : resolve(rows || []);
+            }
+        );
+    });
+}
+
+function getTransactionById(id) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.get('SELECT * FROM transactions WHERE id = ?', [Number(id)], (err, row) => {
+            sqlite.close();
+            err ? reject(err) : resolve(row || null);
+        });
+    });
+}
+
+function deleteTransaction(id) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run('DELETE FROM transactions WHERE id = ?', [Number(id)], function(err) {
+            sqlite.close();
+            err ? reject(err) : resolve({ deleted: this.changes });
+        });
+    });
+}
+
+function getSimAccount() {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.get('SELECT * FROM sim_accounts WHERE id = 1', [], (err, row) => {
+            sqlite.close();
+            err ? reject(err) : resolve(row);
+        });
+    });
+}
+
+function setSimTaxBracket(bracket) {
+    const valid = [10, 12, 22, 24, 32, 35, 37];
+    if (!valid.includes(Number(bracket))) {
+        return Promise.reject(new Error(`invalid tax bracket: ${bracket}`));
+    }
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run('UPDATE sim_accounts SET tax_bracket = ? WHERE id = 1', [Number(bracket)], function(err) {
+            sqlite.close();
+            err ? reject(err) : resolve({ tax_bracket: Number(bracket) });
+        });
+    });
+}
+
+function addSimTransaction(txn) {
+    const VALID = ['buy', 'sell', 'deposit', 'withdrawal'];
+    if (!VALID.includes(txn.type)) return Promise.reject(new Error(`invalid type: ${txn.type}`));
+    if (!txn.txn_date || !/^\d{4}-\d{2}-\d{2}$/.test(txn.txn_date)) {
+        return Promise.reject(new Error('txn_date required (YYYY-MM-DD)'));
+    }
+    const isTrade = txn.type === 'buy' || txn.type === 'sell';
+    if (isTrade && (!txn.shares || !txn.price)) {
+        return Promise.reject(new Error('buy/sell require shares and price'));
+    }
+    if (!isTrade && !txn.amount) {
+        return Promise.reject(new Error('deposit/withdrawal require amount'));
+    }
+    const amount = isTrade ? Number(txn.shares) * Number(txn.price) : Number(txn.amount);
+    const symbol = txn.symbol ? String(txn.symbol).toUpperCase() : null;
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            `INSERT INTO sim_transactions (account_id, symbol, type, shares, price, amount, fees, txn_date, notes)
+             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [symbol, txn.type, txn.shares ?? null, txn.price ?? null, amount, Number(txn.fees ?? 0), txn.txn_date, txn.notes ?? null],
+            function(err) {
+                sqlite.close();
+                err ? reject(err) : resolve({ id: this.lastID, symbol, type: txn.type, amount });
+            }
+        );
+    });
+}
+
+function listSimTransactions() {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.all(
+            'SELECT * FROM sim_transactions ORDER BY txn_date ASC, id ASC',
+            [],
+            (err, rows) => {
+                sqlite.close();
+                err ? reject(err) : resolve(rows || []);
+            }
+        );
+    });
+}
+
+function deleteAllSimTransactions() {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run('DELETE FROM sim_transactions', [], function(err) {
+            sqlite.close();
+            err ? reject(err) : resolve({ deleted: this.changes });
+        });
     });
 }
 
 module.exports = {
     VALID_BUCKETS,
+    VALID_TXN_TYPES,
+    DB_PATH,
     getDb,
     initDb,
     getWatchlist,
@@ -455,6 +942,7 @@ module.exports = {
     isInWatchlist,
     setWatchlistBucket,
     upsertStockSnapshot,
+    getFirstStockSnapshot,
     getStockHistory,
     getLatestSnapshotsForWatchlist,
     getPortfolio,
@@ -468,4 +956,19 @@ module.exports = {
     listMemos,
     markMemoReviewed,
     deleteMemo,
+    getRiskRules,
+    setRiskRules,
+    setPositionStop,
+    getPositionStop,
+    listPositionStops,
+    deletePositionStop,
+    addTransaction,
+    listTransactions,
+    getTransactionById,
+    deleteTransaction,
+    getSimAccount,
+    setSimTaxBracket,
+    addSimTransaction,
+    listSimTransactions,
+    deleteAllSimTransactions,
 };
