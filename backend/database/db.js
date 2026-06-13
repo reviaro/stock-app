@@ -4,6 +4,7 @@ const fs = require('fs');
 
 const VALID_BUCKETS = ['compounders', 'buy_soon', 'expensive', 'speculative', 'owned', 'unsorted'];
 const VALID_TXN_TYPES = ['buy', 'sell', 'dividend', 'deposit', 'withdrawal'];
+const VALID_SIM_TXN_TYPES = ['buy', 'sell', 'deposit', 'withdrawal']; // 'dividend' excluded: sim tracks manual trades only
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const RULE_FIELDS = ['max_position_pct', 'max_sector_pct', 'max_risk_per_trade_pct', 'target_cash_pct'];
 
@@ -858,7 +859,7 @@ function getSimAccount() {
         const sqlite = getDb();
         sqlite.get('SELECT * FROM sim_accounts WHERE id = 1', [], (err, row) => {
             sqlite.close();
-            err ? reject(err) : resolve(row);
+            err ? reject(err) : resolve(row || null);
         });
     });
 }
@@ -878,17 +879,20 @@ function setSimTaxBracket(bracket) {
 }
 
 function addSimTransaction(txn) {
-    const VALID = ['buy', 'sell', 'deposit', 'withdrawal'];
-    if (!VALID.includes(txn.type)) return Promise.reject(new Error(`invalid type: ${txn.type}`));
+    if (!VALID_SIM_TXN_TYPES.includes(txn.type)) return Promise.reject(new Error(`invalid type: ${txn.type}`));
     if (!txn.txn_date || !/^\d{4}-\d{2}-\d{2}$/.test(txn.txn_date)) {
         return Promise.reject(new Error('txn_date required (YYYY-MM-DD)'));
     }
     const isTrade = txn.type === 'buy' || txn.type === 'sell';
-    if (isTrade && (!txn.shares || !txn.price)) {
-        return Promise.reject(new Error('buy/sell require shares and price'));
-    }
-    if (!isTrade && !txn.amount) {
-        return Promise.reject(new Error('deposit/withdrawal require amount'));
+    if (isTrade) {
+        const shareCount = Number(txn.shares);
+        const tradePrice = Number(txn.price);
+        if (!txn.symbol || typeof txn.symbol !== 'string') return Promise.reject(new Error('buy/sell require symbol'));
+        if (!Number.isFinite(shareCount) || shareCount <= 0) return Promise.reject(new Error('shares must be a positive number'));
+        if (!Number.isFinite(tradePrice) || tradePrice <= 0) return Promise.reject(new Error('price must be a positive number'));
+    } else {
+        const cashAmount = Number(txn.amount);
+        if (!Number.isFinite(cashAmount) || cashAmount <= 0) return Promise.reject(new Error('deposit/withdrawal amount must be a positive number'));
     }
     const amount = isTrade ? Number(txn.shares) * Number(txn.price) : Number(txn.amount);
     const symbol = txn.symbol ? String(txn.symbol).toUpperCase() : null;
