@@ -27,7 +27,7 @@ function formatPrice(n: number | undefined): string {
 
 function SnapshotCell({ label, value }: { label: string; value?: { price: number; captured_at: string } }) {
   return (
-    <div className="min-w-[62px] rounded-md border border-border/70 bg-background/70 px-2 py-1">
+    <div className="data-hover min-w-[72px] rounded-md border border-border/70 bg-background/70 px-2 py-1">
       <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
       <p className="mt-0.5 font-mono text-[11px] text-foreground">{value ? `$${formatPrice(value.price)}` : '—'}</p>
     </div>
@@ -111,55 +111,60 @@ function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketC
   return (
     <motion.div
       className={[
-        'group w-full flex items-center justify-between px-3 py-2 rounded-lg',
-        'text-left transition-colors duration-150 border border-transparent',
-        'hover:bg-accent hover:border-border',
+        'group w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg',
+        'data-hover text-left border border-transparent',
         isSelected ? 'bg-accent border-border ring-1 ring-primary' : '',
       ].join(' ')}
-      whileHover={{ scale: 1.02, transition: { type: 'spring', stiffness: 350, damping: 22 } }}
-      whileTap={{ scale: 0.97, transition: { type: 'spring', stiffness: 400, damping: 25 } }}
+      whileTap={{ scale: 0.995, transition: { duration: 0.08 } }}
     >
       <button
         type="button"
         onClick={() => onSelect(entry.symbol)}
-        className="flex-1 flex items-center justify-between min-w-0 gap-3"
+        className="flex-1 min-w-0"
         aria-pressed={isSelected}
         aria-label={`Select ${entry.symbol}`}
       >
-        <div className="min-w-0">
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <p className="font-semibold text-sm text-foreground">{entry.symbol}</p>
-            {showEarningsBadge && earningsDaysAway != null && (
-              <Badge variant="outline" className="text-[9px] py-0 px-1 text-amber-400 border-amber-400/40">
-                ER {earningsDaysAway === 0 ? 'today' : `in ${earningsDaysAway}d`}
-              </Badge>
-            )}
-          </div>
-          <p className="text-xs text-muted-foreground truncate max-w-[120px]">
-            {entry.name ?? entry.symbol}
-          </p>
-          {(nearHigh || isVolumeSurge) && (
-            <div className="flex items-center gap-1 flex-wrap">
-              {nearHigh && pctFrom52High != null && (
-                <Badge variant="outline" className="text-[9px] py-0 px-1 text-green-400 border-green-400/40">
-                  {pctFrom52High >= 0 ? 'NEW HIGH' : `${pctFrom52High.toFixed(1)}% 52w`}
-                </Badge>
-              )}
-              {isVolumeSurge && entry.volume != null && entry.avgVolume != null && (
-                <Badge variant="outline" className="text-[9px] py-0 px-1 text-blue-400 border-blue-400/40">
-                  VOL {(entry.volume / entry.avgVolume).toFixed(1)}x
+        <div className="grid min-w-0 grid-cols-1 items-center gap-3 lg:grid-cols-[minmax(0,1.7fr)_auto_auto]">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <p className="font-semibold text-sm text-foreground">{entry.symbol}</p>
+              <span className="hidden text-[10px] uppercase tracking-wide text-muted-foreground sm:inline">
+                {entry.sector ?? '—'}
+              </span>
+              {showEarningsBadge && earningsDaysAway != null && (
+                <Badge variant="outline" className="text-[9px] py-0 px-1 text-amber-400 border-amber-400/40">
+                  ER {earningsDaysAway === 0 ? 'today' : `in ${earningsDaysAway}d`}
                 </Badge>
               )}
             </div>
-          )}
-        </div>
-        <div className="hidden xl:flex items-center gap-1.5 shrink-0">
-          <SnapshotCell label="Morning" value={snapshots?.openish} />
-          <SnapshotCell label="Midday" value={snapshots?.midday} />
-          <SnapshotCell label="Close" value={snapshots?.closeish} />
-        </div>
-        <div className="text-right shrink-0 ml-2">
-          {renderValue()}
+            <p className="text-xs text-muted-foreground leading-snug break-words sm:truncate sm:pr-4">
+              {entry.name ?? entry.symbol}
+            </p>
+            {(nearHigh || isVolumeSurge) && (
+              <div className="mt-1 flex items-center gap-1 flex-wrap">
+                {nearHigh && pctFrom52High != null && (
+                  <Badge variant="outline" className="text-[9px] py-0 px-1 text-green-400 border-green-400/40">
+                    {pctFrom52High >= 0 ? 'NEW HIGH' : `${pctFrom52High.toFixed(1)}% 52w`}
+                  </Badge>
+                )}
+                {isVolumeSurge && entry.volume != null && entry.avgVolume != null && (
+                  <Badge variant="outline" className="text-[9px] py-0 px-1 text-blue-400 border-blue-400/40">
+                    VOL {(entry.volume / entry.avgVolume).toFixed(1)}x
+                  </Badge>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="hidden 2xl:flex items-center gap-1.5 shrink-0">
+            <SnapshotCell label="Morning" value={snapshots?.openish} />
+            <SnapshotCell label="Midday" value={snapshots?.midday} />
+            <SnapshotCell label="Close" value={snapshots?.closeish} />
+          </div>
+
+          <div className="text-left sm:text-right shrink-0 min-w-[96px]">
+            {renderValue()}
+          </div>
         </div>
       </button>
 
@@ -167,7 +172,7 @@ function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketC
         value={entry.bucket}
         onChange={(e) => onBucketChange(entry.symbol, e.target.value as Bucket)}
         onClick={(e) => e.stopPropagation()}
-        className="text-[10px] px-1 py-0.5 rounded bg-secondary border border-border shrink-0 ml-1"
+        className="text-[10px] px-1.5 py-1 rounded bg-secondary border border-border shrink-0"
       >
         {BUCKETS.map(b => <option key={b} value={b}>{BUCKET_LABELS[b]}</option>)}
       </select>
@@ -175,21 +180,21 @@ function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketC
       <button
         type="button"
         onClick={(e) => { e.stopPropagation(); onMemo(entry.symbol) }}
-        title={hasMemo ? 'Edit memo' : 'Add memo'}
+        title={hasMemo ? 'Edit research memo' : 'Add research memo'}
         className={[
-          'text-[10px] px-1.5 py-0.5 rounded border shrink-0 opacity-0 group-hover:opacity-100 transition-opacity ml-1',
-          hasMemo ? 'border-primary text-primary' : 'border-border text-muted-foreground',
+          'data-hover relative z-10 text-[10px] px-2 py-1 rounded border shrink-0 transition-colors',
+          hasMemo ? 'border-primary text-primary bg-primary/10' : 'border-border text-muted-foreground hover:text-foreground hover:border-primary',
           isMemoStale ? 'ring-1 ring-amber-500/60' : '',
         ].join(' ')}
       >
-        📝
+        📝 Memo
       </button>
       {/* Delete button — visible on hover */}
       <button
         type="button"
         onClick={(e) => { e.stopPropagation(); onRemove(entry.symbol) }}
         disabled={isRemoving}
-        className="ml-1 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive p-1 rounded shrink-0"
+        className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive p-1 rounded shrink-0"
         aria-label={`Remove ${entry.symbol} from watchlist`}
         title="Remove from watchlist"
       >
@@ -324,7 +329,7 @@ function AddStockSearch({ onClose }: { onClose: () => void }) {
               type="button"
               onClick={() => handleAdd(stock.symbol)}
               disabled={addMutation.isPending}
-              className="w-full flex items-center justify-between px-3 py-2 text-left text-sm hover:bg-accent transition-colors border-b border-border last:border-0"
+              className="data-hover w-full flex items-center justify-between rounded-md border border-transparent px-3 py-2 text-left text-sm"
             >
               <div>
                 <span className="font-semibold text-foreground">{stock.symbol}</span>
@@ -472,7 +477,7 @@ export function Watchlist() {
             <a
               href="/api/watchlist/export/csv"
               download="watchlist.csv"
-              className="text-xs px-2 py-0.5 rounded-md border border-border text-muted-foreground hover:text-foreground hover:border-primary transition-colors"
+              className="data-hover text-xs px-2 py-0.5 rounded-md border border-border text-muted-foreground hover:text-foreground"
               title="Export watchlist to CSV"
             >
               CSV
@@ -482,7 +487,7 @@ export function Watchlist() {
               type="button"
               onClick={() => setShowAddSearch((v) => !v)}
               className={[
-                'text-xs px-2 py-0.5 rounded-md border transition-colors',
+                'data-hover text-xs px-2 py-0.5 rounded-md border',
                 showAddSearch
                   ? 'bg-primary text-primary-foreground border-primary'
                   : 'bg-transparent text-muted-foreground border-border hover:border-primary hover:text-foreground',
@@ -500,7 +505,7 @@ export function Watchlist() {
                   type="button"
                   onClick={() => setActiveSortIdx(idx)}
                   className={[
-                    'text-xs px-2 py-0.5 rounded-md border transition-colors',
+                    'data-hover text-xs px-2 py-0.5 rounded-md border',
                     idx === activeSortIdx
                       ? 'bg-primary text-primary-foreground border-primary'
                       : 'bg-transparent text-muted-foreground border-border hover:border-primary hover:text-foreground',
@@ -522,7 +527,7 @@ export function Watchlist() {
               <button key={b}
                 onClick={() => setBucketFilter(b)}
                 className={[
-                  'text-[10px] px-2 py-0.5 rounded-full border transition-colors',
+                  'data-hover text-[10px] px-2 py-0.5 rounded-full border',
                   active ? 'bg-primary text-primary-foreground border-primary' : 'border-border text-muted-foreground hover:border-primary',
                 ].join(' ')}
               >

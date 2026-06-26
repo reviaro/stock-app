@@ -23,7 +23,7 @@ function IndexRow({ index }: IndexRowProps) {
   const percentLabel = formatPercent(index.changePercent)
 
   return (
-    <div className="flex items-center justify-between py-2 border-b last:border-0">
+    <div className="data-hover flex items-center justify-between rounded-md border border-transparent px-2 py-2">
       <div>
         <p className="font-semibold text-sm text-foreground">{index.name}</p>
         <p className="text-xs text-muted-foreground">{index.symbol}</p>
@@ -69,7 +69,7 @@ export function MarketPulse() {
         )}
 
         {data && (
-          <div>
+          <div className="space-y-1">
             {INDEX_ORDER.map((symbol) => {
               const index = data[symbol]
               if (!index) return null

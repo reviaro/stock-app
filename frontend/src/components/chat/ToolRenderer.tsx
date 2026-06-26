@@ -67,7 +67,7 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
       case 'getCanslimAnalysis':
         // CANSLIMScorecard renders the AI's requested symbol, or falls back to selectedTicker
         return (
-          <div className="w-full rounded-md overflow-hidden border border-border">
+          <div className="data-hover w-full rounded-md overflow-hidden border border-border">
             <div className="px-2 pt-1 pb-0 text-[10px] text-muted-foreground font-medium uppercase tracking-wide">
               CAN SLIM Analysis
             </div>
@@ -79,7 +79,7 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
       case 'getTechnicalIndicators':
         // StockChart renders the AI's requested symbol, or falls back to selectedTicker
         return (
-          <div className="w-full rounded-md overflow-hidden border border-border">
+          <div className="data-hover w-full rounded-md overflow-hidden border border-border">
             <div className="px-2 pt-1 pb-0 text-[10px] text-muted-foreground font-medium uppercase tracking-wide">
               {toolName === 'getTechnicalIndicators' ? 'Technical Analysis' : 'Stock Info'}
             </div>
@@ -99,7 +99,7 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
               : 'Data Unavailable'
           const colorClass = isBullish ? 'text-green-400' : 'text-red-400'
           return (
-            <div className="w-full rounded-md border border-border px-3 py-2 space-y-1">
+            <div className="data-hover w-full rounded-md border border-border px-3 py-2 space-y-1">
               <div className="text-[10px] text-muted-foreground font-medium uppercase tracking-wide">
                 Market Direction
               </div>
@@ -125,7 +125,7 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
         const articles = Array.isArray(output) ? output : (output && typeof output === 'object' && 'articles' in (output as Record<string, unknown>) ? (output as Record<string, unknown>).articles as unknown[] : null)
         if (articles && articles.length > 0) {
           return (
-            <div className="w-full rounded-md border border-border px-3 py-2 space-y-2">
+            <div className="data-hover w-full rounded-md border border-border px-3 py-2 space-y-2">
               <div className="text-[10px] text-muted-foreground font-medium uppercase tracking-wide">
                 Latest News {symbol ? `— ${symbol}` : ''}
               </div>
@@ -154,7 +154,7 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
       default:
         // Unknown tool — show raw output as JSON for debugging
         return (
-          <div className="w-full rounded-md border border-border px-3 py-2">
+          <div className="data-hover w-full rounded-md border border-border px-3 py-2">
             <div className="text-[10px] text-muted-foreground font-medium uppercase tracking-wide mb-1">
               {toolName}
             </div>

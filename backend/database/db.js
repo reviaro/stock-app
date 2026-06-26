@@ -7,6 +7,7 @@ const VALID_TXN_TYPES = ['buy', 'sell', 'dividend', 'deposit', 'withdrawal'];
 const VALID_SIM_TXN_TYPES = ['buy', 'sell', 'deposit', 'withdrawal']; // 'dividend' excluded: sim tracks manual trades only
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const RULE_FIELDS = ['max_position_pct', 'max_sector_pct', 'max_risk_per_trade_pct', 'target_cash_pct'];
+const MEMO_FIELDS = ['thesis', 'variant_view', 'fair_value_low', 'fair_value_high', 'buy_below', 'trim_above', 'sell_rule', 'invalidation', 'risks', 'conviction'];
 
 const DB_PATH = process.env.DB_PATH_OVERRIDE || path.join(__dirname, '..', 'database', 'stocks.db');
 
@@ -151,9 +152,11 @@ function initDb() {
                 CREATE TABLE IF NOT EXISTS stock_memos (
                     symbol TEXT PRIMARY KEY,
                     thesis TEXT,
+                    variant_view TEXT,
                     fair_value_low REAL,
                     fair_value_high REAL,
                     buy_below REAL,
+                    trim_above REAL,
                     sell_rule TEXT,
                     invalidation TEXT,
                     risks TEXT,
@@ -163,6 +166,9 @@ function initDb() {
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             `);
+
+            db.run('ALTER TABLE stock_memos ADD COLUMN variant_view TEXT', ignoreDuplicateColumnError);
+            db.run('ALTER TABLE stock_memos ADD COLUMN trim_above REAL', ignoreDuplicateColumnError);
 
             db.run(`
                 CREATE TABLE IF NOT EXISTS risk_rules (
@@ -554,23 +560,41 @@ function clearChatHistory(sessionId = 'default') {
     });
 }
 
+function validateMemoFields(fields = {}) {
+    if (fields.conviction !== undefined && fields.conviction !== null && fields.conviction !== '') {
+        const conviction = Number(fields.conviction);
+        if (!Number.isInteger(conviction) || conviction < 1 || conviction > 5) {
+            throw new Error('conviction must be an integer from 1 to 5');
+        }
+    }
+
+    for (const field of ['fair_value_low', 'fair_value_high', 'buy_below', 'trim_above']) {
+        if (fields[field] !== undefined && fields[field] !== null && fields[field] !== '') {
+            const numeric = Number(fields[field]);
+            if (!Number.isFinite(numeric) || numeric < 0) {
+                throw new Error(`${field} must be a non-negative number`);
+            }
+        }
+    }
+}
+
 function upsertMemo(symbol, fields) {
-    const cols = ['thesis', 'fair_value_low', 'fair_value_high', 'buy_below', 'sell_rule', 'invalidation', 'risks', 'conviction'];
+    try {
+        validateMemoFields(fields);
+    } catch (err) {
+        return Promise.reject(err);
+    }
+
+    const cols = MEMO_FIELDS;
     const values = cols.map((col) => fields[col] ?? null);
+    const updateSql = cols.map((col) => `${col}=excluded.${col}`).join(',\n               ');
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
         sqlite.run(
             `INSERT INTO stock_memos (symbol, ${cols.join(',')}, updated_at)
              VALUES (?, ${cols.map(() => '?').join(',')}, CURRENT_TIMESTAMP)
              ON CONFLICT(symbol) DO UPDATE SET
-               thesis=excluded.thesis,
-               fair_value_low=excluded.fair_value_low,
-               fair_value_high=excluded.fair_value_high,
-               buy_below=excluded.buy_below,
-               sell_rule=excluded.sell_rule,
-               invalidation=excluded.invalidation,
-               risks=excluded.risks,
-               conviction=excluded.conviction,
+               ${updateSql},
                updated_at=CURRENT_TIMESTAMP`,
             [symbol.toUpperCase(), ...values],
             function(err) {

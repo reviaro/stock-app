@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { useMemoQuery, useSaveMemo, useReviewMemo } from '@/hooks/useMemo'
 import type { MemoInput } from '@/types/memo'
 
@@ -7,6 +7,7 @@ interface MemoDrawerProps {
   symbol: string | null
   open: boolean
   onOpenChange: (open: boolean) => void
+  initialDraft?: MemoInput | null
 }
 
 function formatRelative(iso: string | null | undefined): string {
@@ -18,7 +19,7 @@ function formatRelative(iso: string | null | undefined): string {
   return `${days} days ago`
 }
 
-export function MemoDrawer({ symbol, open, onOpenChange }: MemoDrawerProps) {
+export function MemoDrawer({ symbol, open, onOpenChange, initialDraft = null }: MemoDrawerProps) {
   const { data: memo, isLoading } = useMemoQuery(symbol)
   const save = useSaveMemo(symbol || '')
   const review = useReviewMemo(symbol || '')
@@ -32,9 +33,11 @@ export function MemoDrawer({ symbol, open, onOpenChange }: MemoDrawerProps) {
     if (memo) {
       setForm({
         thesis: memo.thesis ?? '',
+        variant_view: memo.variant_view ?? '',
         fair_value_low: memo.fair_value_low,
         fair_value_high: memo.fair_value_high,
         buy_below: memo.buy_below,
+        trim_above: memo.trim_above,
         sell_rule: memo.sell_rule ?? '',
         invalidation: memo.invalidation ?? '',
         risks: memo.risks ?? '',
@@ -43,8 +46,11 @@ export function MemoDrawer({ symbol, open, onOpenChange }: MemoDrawerProps) {
     } else {
       setForm({})
     }
+    if (initialDraft) {
+      setForm((prev) => ({ ...prev, ...initialDraft }))
+    }
     setPressureText(null)
-  }, [memo?.symbol, symbol])
+  }, [memo?.symbol, symbol, initialDraft])
 
   if (!symbol) return null
 
@@ -62,20 +68,9 @@ export function MemoDrawer({ symbol, open, onOpenChange }: MemoDrawerProps) {
         body: JSON.stringify({ symbol }),
       })
       if (!res.ok) throw new Error('Draft failed')
-      // Expect a stream — accumulate as text; the helper streams JSON chunks.
-      const reader = res.body!.getReader()
-      const decoder = new TextDecoder()
-      let acc = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        acc += decoder.decode(value, { stream: true })
-      }
-      // The AI SDK stream format includes markers; extract JSON blob via regex.
-      const jsonMatch = acc.match(/\{[\s\S]*\}/)
-      if (!jsonMatch) throw new Error('No JSON in draft response')
-      const draft = JSON.parse(jsonMatch[0])
-      setForm(prev => ({ ...prev, ...draft }))
+      const json = await res.json()
+      if (json.status !== 'success') throw new Error(json.error || 'Draft failed')
+      setForm(prev => ({ ...prev, ...json.data }))
     } catch (e) {
       alert(`Draft error: ${(e as Error).message}`)
     } finally {
@@ -93,15 +88,9 @@ export function MemoDrawer({ symbol, open, onOpenChange }: MemoDrawerProps) {
         body: JSON.stringify({ symbol }),
       })
       if (!res.ok) throw new Error('Pressure-test failed')
-      const reader = res.body!.getReader()
-      const decoder = new TextDecoder()
-      let acc = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        acc += decoder.decode(value, { stream: true })
-        setPressureText(acc)
-      }
+      const json = await res.json()
+      if (json.status !== 'success') throw new Error(json.error || 'Pressure-test failed')
+      setPressureText(json.data?.bear_case || '')
     } catch (e) {
       setPressureText(`Error: ${(e as Error).message}`)
     } finally {
@@ -114,6 +103,7 @@ export function MemoDrawer({ symbol, open, onOpenChange }: MemoDrawerProps) {
       <SheetContent side="right" className="w-[480px] sm:max-w-none overflow-y-auto">
         <SheetHeader>
           <SheetTitle>{symbol} — Memo</SheetTitle>
+          <SheetDescription>Capture thesis, valuation, rules, and risks for {symbol}.</SheetDescription>
         </SheetHeader>
 
         {isLoading && <p className="text-sm text-muted-foreground mt-4">Loading…</p>}
@@ -149,7 +139,15 @@ export function MemoDrawer({ symbol, open, onOpenChange }: MemoDrawerProps) {
               className="w-full mt-1 text-xs px-2 py-1.5 rounded-md bg-secondary border border-border" />
           </label>
 
-          <div className="grid grid-cols-3 gap-2">
+          <label className="block">
+            <span className="text-xs font-medium">Variant view</span>
+            <textarea value={form.variant_view ?? ''} onChange={e => setForm(f => ({ ...f, variant_view: e.target.value }))}
+              rows={2} aria-label="Variant view"
+              placeholder="What do we believe the market may be missing?"
+              className="w-full mt-1 text-xs px-2 py-1.5 rounded-md bg-secondary border border-border" />
+          </label>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <label className="block">
               <span className="text-xs">FV low</span>
               <input type="number" value={form.fair_value_low ?? ''}
@@ -166,6 +164,12 @@ export function MemoDrawer({ symbol, open, onOpenChange }: MemoDrawerProps) {
               <span className="text-xs">Buy below</span>
               <input type="number" value={form.buy_below ?? ''}
                 onChange={e => setForm(f => ({ ...f, buy_below: e.target.value ? Number(e.target.value) : null }))}
+                className="w-full mt-1 text-xs px-2 py-1.5 rounded-md bg-secondary border border-border" />
+            </label>
+            <label className="block">
+              <span className="text-xs">Trim above</span>
+              <input type="number" value={form.trim_above ?? ''}
+                onChange={e => setForm(f => ({ ...f, trim_above: e.target.value ? Number(e.target.value) : null }))}
                 className="w-full mt-1 text-xs px-2 py-1.5 rounded-md bg-secondary border border-border" />
             </label>
           </div>

@@ -370,12 +370,14 @@ const chatTools = {
 };
 
 const memoPrompts = {
-  draftSystem: `You are a disciplined value investor helping the user write a research memo for a single stock. You will be given the stock's basic info, technicals, and recent news. Respond with a JSON object matching this shape exactly (no prose, no code fences):
+  draftSystem: `You are a disciplined value investor helping the user write a research memo for a single stock. You will be given the stock's basic info, quality metrics, technicals, and recent news. Respond with a JSON object matching this shape exactly (no prose, no code fences):
 {
   "thesis": "<2–4 sentence business thesis>",
+  "variant_view": "<what the market may be missing; empty string if not justified>",
   "fair_value_low": <number|null>,
   "fair_value_high": <number|null>,
   "buy_below": <number|null>,
+  "trim_above": <number|null>,
   "sell_rule": "<string>",
   "invalidation": "<string>",
   "risks": "<bulleted markdown list of top 3–5 risks>",

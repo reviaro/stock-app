@@ -13,7 +13,7 @@ const Module = require('module');
 const _originalLoad = Module._load;
 Module._load = function(request, parent, isMain) {
     if (request.includes('pybridge')) {
-        return { getStockInfo: async () => ({ data: { price: 200.00, name: 'Test' } }) };
+        return { getStockInfo: async () => ({ data: { price: 200.00, name: 'Test', change: -5.25, changePercent: -2.56, previousClose: 205.25 } }) };
     }
     return _originalLoad.apply(this, arguments);
 };
@@ -127,6 +127,21 @@ test('buy then sell -> cash updated correctly', async () => {
     });
     const res = await request('GET', '/api/simulator/account');
     assert.strictEqual(res.body.data.cash, 10500);
+});
+
+test('GET /api/simulator/holdings includes live stock daily performance', async () => {
+    await request('PATCH', '/api/simulator/account', { deposit: 10000 });
+    await request('POST', '/api/simulator/trade', {
+        type: 'buy', symbol: 'AAPL', shares: 10, price: 150, txn_date: '2026-01-01',
+    });
+
+    const res = await request('GET', '/api/simulator/holdings');
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.body.data[0].symbol, 'AAPL');
+    assert.strictEqual(res.body.data[0].priceChange, -5.25);
+    assert.strictEqual(res.body.data[0].priceChangePct, -2.56);
+    assert.strictEqual(res.body.data[0].previousClose, 205.25);
 });
 
 test('GET /api/simulator/transactions returns list', async () => {

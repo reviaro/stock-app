@@ -1,9 +1,11 @@
 export interface Memo {
   symbol: string
   thesis: string | null
+  variant_view: string | null
   fair_value_low: number | null
   fair_value_high: number | null
   buy_below: number | null
+  trim_above: number | null
   sell_rule: string | null
   invalidation: string | null
   risks: string | null

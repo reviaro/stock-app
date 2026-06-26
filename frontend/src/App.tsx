@@ -2,11 +2,13 @@ import { useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Dashboard } from '@/components/Dashboard'
 import { SimulatorPage } from '@/pages/SimulatorPage'
+import { OpportunitiesPage } from '@/pages/OpportunitiesPage'
 
-type Tab = 'dashboard' | 'simulator'
+type Tab = 'dashboard' | 'opportunities' | 'simulator'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
+  { id: 'opportunities', label: 'Opportunities' },
   { id: 'simulator', label: 'Simulator' },
 ]
 
@@ -41,7 +43,7 @@ function App() {
           exit={{ opacity: 0, y: -12 }}
           transition={{ duration: 0.25, ease: 'easeOut' }}
         >
-          {activeTab === 'dashboard' ? <Dashboard /> : <SimulatorPage />}
+          {activeTab === 'dashboard' ? <Dashboard /> : activeTab === 'opportunities' ? <OpportunitiesPage /> : <SimulatorPage />}
         </motion.div>
       </AnimatePresence>
     </div>

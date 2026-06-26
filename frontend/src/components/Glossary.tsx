@@ -93,9 +93,21 @@ const GLOSSARY: GlossaryTerm[] = [
         category: 'fundamental',
     },
     {
+        term: 'FCF Margin (Free Cash Flow Margin)',
+        description:
+            'Free cash flow divided by revenue, shown as a percentage. It measures how much of each sales dollar turns into real cash that management can reinvest, save, or return to shareholders.',
+        category: 'fundamental',
+    },
+    {
         term: 'Debt-to-Equity Ratio',
         description:
             'Total liabilities divided by shareholders\' equity. A high ratio may indicate excessive debt risk. Varies by industry — compare to sector peers.',
+        category: 'fundamental',
+    },
+    {
+        term: 'Debt / Equity',
+        description:
+            'Another way of writing debt-to-equity. It compares how much the business owes versus the equity base supporting it. Lower is usually safer, but capital-heavy industries naturally run higher ratios.',
         category: 'fundamental',
     },
     {
@@ -114,6 +126,48 @@ const GLOSSARY: GlossaryTerm[] = [
         term: 'Return on Equity (ROE)',
         description:
             'Net income divided by shareholders\' equity. Measures how effectively management uses invested capital to generate profits. 15%+ is generally strong.',
+        category: 'fundamental',
+    },
+    {
+        term: 'ROIC (Return on Invested Capital)',
+        description:
+            'Measures how efficiently a company turns the capital invested in the business into after-tax operating profit. Higher ROIC usually signals stronger economics, better discipline, and more durable competitive advantages.',
+        category: 'fundamental',
+    },
+    {
+        term: 'Interest Coverage',
+        description:
+            'Operating earnings divided by interest expense. It shows how comfortably a company can pay interest on its debt. Higher coverage generally means lower balance-sheet stress.',
+        category: 'fundamental',
+    },
+    {
+        term: 'Earnings Consistency',
+        description:
+            'A stability measure showing how reliably profits hold up across multiple years. More consistent earnings usually indicate a steadier business model and less cyclical or erratic profitability.',
+        category: 'fundamental',
+    },
+    {
+        term: 'Gross Margin',
+        description:
+            'Revenue minus cost of goods sold, divided by revenue. It shows how much money remains after direct production costs and is a useful read on pricing power and product economics.',
+        category: 'fundamental',
+    },
+    {
+        term: 'Gross Margin Stability',
+        description:
+            'A measure of how steady gross margin stays over time. Stable margins usually suggest predictable unit economics, disciplined pricing, and less operational volatility.',
+        category: 'fundamental',
+    },
+    {
+        term: 'Revenue CAGR',
+        description:
+            'Compound annual growth rate of revenue over a multi-year period. It smooths out year-to-year swings and shows the average pace at which sales have grown.',
+        category: 'fundamental',
+    },
+    {
+        term: 'Quality Composite Score',
+        description:
+            'The Quality Scorecard\'s 0-100 roll-up score. It combines several business-quality signals such as returns on capital, cash generation, leverage, coverage, consistency, and growth into one summary number.',
         category: 'fundamental',
     },
     {
@@ -355,7 +409,7 @@ export function Glossary({ isOpen, onClose }: GlossaryProps) {
                                             {group.terms.map((t) => (
                                                 <div
                                                     key={t.term}
-                                                    className="rounded-lg border border-border bg-secondary/30 px-4 py-3"
+                                                    className="data-hover rounded-lg border border-border bg-secondary/30 px-4 py-3"
                                                 >
                                                     <h4 className="text-sm font-semibold text-foreground mb-1">{t.term}</h4>
                                                     <p className="text-xs text-muted-foreground leading-relaxed">{t.description}</p>

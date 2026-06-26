@@ -9,6 +9,7 @@ const {
     computeCashBalance,
     computeRealizedPnl,
 } = require('../services/simulator_ledger');
+const { buildSimulatorReview, simulatorTransactionsToCsv } = require('../services/simulator_review');
 
 // GET /api/simulator/account
 router.get('/account', async (req, res) => {
@@ -90,10 +91,17 @@ router.get('/holdings', async (req, res) => {
         if (symbols.length === 0) return res.json({ status: 'success', data: [] });
 
         const prices = {};
+        const stockMeta = {};
         await Promise.all(symbols.map(async (symbol) => {
             try {
                 const info = await pybridge.getStockInfo(symbol);
-                if (typeof info?.data?.price === 'number') prices[symbol] = info.data.price;
+                const data = info?.data || {};
+                if (typeof data.price === 'number') prices[symbol] = data.price;
+                stockMeta[symbol] = {
+                    priceChange: typeof data.change === 'number' ? Math.round(data.change * 100) / 100 : null,
+                    priceChangePct: typeof data.changePercent === 'number' ? Math.round(data.changePercent * 100) / 100 : null,
+                    previousClose: typeof data.previousClose === 'number' ? Math.round(data.previousClose * 100) / 100 : null,
+                };
             } catch { /* non-fatal */ }
         }));
 
@@ -111,6 +119,9 @@ router.get('/holdings', async (req, res) => {
                 avg_cost: Math.round(h.avg_cost * 100) / 100,
                 total_cost: Math.round(h.total_cost * 100) / 100,
                 currentPrice,
+                priceChange: stockMeta[symbol]?.priceChange ?? null,
+                priceChangePct: stockMeta[symbol]?.priceChangePct ?? null,
+                previousClose: stockMeta[symbol]?.previousClose ?? null,
                 currentValue: currentValue != null ? Math.round(currentValue * 100) / 100 : null,
                 pnl: pnl != null ? Math.round(pnl * 100) / 100 : null,
                 pnlPct: pnlPct != null ? Math.round(pnlPct * 100) / 100 : null,
@@ -213,6 +224,36 @@ router.get('/tax-preview', async (req, res) => {
         });
 
         res.json({ status: 'success', data: { symbol, shares: sharesNum, current_price: currentPrice, ...preview } });
+    } catch (err) {
+        res.status(500).json({ status: 'error', error: err.message });
+    }
+});
+
+// GET /api/simulator/review — performance summary and Buffett action log
+router.get('/review', async (req, res) => {
+    try {
+        const txns = await db.listSimTransactions();
+        const holdings = computeHoldings(txns);
+        const prices = {};
+        await Promise.all(Object.keys(holdings).map(async (symbol) => {
+            try {
+                const info = await pybridge.getStockInfo(symbol);
+                if (typeof info?.data?.price === 'number') prices[symbol] = info.data.price;
+            } catch { /* non-fatal */ }
+        }));
+        res.json({ status: 'success', data: buildSimulatorReview(txns, prices) });
+    } catch (err) {
+        res.status(500).json({ status: 'error', error: err.message });
+    }
+});
+
+// GET /api/simulator/export.csv — export paper-trading ledger
+router.get('/export.csv', async (req, res) => {
+    try {
+        const txns = await db.listSimTransactions();
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename="simulator-transactions.csv"');
+        res.send(simulatorTransactionsToCsv(txns));
     } catch (err) {
         res.status(500).json({ status: 'error', error: err.message });
     }

@@ -16,6 +16,8 @@ const qualityRoutes = require('./routes/quality');
 const riskRoutes = require('./routes/risk');
 const transactionsRoutes = require('./routes/transactions');
 const simulatorRoutes = require('./routes/simulator');
+const researchNotesRoutes = require('./routes/research_notes');
+const screenerRoutes = require('./routes/screener');
 const { initUniverseScheduler } = require('./services/universeCache');
 const { initSnapshotScheduler } = require('./services/snapshotScheduler');
 
@@ -46,6 +48,8 @@ app.use('/api/quality', qualityRoutes);
 app.use('/api/risk', riskRoutes);
 app.use('/api/transactions', transactionsRoutes);
 app.use('/api/simulator', simulatorRoutes);
+app.use('/api/research-notes', researchNotesRoutes);
+app.use('/api/screener', screenerRoutes);
 
 // Serve frontend for all other routes (SPA)
 app.get('*', (req, res) => {

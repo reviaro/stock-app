@@ -43,7 +43,7 @@ export function SectorRotation() {
                 type="button"
                 onClick={() => setPeriod(p)}
                 className={[
-                  'text-xs px-2 py-0.5 rounded-md border transition-colors',
+                  'data-hover text-xs px-2 py-0.5 rounded-md border',
                   period === p
                     ? 'bg-primary text-primary-foreground border-primary'
                     : 'bg-transparent text-muted-foreground border-border hover:border-primary hover:text-foreground',
@@ -70,7 +70,7 @@ export function SectorRotation() {
               key={s.ticker}
               initial={{ opacity: 0, x: -8 }}
               animate={{ opacity: 1, x: 0, transition: { delay: i * 0.03, duration: 0.2 } }}
-              className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-accent/50 transition-colors"
+              className="data-hover flex items-center gap-2 rounded-lg border border-transparent px-2 py-1.5"
             >
               <span className="text-[10px] text-muted-foreground w-4 text-right shrink-0">{rank}</span>
               <div className="w-28 shrink-0">

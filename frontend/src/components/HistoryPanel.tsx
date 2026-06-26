@@ -23,6 +23,30 @@ function formatCapturedAt(value: string) {
   })
 }
 
+function formatMoney(value: number | null | undefined) {
+  return typeof value === 'number' && Number.isFinite(value) ? `$${value.toFixed(2)}` : '--'
+}
+
+function formatPercent(value: number | null | undefined) {
+  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)}%` : '--'
+}
+
+function MetricLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-2 text-[10px] leading-4">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="font-mono text-foreground">{value}</span>
+    </div>
+  )
+}
+
+const HISTORY_RANGE_OPTIONS = [
+  { value: 7, label: 'Last week' },
+  { value: 15, label: 'Last 15 days' },
+  { value: 30, label: 'Last 30 days' },
+  { value: 90, label: 'Last 3 months' },
+] as const
+
 function MiniChart({ history }: { history: SnapshotEntry[] }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -137,7 +161,7 @@ function SymbolHistoryCard({ group, dateFilter, slotFilter }: { group: SnapshotG
   if (filteredHistory.length === 0) return null
 
   return (
-    <div className="rounded-xl border border-border bg-card/50 p-4 space-y-4">
+    <div className="data-hover rounded-xl border border-border bg-card/50 p-4 space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <div className="flex items-center gap-2 flex-wrap">
@@ -182,7 +206,7 @@ function SymbolHistoryCard({ group, dateFilter, slotFilter }: { group: SnapshotG
             {dailyTable.map(({ date, slots }) => {
               const orderedSlots = ['openish', 'midday', 'closeish', 'manual-open'] as const
               return (
-                <tr key={date} className="border-b border-border/60 last:border-0">
+                <tr key={date} className="data-hover border-b border-border/60 last:border-0">
                   <td className="px-3 py-2 text-xs text-foreground font-medium whitespace-nowrap">{date}</td>
                   {orderedSlots.map((slotKey) => {
                     const row = slots[slotKey]
@@ -191,8 +215,18 @@ function SymbolHistoryCard({ group, dateFilter, slotFilter }: { group: SnapshotG
                       <td key={slotKey} className="px-3 py-2 text-xs whitespace-nowrap align-top">
                         {row ? (
                           <div className={`space-y-0.5 ${mutedManual ? 'opacity-70' : ''}`}>
-                            <div className="font-mono text-foreground">${row.price.toFixed(2)}</div>
+                            <div className="font-mono text-foreground">{formatMoney(row.price)}</div>
                             <div className="text-[10px] text-muted-foreground">{formatCapturedAt(row.captured_at)}</div>
+                            <div className="mt-1 min-w-[120px] space-y-0.5">
+                              <MetricLine label="Open" value={formatMoney(row.open_price)} />
+                              <MetricLine label="High" value={formatMoney(row.day_high)} />
+                              <MetricLine label="% Open" value={formatPercent(row.change_from_open_percent)} />
+                              <MetricLine label="Gap Apr22" value={formatPercent(row.gap_apr22_percent)} />
+                              <MetricLine label="52W H" value={formatMoney(row.fifty_two_week_high)} />
+                              <MetricLine label="52W L" value={formatMoney(row.fifty_two_week_low)} />
+                              <MetricLine label="vs 52W H" value={formatPercent(row.dist_from_52wh_percent)} />
+                              <MetricLine label="vs 52W L" value={formatPercent(row.dist_from_52wl_percent)} />
+                            </div>
                           </div>
                         ) : <span className="text-muted-foreground">—</span>}
                       </td>
@@ -209,8 +243,9 @@ function SymbolHistoryCard({ group, dateFilter, slotFilter }: { group: SnapshotG
 }
 
 export function HistoryPanel() {
-  const { data, isLoading, isError, error } = useSnapshotHistory(30)
   const snapshotMutation = useManualSnapshot()
+  const [rangeDays, setRangeDays] = useState<(typeof HISTORY_RANGE_OPTIONS)[number]['value']>(30)
+  const { data, isLoading, isError, error } = useSnapshotHistory(rangeDays)
   const [dateFilter, setDateFilter] = useState('')
   const [slotFilter, setSlotFilter] = useState<'all' | 'openish' | 'midday' | 'closeish' | 'manual-open'>('all')
 
@@ -237,9 +272,21 @@ export function HistoryPanel() {
           <CardTitle>Daily Price History</CardTitle>
           <div className="flex items-center gap-2 flex-wrap">
             <select
+              value={rangeDays}
+              onChange={(e) => {
+                setRangeDays(Number(e.target.value) as (typeof HISTORY_RANGE_OPTIONS)[number]['value'])
+                setDateFilter('')
+              }}
+              className="data-hover text-xs px-2 py-1 rounded-md border bg-transparent text-muted-foreground border-border focus:border-primary focus:outline-none"
+            >
+              {HISTORY_RANGE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+            <select
               value={dateFilter}
               onChange={(e) => setDateFilter(e.target.value)}
-              className="text-xs px-2 py-1 rounded-md border bg-transparent text-muted-foreground border-border hover:border-primary focus:border-primary focus:outline-none"
+              className="data-hover text-xs px-2 py-1 rounded-md border bg-transparent text-muted-foreground border-border focus:border-primary focus:outline-none"
             >
               <option value="">All dates</option>
               {availableDates.map((date) => (
@@ -249,7 +296,7 @@ export function HistoryPanel() {
             <select
               value={slotFilter}
               onChange={(e) => setSlotFilter(e.target.value as 'all' | 'openish' | 'midday' | 'closeish' | 'manual-open')}
-              className="text-xs px-2 py-1 rounded-md border bg-transparent text-muted-foreground border-border hover:border-primary focus:border-primary focus:outline-none"
+              className="data-hover text-xs px-2 py-1 rounded-md border bg-transparent text-muted-foreground border-border focus:border-primary focus:outline-none"
             >
               <option value="all">All slots</option>
               <option value="openish">Morning</option>
@@ -261,7 +308,7 @@ export function HistoryPanel() {
               type="button"
               onClick={() => snapshotMutation.mutate()}
               disabled={snapshotMutation.isPending}
-              className="text-xs px-2 py-0.5 rounded-md border bg-transparent text-muted-foreground border-border hover:border-primary hover:text-foreground transition-colors disabled:opacity-50"
+              className="data-hover text-xs px-2 py-0.5 rounded-md border bg-transparent text-muted-foreground border-border hover:text-foreground disabled:opacity-50"
             >
               {snapshotMutation.isPending ? 'Saving…' : 'Save snapshot'}
             </button>

@@ -9,6 +9,14 @@ export interface SnapshotEntry {
   previous_close: number | null
   change_amount: number | null
   change_percent: number | null
+  open_price: number | null
+  day_high: number | null
+  fifty_two_week_high: number | null
+  fifty_two_week_low: number | null
+  change_from_open_percent: number | null
+  gap_apr22_percent: number | null
+  dist_from_52wh_percent: number | null
+  dist_from_52wl_percent: number | null
   currency: string
   source: string
   is_market_closed: number

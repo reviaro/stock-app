@@ -42,7 +42,7 @@ function ratingVariant(rating: string): 'default' | 'secondary' | 'destructive' 
 
 function CriterionRow({ letter, criterion }: { letter: string; criterion: CANSLIMCriterion }) {
   return (
-    <div className="flex items-center gap-3 py-1.5">
+    <div className="data-hover flex items-center gap-3 rounded-md border border-transparent px-2 py-1.5">
       <span className={`font-bold text-lg w-6 ${scoreColor(criterion.score)}`}>{letter}</span>
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between mb-0.5">

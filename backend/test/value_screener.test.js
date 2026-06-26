@@ -1,0 +1,27 @@
+const { test } = require('node:test');
+const assert = require('node:assert');
+const { scoreCandidate } = require('../services/value_screener');
+
+test('scoreCandidate ranks high-quality reasonable valuation as Candidate', () => {
+    const result = scoreCandidate({
+        stock: { forwardPE: 18, debtToEquity: 20, price: 100 },
+        quality: { composite: 92 },
+        technical: { current: { rsi: 45 }, interpretation: { rsi: 'Neutral' } },
+    });
+
+    assert.ok(result.score >= 78);
+    assert.strictEqual(result.action, 'Candidate');
+    assert.ok(result.reasons.length > 0);
+});
+
+test('scoreCandidate flags expensive leveraged weak quality stocks', () => {
+    const result = scoreCandidate({
+        stock: { forwardPE: 80, debtToEquity: 180, price: 100 },
+        quality: { composite: 30 },
+        technical: { current: { rsi: 82 }, interpretation: { rsi: 'Overbought' } },
+    });
+
+    assert.ok(result.score < 45);
+    assert.strictEqual(result.action, 'Avoid');
+    assert.ok(result.red_flags.includes('high leverage'));
+});

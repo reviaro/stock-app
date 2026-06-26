@@ -1,7 +1,9 @@
 const express = require('express');
-const { streamText, convertToModelMessages } = require('ai');
+const { streamText, generateText, convertToModelMessages } = require('ai');
 const { model, backupModel, localModel, tools, chatTools, memoPrompts } = require('../services/ai_service');
 const pybridgeAI = require('../services/pybridge');
+const { getMode, validateInputs } = require('../services/ai_modes');
+const aiContext = require('../services/ai_context');
 
 const router = express.Router();
 
@@ -231,20 +233,38 @@ router.post('/memo-draft', async (req, res) => {
   if (!symbol) return res.status(400).json({ status: 'error', error: 'symbol required' });
 
   try {
-    const [info, tech, news] = await Promise.all([
+    const [info, quality, tech, news] = await Promise.all([
       pybridgeAI.getStockInfo(symbol).catch(() => null),
+      pybridgeAI.getQualityMetrics(symbol).catch(() => null),
       pybridgeAI.getTechnicalIndicators(symbol).catch(() => null),
       pybridgeAI.getNews(symbol).catch(() => null),
     ]);
 
-    const userPrompt = `Symbol: ${symbol}\n\nInfo:\n${JSON.stringify(info, null, 2)}\n\nTechnicals:\n${JSON.stringify(tech, null, 2)}\n\nNews:\n${JSON.stringify(news, null, 2)}`;
+    const userPrompt = `Symbol: ${symbol}\n\nInfo:\n${JSON.stringify(info, null, 2)}\n\nQuality:\n${JSON.stringify(quality, null, 2)}\n\nTechnicals:\n${JSON.stringify(tech, null, 2)}\n\nNews:\n${JSON.stringify(news, null, 2)}`;
 
-    const result = await streamText({
-      model,
-      system: memoPrompts.draftSystem,
-      prompt: userPrompt,
-    });
-    result.pipeUIMessageStreamToResponse(res);
+    const models = [model, backupModel, localModel];
+    let text = '';
+    let lastError = null;
+    for (const currentModel of models) {
+      try {
+        const result = await generateText({
+          model: currentModel,
+          system: memoPrompts.draftSystem,
+          prompt: userPrompt,
+        });
+        text = result.text;
+        lastError = null;
+        break;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    if (lastError) throw lastError;
+
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('AI draft did not return JSON');
+    const draft = JSON.parse(jsonMatch[0]);
+    res.json({ status: 'success', data: draft });
   } catch (err) {
     res.status(500).json({ status: 'error', error: err.message });
   }
@@ -265,14 +285,94 @@ router.post('/pressure-test', async (req, res) => {
 
     const userPrompt = `Current memo:\n${JSON.stringify(memo, null, 2)}\n\nLatest info:\n${JSON.stringify(info, null, 2)}\n\nNews:\n${JSON.stringify(news, null, 2)}`;
 
-    const result = await streamText({
-      model,
-      system: memoPrompts.pressureTestSystem,
-      prompt: userPrompt,
-    });
-    result.pipeUIMessageStreamToResponse(res);
+    const models = [model, backupModel, localModel];
+    let text = '';
+    let lastError = null;
+    for (const currentModel of models) {
+      try {
+        const result = await generateText({
+          model: currentModel,
+          system: memoPrompts.pressureTestSystem,
+          prompt: userPrompt,
+        });
+        text = result.text;
+        lastError = null;
+        break;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    if (lastError) throw lastError;
+
+    res.json({ status: 'success', data: { bear_case: text } });
   } catch (err) {
     res.status(500).json({ status: 'error', error: err.message });
+  }
+});
+
+router.post('/mode/:modeName', async (req, res) => {
+  try {
+    const { modeName } = req.params;
+    const { inputs = {}, sessionId = 'default' } = req.body ?? {};
+
+    const mode = getMode(modeName);
+    if (!mode) return res.status(400).json({ error: `unknown mode: ${modeName}` });
+
+    const validation = validateInputs(modeName, inputs);
+    if (!validation.ok) return res.status(400).json({ error: validation.error });
+
+    let context;
+    if (mode.aggregator === 'fetchStockContext') {
+      context = await aiContext.fetchStockContext(validation.value.symbol);
+    } else if (mode.aggregator === 'fetchStockContextPair') {
+      context = await aiContext.fetchStockContextPair(validation.value.symbolA, validation.value.symbolB);
+    } else if (mode.aggregator === 'aggregateWatchlistContext') {
+      context = await aiContext.aggregateWatchlistContext();
+    } else if (mode.aggregator === 'aggregatePortfolioContext') {
+      context = await aiContext.aggregatePortfolioContext();
+    } else {
+      return res.status(500).json({ error: `unknown aggregator: ${mode.aggregator}` });
+    }
+
+    db.saveChatMessage('user', `[${mode.name}] ${JSON.stringify(validation.value)}`, sessionId).catch(() => {});
+
+    const modelMessages = [
+      {
+        role: 'user',
+        content: [
+          `Mode: ${mode.name}`,
+          `Inputs: ${JSON.stringify(validation.value)}`,
+          `Context: ${JSON.stringify(context)}`,
+        ].join('\n\n'),
+      },
+    ];
+
+    const models = [model, backupModel, localModel];
+
+    for (const currentModel of models) {
+      try {
+        const result = streamText({
+          model: currentModel,
+          system: mode.systemPrompt,
+          messages: modelMessages,
+          onFinish: ({ text }) => {
+            if (text) db.saveChatMessage('assistant', text, sessionId).catch(() => {});
+          },
+        });
+        result.pipeUIMessageStreamToResponse(res);
+        await result.consumeStream();
+        return;
+      } catch (err) {
+        if (res.headersSent) return;
+      }
+    }
+
+    if (!res.headersSent) {
+      res.status(503).json({ error: 'All AI models are currently unavailable.' });
+    }
+  } catch (err) {
+    console.error('[AI mode route] Error:', err.message);
+    if (!res.headersSent) res.status(500).json({ error: 'Mode service error.' });
   }
 });
 

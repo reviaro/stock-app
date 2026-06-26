@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { SimAccount, SimHolding, SimTransaction, TaxPreview, TradePayload } from '@/types/simulator'
+import type { SimAccount, SimHolding, SimTransaction, TaxPreview, TradePayload, SimReview } from '@/types/simulator'
 
 async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, options)
@@ -28,6 +28,14 @@ export function useSimTransactions() {
   return useQuery<SimTransaction[]>({
     queryKey: ['sim-transactions'],
     queryFn: () => apiFetch('/api/simulator/transactions'),
+    refetchInterval: 60_000,
+  })
+}
+
+export function useSimReview() {
+  return useQuery<SimReview>({
+    queryKey: ['sim-review'],
+    queryFn: () => apiFetch('/api/simulator/review'),
     refetchInterval: 60_000,
   })
 }
@@ -83,6 +91,7 @@ export function useSimTrade() {
       qc.invalidateQueries({ queryKey: ['sim-account'] })
       qc.invalidateQueries({ queryKey: ['sim-holdings'] })
       qc.invalidateQueries({ queryKey: ['sim-transactions'] })
+      qc.invalidateQueries({ queryKey: ['sim-review'] })
     },
   })
 }
@@ -96,6 +105,7 @@ export function useSimReset() {
       qc.invalidateQueries({ queryKey: ['sim-account'] })
       qc.invalidateQueries({ queryKey: ['sim-holdings'] })
       qc.invalidateQueries({ queryKey: ['sim-transactions'] })
+      qc.invalidateQueries({ queryKey: ['sim-review'] })
     },
   })
 }

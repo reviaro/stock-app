@@ -11,7 +11,7 @@ function renderWithQuery(ui: React.ReactElement) {
 describe('MemoDrawer', () => {
   it('renders title and close button when open', () => {
     renderWithQuery(<MemoDrawer symbol="AAPL" open={true} onOpenChange={() => {}} />)
-    expect(screen.getByText(/AAPL/i)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /AAPL/i })).toBeInTheDocument()
     expect(screen.getByLabelText(/thesis/i)).toBeInTheDocument()
   })
 })

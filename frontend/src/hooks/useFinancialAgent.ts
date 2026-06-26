@@ -1,5 +1,7 @@
 import { useChat } from '@ai-sdk/react'
 import { DefaultChatTransport } from 'ai'
+import { useRef } from 'react'
+import type { ModeInputs, ModeName } from '@/types/aiMode'
 
 /**
  * Transport that sends messages to the backend Express AI streaming endpoint.
@@ -10,6 +12,14 @@ import { DefaultChatTransport } from 'ai'
  */
 const financialAgentTransport = new DefaultChatTransport({
   api: '/api/ai/chat',
+  prepareSendMessagesRequest({ messages, body }) {
+    const mode = (body as { mode?: ModeName })?.mode ?? 'free'
+    const inputs = (body as { inputs?: ModeInputs })?.inputs ?? {}
+    if (mode === 'free') {
+      return { api: '/api/ai/chat', body: { messages } }
+    }
+    return { api: `/api/ai/mode/${mode}`, body: { messages, inputs } }
+  },
 })
 
 /**
@@ -25,19 +35,26 @@ const financialAgentTransport = new DefaultChatTransport({
  *  - Transport is configured separately from the hook options.
  */
 export function useFinancialAgent() {
+  const modeRef = useRef<{ mode: ModeName; inputs: ModeInputs }>({ mode: 'free', inputs: {} })
   const { messages, setMessages, sendMessage, status, error, stop } = useChat({
     transport: financialAgentTransport,
   })
 
   const isLoading = status === 'submitted' || status === 'streaming'
 
+  function send(text: string, modeOverride?: { mode: ModeName; inputs: ModeInputs }) {
+    const active = modeOverride ?? modeRef.current
+    sendMessage({ text }, { body: active })
+  }
+
   return {
     messages,
     setMessages,
-    sendMessage,
+    sendMessage: send,
     isLoading,
     status,
     error,
     stop,
+    modeRef,
   }
 }

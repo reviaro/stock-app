@@ -29,6 +29,23 @@ function getCurrentSlot(now = new Date()) {
     return 'closeish';
 }
 
+function finiteNumber(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+}
+
+function roundMetric(value) {
+    if (!Number.isFinite(value)) return null;
+    return Math.round(value * 100) / 100;
+}
+
+function percentChange(numeratorValue, denominatorValue) {
+    const numerator = finiteNumber(numeratorValue);
+    const denominator = finiteNumber(denominatorValue);
+    if (numerator === null || denominator === null || denominator === 0) return null;
+    return roundMetric((numerator / denominator) * 100);
+}
+
 async function snapshotWatchlist(slot = getCurrentSlot()) {
     const watchlist = await db.getWatchlist();
     const marketDate = getMarketDate();
@@ -61,6 +78,22 @@ async function snapshotWatchlist(slot = getCurrentSlot()) {
             isCarryForward = true;
         }
 
+        const openPrice = finiteNumber(quote.open);
+        const dayHigh = finiteNumber(quote.dayHigh);
+        const fiftyTwoWeekHigh = finiteNumber(quote.week52High);
+        const fiftyTwoWeekLow = finiteNumber(quote.week52Low);
+        const firstSnapshot = await db.getFirstStockSnapshot(item.symbol);
+        const baselinePrice = finiteNumber(firstSnapshot?.price);
+
+        const changeFromOpenPercent =
+            openPrice !== null && dayHigh !== null ? percentChange(dayHigh - openPrice, openPrice) : null;
+        const gapApr22Percent =
+            openPrice !== null && baselinePrice !== null ? percentChange(openPrice - baselinePrice, baselinePrice) : null;
+        const distFrom52whPercent =
+            dayHigh !== null && fiftyTwoWeekHigh !== null ? percentChange(dayHigh - fiftyTwoWeekHigh, fiftyTwoWeekHigh) : null;
+        const distFrom52wlPercent =
+            dayHigh !== null && fiftyTwoWeekLow !== null ? percentChange(dayHigh - fiftyTwoWeekLow, fiftyTwoWeekLow) : null;
+
         await db.upsertStockSnapshot({
             symbol: item.symbol,
             slot,
@@ -75,6 +108,14 @@ async function snapshotWatchlist(slot = getCurrentSlot()) {
             isMarketClosed: isCarryForward,
             isCarryForward,
             rawPayload: JSON.stringify(quote),
+            openPrice,
+            dayHigh,
+            fiftyTwoWeekHigh,
+            fiftyTwoWeekLow,
+            changeFromOpenPercent,
+            gapApr22Percent,
+            distFrom52whPercent,
+            distFrom52wlPercent,
         });
 
         results.push({
@@ -87,6 +128,14 @@ async function snapshotWatchlist(slot = getCurrentSlot()) {
             slot,
             marketDate,
             isCarryForward,
+            open: openPrice,
+            dayHigh,
+            fiftyTwoWeekHigh,
+            fiftyTwoWeekLow,
+            changeFromOpenPercent,
+            gapApr22Percent,
+            distFrom52whPercent,
+            distFrom52wlPercent,
         });
     }
 

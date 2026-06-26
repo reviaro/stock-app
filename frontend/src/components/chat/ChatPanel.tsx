@@ -1,10 +1,15 @@
-import { useRef, useEffect, useState } from 'react'
+import { useRef, useEffect, useMemo, useState } from 'react'
 import { AnimatePresence } from 'framer-motion'
 import { Send, Square, Trash2 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { useFinancialAgent } from '@/hooks/useFinancialAgent'
 import { Message } from './Message'
+import { ModesDropdown } from './ModesDropdown'
+import { ModeInputsPanel } from './ModeInputs'
+import { MemoDrawer } from '@/components/MemoDrawer'
+import { MODE_LABELS, type ModeInputs, type ModeName } from '@/types/aiMode'
+import type { MemoInput } from '@/types/memo'
 
 /** Suggested prompt pills shown when the chat is empty */
 const SUGGESTED_PROMPTS = [
@@ -28,6 +33,10 @@ const SUGGESTED_PROMPTS = [
 export function ChatPanel() {
   const { messages, setMessages, sendMessage, isLoading, stop, error } = useFinancialAgent()
   const [inputValue, setInputValue] = useState('')
+  const [mode, setMode] = useState<ModeName>('free')
+  const [modeInputs, setModeInputs] = useState<ModeInputs>({})
+  const [memoSymbol, setMemoSymbol] = useState<string | null>(null)
+  const [memoDraft, setMemoDraft] = useState<MemoInput | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // Auto-scroll to bottom when new messages arrive
@@ -42,7 +51,7 @@ export function ChatPanel() {
   function handleSend() {
     const text = inputValue.trim()
     if (!text || isLoading) return
-    sendMessage({ text })
+    sendMessage(text, { mode, inputs: modeInputs })
     setInputValue('')
   }
 
@@ -56,30 +65,87 @@ export function ChatPanel() {
 
   function handleSuggestedPrompt(prompt: string) {
     if (isLoading) return
-    sendMessage({ text: prompt })
+    sendMessage(prompt, { mode: 'free', inputs: {} })
+  }
+
+  function runMode() {
+    if (isLoading) return
+    const modeText = mode === 'free' ? inputValue.trim() : `${MODE_LABELS[mode]}`
+    if (!modeText) return
+    sendMessage(modeText, { mode, inputs: modeInputs })
+    if (mode === 'free') setInputValue('')
+  }
+
+  const latestAssistantText = useMemo(() => {
+    const assistant = [...messages].reverse().find((message) => message.role === 'assistant')
+    if (!assistant) return ''
+    return assistant.parts
+      .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
+      .map((part) => part.text)
+      .join('')
+  }, [messages])
+
+  function parseMemoDraft(markdown: string): MemoInput {
+    const out: MemoInput = {}
+    const thesisMatch = markdown.match(/##\s*Thesis\s*\n([\s\S]*?)(?=\n##\s|$)/i)
+    if (thesisMatch) out.thesis = thesisMatch[1].trim()
+    const fairValueMatch = markdown.match(/fair_value_low[^\d]*(\d+(?:\.\d+)?)[\s\S]*?fair_value_high[^\d]*(\d+(?:\.\d+)?)/i)
+    if (fairValueMatch) {
+      out.fair_value_low = Number(fairValueMatch[1])
+      out.fair_value_high = Number(fairValueMatch[2])
+    }
+    const buyBelowMatch = markdown.match(/##\s*Buy Below\s*\n(?:.*\$)?(\d+(?:\.\d+)?)/i)
+    if (buyBelowMatch) out.buy_below = Number(buyBelowMatch[1])
+    const sellRuleMatch = markdown.match(/##\s*Sell Rule\s*\n([\s\S]*?)(?=\n##\s|$)/i)
+    if (sellRuleMatch) out.sell_rule = sellRuleMatch[1].trim()
+    const invalidationMatch = markdown.match(/##\s*Invalidation\s*\n([\s\S]*?)(?=\n##\s|$)/i)
+    if (invalidationMatch) out.invalidation = invalidationMatch[1].trim()
+    const riskMatch = markdown.match(/##\s*Risks\s*\n([\s\S]*?)(?=\n##\s|$)/i)
+    if (riskMatch) out.risks = riskMatch[1].trim()
+    const convictionMatch = markdown.match(/##\s*Conviction\s*\n.*?([1-5])/i)
+    if (convictionMatch) out.conviction = Number(convictionMatch[1])
+    return out
   }
 
   return (
     <Card className="h-full flex flex-col min-h-[400px]">
-      <CardHeader className="pb-2 pt-3 px-4 flex flex-row items-center justify-between shrink-0 space-y-0">
-        <CardTitle className="text-base flex items-center gap-2">
-          <span className="inline-block w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-          AI Financial Analyst
-        </CardTitle>
-        {messages.length > 0 && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 px-2 text-muted-foreground hover:text-destructive"
-            onClick={() => setMessages([])}
-            title="Clear conversation"
-          >
-            <Trash2 className="h-4 w-4" />
-          </Button>
-        )}
+        <CardHeader className="pb-2 pt-3 px-4 flex flex-row items-center justify-between shrink-0 space-y-0">
+        <div className="flex items-center gap-2">
+          <CardTitle className="text-base flex items-center gap-2">
+            <span className="inline-block w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+            AI Financial Analyst
+          </CardTitle>
+          <ModesDropdown value={mode} onChange={(next) => { setMode(next); setModeInputs({}) }} disabled={isLoading} />
+        </div>
+        <div className="flex items-center gap-2">
+          {mode === 'decisionMemo' && modeInputs.symbol && latestAssistantText && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setMemoSymbol(modeInputs.symbol ?? null)
+                setMemoDraft(parseMemoDraft(latestAssistantText))
+              }}
+            >
+              Save to Memo
+            </Button>
+          )}
+          {messages.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 px-2 text-muted-foreground hover:text-destructive"
+              onClick={() => setMessages([])}
+              title="Clear conversation"
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          )}
+        </div>
       </CardHeader>
 
       <CardContent className="flex flex-col flex-1 overflow-hidden p-3 gap-3">
+        <ModeInputsPanel mode={mode} inputs={modeInputs} onChange={setModeInputs} onRun={runMode} disabled={isLoading} />
         {/* Message list */}
         <div
           ref={scrollRef}
@@ -96,7 +162,7 @@ export function ChatPanel() {
                   <button
                     key={prompt}
                     onClick={() => handleSuggestedPrompt(prompt)}
-                    className="text-xs px-3 py-1.5 rounded-full border border-border bg-muted/40 hover:bg-muted/80 text-muted-foreground hover:text-foreground transition-colors"
+                    className="data-hover text-xs px-3 py-1.5 rounded-full border border-border bg-muted/40 text-muted-foreground hover:text-foreground"
                     disabled={isLoading}
                   >
                     {prompt}
@@ -147,7 +213,7 @@ export function ChatPanel() {
             <Button
               type="button"
               size="icon"
-              disabled={!inputValue.trim()}
+              disabled={mode === 'free' ? !inputValue.trim() : false}
               onClick={handleSend}
               title="Send message"
               className="shrink-0"
@@ -157,6 +223,7 @@ export function ChatPanel() {
           )}
         </div>
       </CardContent>
+      <MemoDrawer symbol={memoSymbol} open={!!memoSymbol} onOpenChange={(open) => { if (!open) { setMemoSymbol(null); setMemoDraft(null) } }} initialDraft={memoDraft} />
     </Card>
   )
 }

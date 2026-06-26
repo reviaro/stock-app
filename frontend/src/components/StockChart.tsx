@@ -399,7 +399,7 @@ export function StockChart({ symbol, compact = false }: { symbol?: string; compa
         {/* Compare with S&P 500 toggle */}
         <button
           onClick={() => setIsComparisonMode((prev) => !prev)}
-          className={`px-2 py-0.5 rounded text-xs font-medium border transition-opacity ${isComparisonMode ? 'opacity-100' : 'opacity-60'
+          className={`data-hover px-2 py-0.5 rounded text-xs font-medium border ${isComparisonMode ? 'opacity-100' : 'opacity-60'
             }`}
           style={{
             borderColor: '#6b7280',
@@ -417,7 +417,7 @@ export function StockChart({ symbol, compact = false }: { symbol?: string; compa
           <button
             key={ind.key}
             onClick={() => toggleIndicator(ind.key)}
-            className={`px-2 py-0.5 rounded text-xs font-medium border transition-opacity ${visible[ind.key]
+            className={`data-hover px-2 py-0.5 rounded text-xs font-medium border ${visible[ind.key]
                 ? 'opacity-100'
                 : 'opacity-40'
               }`}

@@ -3,6 +3,7 @@ import { AccountHeader } from '@/components/simulator/AccountHeader'
 import { HoldingsPanel } from '@/components/simulator/HoldingsPanel'
 import { TradePanel } from '@/components/simulator/TradePanel'
 import { TransactionHistory } from '@/components/simulator/TransactionHistory'
+import { SimulatorReviewPanel } from '@/components/simulator/SimulatorReviewPanel'
 import type { SimHolding } from '@/types/simulator'
 
 export function SimulatorPage() {
@@ -21,6 +22,7 @@ export function SimulatorPage() {
             <TradePanel sellTarget={sellTarget} onSellClose={() => setSellTarget(null)} />
           </div>
         </div>
+        <SimulatorReviewPanel />
         <TransactionHistory />
       </div>
     </div>

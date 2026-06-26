@@ -119,14 +119,16 @@ describe('ToolRenderer', () => {
     it('renders market direction summary for getMarketDirection', () => {
       const toolPart = makeToolPart('getMarketDirection', 'output-available', {
         output: {
-          direction: 'Confirmed Uptrend',
-          summary: 'Follow-through day detected on Nasdaq.',
+          status: 'success',
+          ftd_detected: true,
+          ftd_day: '2026-04-15',
+          ftd_gain_pct: 1.25,
         },
       })
       renderWithProviders(<ToolRenderer toolPart={toolPart} />)
       expect(screen.getByText('Market Direction')).toBeInTheDocument()
       expect(screen.getByText('Confirmed Uptrend')).toBeInTheDocument()
-      expect(screen.getByText(/Follow-through day detected/i)).toBeInTheDocument()
+      expect(screen.getByText(/Follow-Through Day/i)).toBeInTheDocument()
     })
 
     it('renders raw JSON for unknown tool names', () => {

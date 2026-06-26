@@ -132,3 +132,32 @@ button:focus-visible {
     --chart-5: 340 75% 55%;
   }
 }
+
+@layer components {
+  .data-hover {
+    transition:
+      background-color 120ms ease-out,
+      border-color 120ms ease-out,
+      box-shadow 120ms ease-out;
+  }
+
+  .data-hover:hover {
+    border-color: hsl(var(--primary) / 0.45);
+    background-color: hsl(var(--accent) / 0.55);
+  }
+
+  .data-hover:active {
+    background-color: hsl(var(--accent) / 0.7);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .data-hover {
+      transition-duration: 0.01ms;
+    }
+
+    .data-hover:hover,
+    .data-hover:active {
+      transform: none;
+    }
+  }
+}

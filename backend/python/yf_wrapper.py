@@ -10,6 +10,172 @@ import argparse
 import pandas as pd
 import numpy as np
 
+def _letter_to_number(letter):
+    return {'A': 90, 'B': 75, 'C': 60, 'D': 40, 'F': 20}.get(letter)
+
+def _grade_numeric(value, thresholds, higher_is_better=True):
+    """Given a numeric value and [a_threshold, b_threshold, c_threshold], return letter grade.
+    higher_is_better=True: value >= thresholds[0] is A, >= thresholds[1] is B, etc.
+    higher_is_better=False: value <= thresholds[0] is A, <= thresholds[1] is B, etc.
+    """
+    if value is None:
+        return None
+    a, b, c = thresholds
+    if higher_is_better:
+        if value >= a: return 'A'
+        if value >= b: return 'B'
+        if value >= c: return 'C'
+        return 'D'
+    else:
+        if value <= a: return 'A'
+        if value <= b: return 'B'
+        if value <= c: return 'C'
+        return 'D'
+
+def _composite_score(grades, weights):
+    """grades: {metric: letter_or_None}, weights: {metric: weight}.
+    Returns weighted average of letter->number, excluding nulls."""
+    total_weight = 0
+    total_score = 0
+    for k, letter in grades.items():
+        if letter is None:
+            continue
+        w = weights.get(k, 0)
+        total_weight += w
+        total_score += _letter_to_number(letter) * w
+    if total_weight == 0:
+        return None
+    return round(total_score / total_weight, 1)
+
+def get_quality_metrics(symbol):
+    """Compute Buffett-style quality metrics from yfinance financials."""
+    try:
+        t = yf.Ticker(symbol)
+
+        # Financials: annual (last ~4-5 yrs) and quarterly
+        fin = t.financials  # income statement (cols=years, rows=metrics)
+        bs = t.balance_sheet
+        cf = t.cashflow
+        info = t.info or {}
+
+        def _safe_row(df, row_name):
+            try:
+                return df.loc[row_name].dropna().tolist() if row_name in df.index else []
+            except Exception:
+                return []
+
+        # --- 1. ROIC 5yr avg = NOPAT / Invested Capital; approximated as ROIC from info if available
+        roic_pct = info.get('returnOnEquity')  # fallback; ROE is not ROIC but yfinance lacks ROIC directly
+        # Prefer computed: (Operating Income × (1 - tax_rate)) / (Total Equity + Total Debt)
+        op_income = _safe_row(fin, 'Operating Income') or _safe_row(fin, 'Ebit')
+        equity = _safe_row(bs, 'Total Stockholder Equity') or _safe_row(bs, 'Stockholders Equity')
+        total_debt = _safe_row(bs, 'Total Debt') or _safe_row(bs, 'Long Term Debt')
+        if op_income and equity:
+            tax_rate = 0.21
+            try:
+                avg_oi = sum(op_income[:5]) / min(5, len(op_income))
+                avg_eq = sum(equity[:5]) / min(5, len(equity))
+                avg_debt = sum(total_debt[:5]) / min(5, len(total_debt)) if total_debt else 0
+                invested = avg_eq + avg_debt
+                if invested > 0:
+                    roic_pct = (avg_oi * (1 - tax_rate)) / invested * 100
+            except Exception:
+                pass
+        else:
+            roic_pct = (roic_pct * 100) if roic_pct is not None else None
+
+        # --- 2. FCF margin = free_cash_flow / revenue (5yr avg)
+        revenue = _safe_row(fin, 'Total Revenue')
+        fcf = _safe_row(cf, 'Free Cash Flow')
+        fcf_margin_pct = None
+        if revenue and fcf and len(revenue) >= 1 and len(fcf) >= 1:
+            n = min(5, len(revenue), len(fcf))
+            total_rev = sum(revenue[:n])
+            total_fcf = sum(fcf[:n])
+            if total_rev > 0:
+                fcf_margin_pct = (total_fcf / total_rev) * 100
+
+        # --- 3. Debt/Equity
+        debt_equity = None
+        if total_debt and equity and equity[0] > 0:
+            debt_equity = total_debt[0] / equity[0]
+        elif info.get('debtToEquity') is not None:
+            debt_equity = info['debtToEquity'] / 100.0  # yfinance returns it as percentage
+
+        # --- 4. Interest coverage = EBIT / Interest Expense
+        interest_expense = _safe_row(fin, 'Interest Expense')
+        interest_coverage = None
+        if op_income and interest_expense and interest_expense[0]:
+            ie = abs(interest_expense[0])
+            if ie > 0:
+                interest_coverage = op_income[0] / ie
+
+        # --- 5. Earnings consistency: positive-EPS years of last 10. yfinance often limits to 4-5 years.
+        net_income = _safe_row(fin, 'Net Income')
+        pos_years = sum(1 for x in net_income if x and x > 0)
+        total_years = len(net_income) or 1
+        # Scale to out-of-10
+        earnings_consistency_ratio = (pos_years / total_years) * 10
+
+        # --- 6. Gross margin stability (std/mean of last 5 years)
+        gross_profit = _safe_row(fin, 'Gross Profit')
+        gm_stability = None
+        if gross_profit and revenue:
+            n = min(5, len(gross_profit), len(revenue))
+            margins = [gp/r for gp, r in zip(gross_profit[:n], revenue[:n]) if r > 0]
+            if len(margins) >= 2:
+                mean = sum(margins) / len(margins)
+                variance = sum((m - mean) ** 2 for m in margins) / len(margins)
+                std = variance ** 0.5
+                if mean > 0:
+                    gm_stability = std / mean  # coefficient of variation
+
+        # --- 7. Revenue CAGR 5yr
+        rev_cagr_pct = None
+        if revenue and len(revenue) >= 2:
+            # yfinance income statement: index 0 is most recent; compute from oldest to newest
+            oldest = revenue[-1]
+            newest = revenue[0]
+            years = len(revenue) - 1
+            if oldest > 0 and years > 0:
+                rev_cagr_pct = ((newest / oldest) ** (1 / years) - 1) * 100
+
+        grades = {
+            'roic': _grade_numeric(roic_pct, [15, 10, 5], higher_is_better=True),
+            'fcf_margin': _grade_numeric(fcf_margin_pct, [20, 10, 5], higher_is_better=True),
+            'debt_equity': _grade_numeric(debt_equity, [0.3, 0.7, 1.5], higher_is_better=False),
+            'interest_coverage': _grade_numeric(interest_coverage, [10, 5, 2], higher_is_better=True),
+            'earnings_consistency': _grade_numeric(earnings_consistency_ratio, [10, 8, 6], higher_is_better=True),
+            'gm_stability': _grade_numeric(gm_stability, [0.05, 0.10, 0.20], higher_is_better=False),
+            'revenue_cagr': _grade_numeric(rev_cagr_pct, [10, 5, 0], higher_is_better=True),
+        }
+
+        weights = {
+            'roic': 20, 'fcf_margin': 20, 'debt_equity': 15, 'interest_coverage': 10,
+            'earnings_consistency': 15, 'gm_stability': 10, 'revenue_cagr': 10,
+        }
+
+        composite = _composite_score(grades, weights)
+
+        return {
+            'status': 'success',
+            'data': {
+                'symbol': symbol.upper(),
+                'composite': composite,
+                'metrics': {
+                    'roic': {'value': roic_pct, 'grade': grades['roic'], 'unit': '%'},
+                    'fcf_margin': {'value': fcf_margin_pct, 'grade': grades['fcf_margin'], 'unit': '%'},
+                    'debt_equity': {'value': debt_equity, 'grade': grades['debt_equity'], 'unit': 'x'},
+                    'interest_coverage': {'value': interest_coverage, 'grade': grades['interest_coverage'], 'unit': 'x'},
+                    'earnings_consistency': {'value': earnings_consistency_ratio, 'grade': grades['earnings_consistency'], 'unit': '/10'},
+                    'gm_stability': {'value': gm_stability, 'grade': grades['gm_stability'], 'unit': 'cv'},
+                    'revenue_cagr': {'value': rev_cagr_pct, 'grade': grades['revenue_cagr'], 'unit': '%'},
+                },
+            }
+        }
+    except Exception as e:
+        return {'status': 'error', 'error': str(e), 'symbol': symbol.upper()}
+
 def get_demo_data(symbol):
     """Return demo data when network is unavailable"""
     demo_stocks = {
@@ -1124,6 +1290,8 @@ def main():
         result = get_history(symbol, period, interval)
     elif action == 'canslim':
         result = get_canslim_analysis(symbol)
+    elif action == 'quality':
+        result = get_quality_metrics(symbol)
     elif action == 'news':
         result = get_news(symbol)
     elif action == 'indexes':

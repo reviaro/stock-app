@@ -7,6 +7,7 @@ import { MarketPulse } from '@/components/MarketPulse'
 import { Watchlist } from '@/components/Watchlist'
 import { StockChart } from '@/components/StockChart'
 import { CANSLIMScorecard } from '@/components/CANSLIMScorecard'
+import { QualityScorecard } from '@/components/QualityScorecard'
 import { ChatPanel } from '@/components/chat/ChatPanel'
 import { Glossary } from '@/components/Glossary'
 import { HistoryPanel } from '@/components/HistoryPanel'
@@ -27,11 +28,9 @@ const cardVariants = {
   }),
 }
 
-/** Shared hover/tap spring props for interactive cards */
-const interactiveMotion = {
-  whileHover: { scale: 1.015, transition: { type: 'spring' as const, stiffness: 300, damping: 20 } },
-  whileTap: { scale: 0.985, transition: { type: 'spring' as const, stiffness: 400, damping: 25 } },
-}
+// Bento grid cards should stay visually stable; avoid hover scale because it can
+// make dense controls feel like they are moving under the cursor.
+const panelMotion = {}
 
 export function Dashboard() {
   const selectedTicker = useTickerStore((s) => s.selectedTicker)
@@ -63,7 +62,7 @@ export function Dashboard() {
             <button
               type="button"
               onClick={toggleTheme}
-              className="flex items-center justify-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border border-border text-muted-foreground hover:text-foreground hover:border-primary hover:bg-accent transition-colors"
+              className="data-hover flex items-center justify-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border border-border text-muted-foreground hover:text-foreground"
               aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
               title={isDark ? 'Light mode' : 'Dark mode'}
             >
@@ -76,7 +75,7 @@ export function Dashboard() {
             <button
               type="button"
               onClick={() => setGlossaryOpen(true)}
-              className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border border-border text-muted-foreground hover:text-foreground hover:border-primary hover:bg-accent transition-colors"
+              className="data-hover flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border border-border text-muted-foreground hover:text-foreground"
             >
               <span>📖</span> Glossary
             </button>
@@ -96,7 +95,7 @@ export function Dashboard() {
             initial="hidden"
             animate="visible"
             variants={cardVariants}
-            {...interactiveMotion}
+            {...panelMotion}
           >
             <MarketPulse />
           </motion.div>
@@ -108,6 +107,7 @@ export function Dashboard() {
             initial="hidden"
             animate="visible"
             variants={cardVariants}
+            {...panelMotion}
           >
             <Card className="h-full">
               <CardHeader className="pb-2">
@@ -134,34 +134,47 @@ export function Dashboard() {
 
           {/* ── Watchlist ── */}
           <motion.div
-            className="lg:col-span-2 min-h-[320px]"
+            className="lg:col-span-3 min-h-[320px]"
             custom={2}
             initial="hidden"
             animate="visible"
             variants={cardVariants}
+            {...panelMotion}
           >
             <Watchlist />
           </motion.div>
 
           {/* ── CANSLIM Scorecard ── */}
           <motion.div
-            className="lg:col-span-4 min-h-[320px]"
+            className="lg:col-span-3 min-h-[320px]"
             custom={3}
             initial="hidden"
             animate="visible"
             variants={cardVariants}
-            {...interactiveMotion}
+            {...panelMotion}
           >
             <CANSLIMScorecard />
           </motion.div>
 
+          <motion.div
+            className="lg:col-span-3 min-h-[320px]"
+            custom={4}
+            initial="hidden"
+            animate="visible"
+            variants={cardVariants}
+            {...panelMotion}
+          >
+            <QualityScorecard />
+          </motion.div>
+
           {/* ── Portfolio Tracker ── */}
           <motion.div
-            className="lg:col-span-2 min-h-[360px]"
+            className="lg:col-span-3 min-h-[360px]"
             custom={5}
             initial="hidden"
             animate="visible"
             variants={cardVariants}
+            {...panelMotion}
           >
             <PortfolioPanel />
           </motion.div>
@@ -173,7 +186,7 @@ export function Dashboard() {
             initial="hidden"
             animate="visible"
             variants={cardVariants}
-            {...interactiveMotion}
+            {...panelMotion}
           >
             <HistoryPanel />
           </motion.div>
@@ -185,6 +198,7 @@ export function Dashboard() {
             initial="hidden"
             animate="visible"
             variants={cardVariants}
+            {...panelMotion}
           >
             <SectorRotation />
           </motion.div>
@@ -196,6 +210,7 @@ export function Dashboard() {
             initial="hidden"
             animate="visible"
             variants={cardVariants}
+            {...panelMotion}
           >
             <ChatPanel />
           </motion.div>

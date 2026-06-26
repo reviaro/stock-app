@@ -81,6 +81,10 @@ async function getSectorPerformance() {
     return callPython({ action: 'sectors' });
 }
 
+async function getQualityMetrics(symbol) {
+    return callPython({ action: 'quality', symbol });
+}
+
 module.exports = {
     callPython,
     getStockInfo,
@@ -93,4 +97,5 @@ module.exports = {
     getNews,
     getEarningsDate,
     getSectorPerformance,
+    getQualityMetrics,
 };

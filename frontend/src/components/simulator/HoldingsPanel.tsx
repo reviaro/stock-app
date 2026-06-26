@@ -18,6 +18,19 @@ function holdingPeriodLabel(oldestLotDate: string | null) {
   return `${days}d`
 }
 
+function moveClass(n: number | null) {
+  if (n == null) return 'text-muted-foreground'
+  return n >= 0 ? 'text-green-400' : 'text-red-400'
+}
+
+function fmtMove(change: number | null, pct: number | null) {
+  if (change == null && pct == null) return '—'
+  const sign = (change ?? pct ?? 0) >= 0 ? '+' : ''
+  const changeText = change != null ? `${sign}$${fmt(change)}` : '—'
+  const pctText = pct != null ? `${sign}${fmt(pct)}%` : '—'
+  return `${changeText} (${pctText})`
+}
+
 export function HoldingsPanel({ onSell }: Props) {
   const { data: holdings, isLoading, isError } = useSimHoldings()
 
@@ -40,6 +53,7 @@ export function HoldingsPanel({ onSell }: Props) {
                 <th className="text-right py-1 pr-2">Shares</th>
                 <th className="text-right py-1 pr-2">Avg Cost</th>
                 <th className="text-right py-1 pr-2">Price</th>
+                <th className="text-right py-1 pr-2">Today</th>
                 <th className="text-right py-1 pr-2">Value</th>
                 <th className="text-right py-1 pr-2">P&L</th>
                 <th className="text-right py-1 pr-2">P&L%</th>
@@ -54,6 +68,9 @@ export function HoldingsPanel({ onSell }: Props) {
                   <td className="font-mono text-right py-1 pr-2">{fmt(h.shares)}</td>
                   <td className="font-mono text-right py-1 pr-2">${fmt(h.avg_cost)}</td>
                   <td className="font-mono text-right py-1 pr-2">{h.currentPrice != null ? `$${fmt(h.currentPrice)}` : '—'}</td>
+                  <td className={`font-mono text-right py-1 pr-2 whitespace-nowrap ${moveClass(h.priceChangePct ?? h.priceChange)}`} title={h.previousClose != null ? `Previous close: $${fmt(h.previousClose)}` : undefined}>
+                    {fmtMove(h.priceChange, h.priceChangePct)}
+                  </td>
                   <td className="font-mono text-right py-1 pr-2">{h.currentValue != null ? `$${fmt(h.currentValue)}` : '—'}</td>
                   <td className={`font-mono text-right py-1 pr-2 ${h.pnl != null && h.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                     {h.pnl != null ? `${h.pnl >= 0 ? '+' : ''}$${fmt(h.pnl)}` : '—'}
