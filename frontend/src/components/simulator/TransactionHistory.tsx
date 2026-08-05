@@ -6,8 +6,12 @@ function fmt(n: number | null, d = 2) {
   return n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d })
 }
 
-export function TransactionHistory() {
-  const { data: txns, isLoading } = useSimTransactions()
+interface Props {
+  accountId: number
+}
+
+export function TransactionHistory({ accountId }: Props) {
+  const { data: txns, isLoading } = useSimTransactions(accountId)
 
   return (
     <Card className="flex flex-col">

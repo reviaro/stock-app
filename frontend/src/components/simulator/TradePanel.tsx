@@ -6,13 +6,14 @@ import { useSimTrade, useTaxPreview, useSimAccount } from '@/hooks/useSimulator'
 import type { SimHolding } from '@/types/simulator'
 
 interface Props {
+  accountId: number
   sellTarget: SimHolding | null
   onSellClose: () => void
 }
 
-function BuyForm() {
-  const trade = useSimTrade()
-  const { data: account } = useSimAccount()
+function BuyForm({ accountId }: { accountId: number }) {
+  const trade = useSimTrade(accountId)
+  const { data: account } = useSimAccount(accountId)
   const [symbol, setSymbol] = useState('')
   const [shares, setShares] = useState('')
   const today = new Date().toISOString().slice(0, 10)
@@ -97,12 +98,13 @@ function BuyForm() {
 }
 
 interface SellFormProps {
+  accountId: number
   holding: SimHolding
   onClose: () => void
 }
 
-function SellForm({ holding, onClose }: SellFormProps) {
-  const trade = useSimTrade()
+function SellForm({ accountId, holding, onClose }: SellFormProps) {
+  const trade = useSimTrade(accountId)
   const [shares, setShares] = useState(String(holding.shares))
   const today = new Date().toISOString().slice(0, 10)
 
@@ -110,6 +112,7 @@ function SellForm({ holding, onClose }: SellFormProps) {
   const price = holding.currentPrice
 
   const { data: taxPreview, isLoading: taxLoading } = useTaxPreview(
+    accountId,
     holding.symbol,
     sharesNum,
   )
@@ -173,7 +176,7 @@ function SellForm({ holding, onClose }: SellFormProps) {
   )
 }
 
-export function TradePanel({ sellTarget, onSellClose }: Props) {
+export function TradePanel({ accountId, sellTarget, onSellClose }: Props) {
   return (
     <Card className="h-full flex flex-col">
       <CardHeader className="pb-2">
@@ -181,9 +184,9 @@ export function TradePanel({ sellTarget, onSellClose }: Props) {
       </CardHeader>
       <CardContent className="flex-1 overflow-y-auto min-h-0 px-3 pb-3 space-y-4">
         {sellTarget ? (
-          <SellForm holding={sellTarget} onClose={onSellClose} />
+          <SellForm accountId={accountId} holding={sellTarget} onClose={onSellClose} />
         ) : (
-          <BuyForm />
+          <BuyForm accountId={accountId} />
         )}
       </CardContent>
     </Card>

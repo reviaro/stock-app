@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import type { SimHolding } from '@/types/simulator'
 
 interface Props {
+  accountId: number
   onSell: (holding: SimHolding) => void
 }
 
@@ -31,8 +32,8 @@ function fmtMove(change: number | null, pct: number | null) {
   return `${changeText} (${pctText})`
 }
 
-export function HoldingsPanel({ onSell }: Props) {
-  const { data: holdings, isLoading, isError } = useSimHoldings()
+export function HoldingsPanel({ accountId, onSell }: Props) {
+  const { data: holdings, isLoading, isError } = useSimHoldings(accountId)
 
   return (
     <Card className="h-full flex flex-col">

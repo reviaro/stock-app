@@ -1,3 +1,11 @@
+export interface SimSleeve {
+  id: number
+  name: string
+  slug: 'long-term' | 'day-trading' | string
+  tax_bracket: number
+  created_at: string
+}
+
 export interface SimAccount {
   id: number
   name: string

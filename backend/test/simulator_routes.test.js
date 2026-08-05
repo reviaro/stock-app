@@ -35,8 +35,10 @@ before(async () => {
 });
 
 beforeEach(async () => {
-    await db.deleteAllSimTransactions();
-    await db.setSimTaxBracket(22);
+    await db.deleteAllSimTransactions(1);
+    await db.deleteAllSimTransactions(2);
+    await db.setSimTaxBracket(22, 1);
+    await db.setSimTaxBracket(22, 2);
 });
 
 after(() => {
@@ -67,12 +69,54 @@ function request(method, pathname, body) {
     });
 }
 
+function rawRequest(method, pathname) {
+    return new Promise((resolve, reject) => {
+        const req = http.request({ method, hostname: '127.0.0.1', port, path: pathname }, (res) => {
+            let chunks = '';
+            res.on('data', (chunk) => { chunks += chunk; });
+            res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text: chunks }));
+        });
+        req.on('error', reject);
+        req.end();
+    });
+}
+
+test('GET /api/simulator/accounts exposes isolated long-term and day-trading sleeves', async () => {
+    const res = await request('GET', '/api/simulator/accounts');
+    assert.strictEqual(res.status, 200);
+    assert.deepStrictEqual(
+        res.body.data.map((account) => ({ id: account.id, slug: account.slug })),
+        [
+            { id: 1, slug: 'long-term' },
+            { id: 2, slug: 'day-trading' },
+        ],
+    );
+});
+
 test('GET /api/simulator/account returns account with cash=0 initially', async () => {
     const res = await request('GET', '/api/simulator/account');
     assert.strictEqual(res.status, 200);
     assert.strictEqual(res.body.status, 'success');
     assert.strictEqual(res.body.data.cash, 0);
     assert.strictEqual(res.body.data.tax_bracket, 22);
+});
+
+test('day-trading deposit stays isolated from the long-term sleeve', async () => {
+    const deposit = await request('PATCH', '/api/simulator/account', { account_id: 2, deposit: 10000 });
+    assert.strictEqual(deposit.status, 200);
+
+    const [longTerm, dayTrading, longTermTransactions, dayTradingTransactions] = await Promise.all([
+        request('GET', '/api/simulator/account?account_id=1'),
+        request('GET', '/api/simulator/account?account_id=2'),
+        request('GET', '/api/simulator/transactions?account_id=1'),
+        request('GET', '/api/simulator/transactions?account_id=2'),
+    ]);
+
+    assert.strictEqual(longTerm.body.data.cash, 0);
+    assert.strictEqual(dayTrading.body.data.cash, 10000);
+    assert.strictEqual(longTermTransactions.body.data.length, 0);
+    assert.strictEqual(dayTradingTransactions.body.data.length, 1);
+    assert.strictEqual(dayTradingTransactions.body.data[0].account_id, 2);
 });
 
 test('PATCH /api/simulator/account deposit increases cash', async () => {
@@ -177,6 +221,37 @@ test('POST /api/simulator/reset wipes transactions', async () => {
     await request('POST', '/api/simulator/reset');
     const res = await request('GET', '/api/simulator/account');
     assert.strictEqual(res.body.data.cash, 0);
+});
+
+test('GET routes return 404 for an unknown sleeve', async () => {
+    const paths = [
+        '/api/simulator/account?account_id=999',
+        '/api/simulator/holdings?account_id=999',
+        '/api/simulator/transactions?account_id=999',
+        '/api/simulator/tax-preview?symbol=AAPL&shares=5&account_id=999',
+        '/api/simulator/review?account_id=999',
+        '/api/simulator/export.csv?account_id=999',
+    ];
+    for (const pathname of paths) {
+        const res = await request('GET', pathname);
+        assert.strictEqual(res.status, 404, `${pathname} -> ${res.status}`);
+        assert.match(res.body.error, /not found/);
+    }
+});
+
+test('GET routes return 400 for an invalid account_id', async () => {
+    for (const pathname of ['/api/simulator/account?account_id=abc', '/api/simulator/holdings?account_id=0']) {
+        const res = await request('GET', pathname);
+        assert.strictEqual(res.status, 400, `${pathname} -> ${res.status}`);
+        assert.match(res.body.error, /invalid account_id/);
+    }
+});
+
+test('export.csv names the download after the sleeve slug', async () => {
+    await request('PATCH', '/api/simulator/account', { account_id: 2, deposit: 1000 });
+    const res = await rawRequest('GET', '/api/simulator/export.csv?account_id=2');
+    assert.strictEqual(res.status, 200);
+    assert.match(res.headers['content-disposition'], /simulator-day-trading-transactions\.csv/);
 });
 
 test('POST /api/simulator/trade negative shares -> 400', async () => {

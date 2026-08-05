@@ -6,15 +6,20 @@ function fmt(n: number | null | undefined, d = 2) {
   return n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d })
 }
 
-export function SimulatorReviewPanel() {
-  const { data, isLoading, isError } = useSimReview()
+interface Props {
+  accountId: number
+}
+
+export function SimulatorReviewPanel({ accountId }: Props) {
+  const { data, isLoading, isError } = useSimReview(accountId)
 
   return (
     <Card>
       <CardHeader className="pb-2">
         <div className="flex items-center justify-between gap-2">
           <CardTitle>Buffett Review</CardTitle>
-          <a href="/api/simulator/export.csv" download="simulator-transactions.csv" className="data-hover text-xs px-2 py-0.5 rounded-md border border-border text-muted-foreground hover:text-foreground">
+          {/* filename comes from the server's Content-Disposition (sleeve slug) */}
+          <a href={`/api/simulator/export.csv?account_id=${accountId}`} download className="data-hover text-xs px-2 py-0.5 rounded-md border border-border text-muted-foreground hover:text-foreground">
             Export CSV
           </a>
         </div>

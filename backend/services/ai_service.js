@@ -27,6 +27,15 @@ const lmstudio = createOpenAI({
 });
 const localModel = lmstudio(process.env.LMSTUDIO_MODEL || 'qwen2.5-7b-instruct');
 
+const simSleeveParam = z.number().int().positive().optional()
+  .describe('Simulator sleeve id: 1 = long-term investing (default), 2 = day trading');
+
+async function requireSimSleeve(accountId) {
+  const account = await dbModule.getSimAccount(accountId);
+  if (!account) throw new Error(`simulator sleeve ${accountId} not found`);
+  return account;
+}
+
 const tools = {
   getStockInfo: tool({
     description:
@@ -170,11 +179,12 @@ const tools = {
   }),
 
   simulator_get_account: tool({
-    description: 'Fetches the paper trading simulator account: cash balance, realized P&L, and configured tax bracket. For live portfolio value and unrealized P&L, use simulator_get_holdings instead.',
-    parameters: z.object({}),
-    execute: async () => {
+    description: 'Fetches a paper trading simulator sleeve: cash balance, realized P&L, and configured tax bracket. For live portfolio value and unrealized P&L, use simulator_get_holdings instead.',
+    parameters: z.object({ account_id: simSleeveParam }),
+    execute: async ({ account_id = 1 } = {}) => {
       try {
-        const [account, txns] = await Promise.all([dbModule.getSimAccount(), dbModule.listSimTransactions()]);
+        const account = await requireSimSleeve(account_id);
+        const txns = await dbModule.listSimTransactions(account_id);
         const cash = computeCashBalance(txns);
         const realized = computeRealizedPnl(txns).total;
         return { status: 'success', data: { ...account, cash, realized_pnl: Math.round(realized * 100) / 100 } };
@@ -185,11 +195,12 @@ const tools = {
   }),
 
   simulator_get_holdings: tool({
-    description: 'Lists all open positions in the paper trading simulator with shares, average cost, current price (live), unrealized P&L, and holding period.',
-    parameters: z.object({}),
-    execute: async () => {
+    description: 'Lists all open positions in a paper trading simulator sleeve with shares, average cost, current price (live), unrealized P&L, and holding period.',
+    parameters: z.object({ account_id: simSleeveParam }),
+    execute: async ({ account_id = 1 } = {}) => {
       try {
-        const txns = await dbModule.listSimTransactions();
+        await requireSimSleeve(account_id);
+        const txns = await dbModule.listSimTransactions(account_id);
         const holdings = computeHoldings(txns);
         const symbols = Object.keys(holdings);
         const prices = {};
@@ -214,26 +225,28 @@ const tools = {
   }),
 
   simulator_buy: tool({
-    description: 'Places a simulated buy order in the paper trading simulator. Deducts cash and records the trade. Price is fetched live from the market.',
+    description: 'Places a simulated buy order in a paper trading simulator sleeve. Deducts cash and records the trade. Price is fetched live from the market.',
     parameters: z.object({
       symbol: z.string().describe('Ticker symbol (e.g. AAPL)'),
       shares: z.number().describe('Number of shares to buy'),
+      account_id: simSleeveParam,
     }),
-    execute: async ({ symbol, shares }) => {
+    execute: async ({ symbol, shares, account_id = 1 }) => {
       try {
+        await requireSimSleeve(account_id);
         const info = await pybridge.getStockInfo(symbol);
         const price = info?.data?.price;
         if (typeof price !== 'number' || !isFinite(price)) {
           return { error: 'price unavailable for ' + symbol };
         }
-        const txns = await dbModule.listSimTransactions();
+        const txns = await dbModule.listSimTransactions(account_id);
         const cash = computeCashBalance(txns);
         const cost = shares * price;
         if (cash < cost) {
           return { error: `insufficient cash: have $${Math.round(cash * 100) / 100}, need $${Math.round(cost * 100) / 100}` };
         }
         const result = await dbModule.addSimTransaction({
-          type: 'buy', symbol, shares, price,
+          account_id, type: 'buy', symbol, shares, price,
           txn_date: new Date().toISOString().slice(0, 10),
         });
         return { status: 'success', data: result };
@@ -244,26 +257,28 @@ const tools = {
   }),
 
   simulator_sell: tool({
-    description: 'Places a simulated sell order in the paper trading simulator. Credits cash and records the trade. Price is fetched live from the market.',
+    description: 'Places a simulated sell order in a paper trading simulator sleeve. Credits cash and records the trade. Price is fetched live from the market.',
     parameters: z.object({
       symbol: z.string().describe('Ticker symbol (e.g. AAPL)'),
       shares: z.number().describe('Number of shares to sell'),
+      account_id: simSleeveParam,
     }),
-    execute: async ({ symbol, shares }) => {
+    execute: async ({ symbol, shares, account_id = 1 }) => {
       try {
+        await requireSimSleeve(account_id);
         const info = await pybridge.getStockInfo(symbol);
         const price = info?.data?.price;
         if (typeof price !== 'number' || !isFinite(price)) {
           return { error: 'price unavailable for ' + symbol };
         }
-        const txns = await dbModule.listSimTransactions();
+        const txns = await dbModule.listSimTransactions(account_id);
         const holdings = computeHoldings(txns);
         const owned = holdings[symbol.toUpperCase()]?.shares ?? 0;
         if (shares > owned + 0.000001) {
           return { error: `insufficient shares: own ${owned}, tried to sell ${shares}` };
         }
         const result = await dbModule.addSimTransaction({
-          type: 'sell', symbol, shares, price,
+          account_id, type: 'sell', symbol, shares, price,
           txn_date: new Date().toISOString().slice(0, 10),
         });
         return { status: 'success', data: result };
@@ -278,15 +293,17 @@ const tools = {
     parameters: z.object({
       symbol: z.string().describe('Ticker symbol'),
       shares: z.number().describe('Shares to sell'),
+      account_id: simSleeveParam,
     }),
-    execute: async ({ symbol, shares }) => {
+    execute: async ({ symbol, shares, account_id = 1 }) => {
       try {
+        const account = await requireSimSleeve(account_id);
         const info = await pybridge.getStockInfo(symbol);
         const price = info?.data?.price;
         if (typeof price !== 'number' || !isFinite(price)) {
           return { error: 'price unavailable for ' + symbol };
         }
-        const [txns, account] = await Promise.all([dbModule.listSimTransactions(), dbModule.getSimAccount()]);
+        const txns = await dbModule.listSimTransactions(account_id);
         const lots = computeLotsForSymbol(txns, symbol);
         if (lots.length === 0) return { error: `no open position in ${symbol}` };
         const preview = computeTaxPreview({
@@ -302,11 +319,12 @@ const tools = {
   }),
 
   simulator_get_transactions: tool({
-    description: 'Returns the full trade history for the paper trading simulator: all buys, sells, deposits, and withdrawals.',
-    parameters: z.object({}),
-    execute: async () => {
+    description: 'Returns the full trade history for a paper trading simulator sleeve: all buys, sells, deposits, and withdrawals.',
+    parameters: z.object({ account_id: simSleeveParam }),
+    execute: async ({ account_id = 1 } = {}) => {
       try {
-        const txns = await dbModule.listSimTransactions();
+        await requireSimSleeve(account_id);
+        const txns = await dbModule.listSimTransactions(account_id);
         return { status: 'success', data: txns.reverse() };
       } catch (err) {
         return { error: err.message };
@@ -315,18 +333,20 @@ const tools = {
   }),
 
   simulator_deposit: tool({
-    description: 'Adds cash to the paper trading simulator account.',
+    description: 'Adds cash to a paper trading simulator sleeve.',
     parameters: z.object({
       amount: z.number().describe('Dollar amount to deposit'),
+      account_id: simSleeveParam,
     }),
-    execute: async ({ amount }) => {
+    execute: async ({ amount, account_id = 1 }) => {
       try {
         if (amount <= 0) return { error: 'amount must be positive' };
+        await requireSimSleeve(account_id);
         await dbModule.addSimTransaction({
-          type: 'deposit', amount,
+          account_id, type: 'deposit', amount,
           txn_date: new Date().toISOString().slice(0, 10),
         });
-        const txns = await dbModule.listSimTransactions();
+        const txns = await dbModule.listSimTransactions(account_id);
         return { status: 'success', data: { cash: computeCashBalance(txns) } };
       } catch (err) {
         return { error: err.message };
@@ -335,11 +355,12 @@ const tools = {
   }),
 
   simulator_reset: tool({
-    description: 'Wipes all transactions in the paper trading simulator, resetting cash to $0. Use with caution.',
-    parameters: z.object({}),
-    execute: async () => {
+    description: 'Wipes all transactions in one paper trading simulator sleeve, resetting its cash to $0. Other sleeves are untouched. Use with caution.',
+    parameters: z.object({ account_id: simSleeveParam }),
+    execute: async ({ account_id = 1 } = {}) => {
       try {
-        const result = await dbModule.deleteAllSimTransactions();
+        await requireSimSleeve(account_id);
+        const result = await dbModule.deleteAllSimTransactions(account_id);
         return { status: 'success', data: result };
       } catch (err) {
         return { error: err.message };

@@ -11,10 +11,53 @@ const {
 } = require('../services/simulator_ledger');
 const { buildSimulatorReview, simulatorTransactionsToCsv } = require('../services/simulator_review');
 
+function accountIdFrom(req) {
+    const raw = req.query?.account_id ?? req.body?.account_id ?? 1;
+    const accountId = Number(raw);
+    if (!Number.isInteger(accountId) || accountId <= 0) {
+        const err = new Error('invalid account_id');
+        err.status = 400;
+        throw err;
+    }
+    return accountId;
+}
+
+async function requireSleeve(req) {
+    const accountId = accountIdFrom(req);
+    const account = await db.getSimAccount(accountId);
+    if (!account) {
+        const err = new Error(`simulator sleeve ${accountId} not found`);
+        err.status = 404;
+        throw err;
+    }
+    return { accountId, account };
+}
+
+async function accountAndTransactions(req) {
+    const { accountId, account } = await requireSleeve(req);
+    const txns = await db.listSimTransactions(accountId);
+    return { accountId, account, txns };
+}
+
+function sendError(res, err) {
+    const status = err.status ?? (/invalid|required/.test(err.message) ? 400 : 500);
+    res.status(status).json({ status: 'error', error: err.message });
+}
+
+// GET /api/simulator/accounts
+router.get('/accounts', async (_req, res) => {
+    try {
+        const accounts = await db.listSimAccounts();
+        res.json({ status: 'success', data: accounts });
+    } catch (err) {
+        sendError(res, err);
+    }
+});
+
 // GET /api/simulator/account
 router.get('/account', async (req, res) => {
     try {
-        const [account, txns] = await Promise.all([db.getSimAccount(), db.listSimTransactions()]);
+        const { account, txns } = await accountAndTransactions(req);
         const holdings = computeHoldings(txns);
         const cash = computeCashBalance(txns);
 
@@ -47,7 +90,7 @@ router.get('/account', async (req, res) => {
             },
         });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -56,35 +99,35 @@ router.get('/account', async (req, res) => {
 router.patch('/account', async (req, res) => {
     try {
         const body = req.body ?? {};
+        const { accountId } = await requireSleeve(req);
         const today = new Date().toISOString().slice(0, 10);
 
         if (body.tax_bracket != null) {
-            await db.setSimTaxBracket(Number(body.tax_bracket));
+            await db.setSimTaxBracket(Number(body.tax_bracket), accountId);
         }
         if (body.deposit != null) {
             const amount = Number(body.deposit);
             if (amount <= 0) return res.status(400).json({ status: 'error', error: 'deposit must be > 0' });
-            await db.addSimTransaction({ type: 'deposit', amount, txn_date: today });
+            await db.addSimTransaction({ account_id: accountId, type: 'deposit', amount, txn_date: today });
         }
         if (body.withdrawal != null) {
             const amount = Number(body.withdrawal);
             if (amount <= 0) return res.status(400).json({ status: 'error', error: 'withdrawal must be > 0' });
-            await db.addSimTransaction({ type: 'withdrawal', amount, txn_date: today });
+            await db.addSimTransaction({ account_id: accountId, type: 'withdrawal', amount, txn_date: today });
         }
 
-        const [account, txns] = await Promise.all([db.getSimAccount(), db.listSimTransactions()]);
+        const [updatedAccount, txns] = await Promise.all([db.getSimAccount(accountId), db.listSimTransactions(accountId)]);
         const cash = computeCashBalance(txns);
-        res.json({ status: 'success', data: { ...account, cash } });
+        res.json({ status: 'success', data: { ...updatedAccount, cash } });
     } catch (err) {
-        const code = /invalid/.test(err.message) ? 400 : 500;
-        res.status(code).json({ status: 'error', error: err.message });
+        sendError(res, err);
     }
 });
 
 // GET /api/simulator/holdings
 router.get('/holdings', async (req, res) => {
     try {
-        const txns = await db.listSimTransactions();
+        const { txns } = await accountAndTransactions(req);
         const holdings = computeHoldings(txns);
         const symbols = Object.keys(holdings);
 
@@ -131,7 +174,7 @@ router.get('/holdings', async (req, res) => {
 
         res.json({ status: 'success', data: result });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -140,8 +183,10 @@ router.get('/holdings', async (req, res) => {
 router.post('/trade', async (req, res) => {
     try {
         const body = req.body ?? {};
+        const { accountId } = await requireSleeve(req);
         const today = new Date().toISOString().slice(0, 10);
         const txn = {
+            account_id: accountId,
             type: body.type,
             symbol: body.symbol,
             shares: Number(body.shares),
@@ -158,7 +203,7 @@ router.post('/trade', async (req, res) => {
             return res.status(400).json({ status: 'error', error: 'symbol, shares, and price are required and must be positive' });
         }
 
-        const txns = await db.listSimTransactions();
+        const txns = await db.listSimTransactions(accountId);
         const cash = computeCashBalance(txns);
         const cost = txn.shares * txn.price + txn.fees;
 
@@ -177,18 +222,17 @@ router.post('/trade', async (req, res) => {
         const result = await db.addSimTransaction(txn);
         res.json({ status: 'success', data: result });
     } catch (err) {
-        const code = /invalid|required/.test(err.message) ? 400 : 500;
-        res.status(code).json({ status: 'error', error: err.message });
+        sendError(res, err);
     }
 });
 
 // GET /api/simulator/transactions
 router.get('/transactions', async (req, res) => {
     try {
-        const txns = await db.listSimTransactions();
+        const { txns } = await accountAndTransactions(req);
         res.json({ status: 'success', data: txns.reverse() });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        sendError(res, err);
     }
 });
 
@@ -207,8 +251,7 @@ router.get('/tax-preview', async (req, res) => {
             return res.status(503).json({ status: 'error', error: 'price unavailable for symbol' });
         }
 
-        const txns = await db.listSimTransactions();
-        const account = await db.getSimAccount();
+        const { txns, account } = await accountAndTransactions(req);
         const lots = computeLotsForSymbol(txns, symbol);
 
         if (lots.length === 0) {
@@ -225,14 +268,14 @@ router.get('/tax-preview', async (req, res) => {
 
         res.json({ status: 'success', data: { symbol, shares: sharesNum, current_price: currentPrice, ...preview } });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        sendError(res, err);
     }
 });
 
 // GET /api/simulator/review — performance summary and Buffett action log
 router.get('/review', async (req, res) => {
     try {
-        const txns = await db.listSimTransactions();
+        const { txns } = await accountAndTransactions(req);
         const holdings = computeHoldings(txns);
         const prices = {};
         await Promise.all(Object.keys(holdings).map(async (symbol) => {
@@ -243,29 +286,30 @@ router.get('/review', async (req, res) => {
         }));
         res.json({ status: 'success', data: buildSimulatorReview(txns, prices) });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        sendError(res, err);
     }
 });
 
 // GET /api/simulator/export.csv — export paper-trading ledger
 router.get('/export.csv', async (req, res) => {
     try {
-        const txns = await db.listSimTransactions();
+        const { account, txns } = await accountAndTransactions(req);
         res.setHeader('Content-Type', 'text/csv');
-        res.setHeader('Content-Disposition', 'attachment; filename="simulator-transactions.csv"');
+        res.setHeader('Content-Disposition', `attachment; filename="simulator-${account.slug}-transactions.csv"`);
         res.send(simulatorTransactionsToCsv(txns));
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        sendError(res, err);
     }
 });
 
 // POST /api/simulator/reset
 router.post('/reset', async (req, res) => {
     try {
-        const result = await db.deleteAllSimTransactions();
+        const { accountId } = await requireSleeve(req);
+        const result = await db.deleteAllSimTransactions(accountId);
         res.json({ status: 'success', data: result });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        sendError(res, err);
     }
 });
 

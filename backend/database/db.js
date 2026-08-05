@@ -191,16 +191,37 @@ function initDb() {
                 )
             `);
 
+            // Simulator sleeves are intentionally separate ledgers. Existing transaction rows
+            // retain account_id=1, preserving the original long-term portfolio untouched.
             db.run(`
-                CREATE TABLE IF NOT EXISTS sim_accounts (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    name TEXT NOT NULL DEFAULT 'default',
+                CREATE TABLE IF NOT EXISTS simulator_sleeves (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    slug TEXT NOT NULL UNIQUE,
                     tax_bracket INTEGER NOT NULL DEFAULT 22,
                     created_at TEXT DEFAULT (datetime('now'))
                 )
             `);
+            db.run(`INSERT OR IGNORE INTO simulator_sleeves (id, name, slug, tax_bracket)
+                    VALUES (1, 'Long-Term Investing', 'long-term', 22)`);
+            db.run(`INSERT OR IGNORE INTO simulator_sleeves (id, name, slug, tax_bracket)
+                    VALUES (2, 'Day Trading', 'day-trading', 22)`);
 
-            db.run('INSERT OR IGNORE INTO sim_accounts (id) VALUES (1)');
+            // The retired sim_accounts table held the pre-sleeve tax bracket. Recreating it
+            // empty when absent keeps the carry-over a plain serialized statement sequence
+            // (no conditional callbacks racing initDb's resolve): copy any persisted bracket
+            // into sleeve 1 — the INSERT OR IGNORE above only seeds a missing row, so a
+            // bracket the user sets later is never clobbered — then drop the table.
+            db.run(`
+                CREATE TABLE IF NOT EXISTS sim_accounts (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    tax_bracket INTEGER NOT NULL DEFAULT 22
+                )
+            `);
+            db.run(`UPDATE simulator_sleeves
+                    SET tax_bracket = COALESCE((SELECT tax_bracket FROM sim_accounts WHERE id = 1), tax_bracket)
+                    WHERE id = 1`);
+            db.run('DROP TABLE sim_accounts');
 
             db.run(`
                 CREATE TABLE IF NOT EXISTS sim_transactions (
@@ -878,26 +899,36 @@ function deleteTransaction(id) {
     });
 }
 
-function getSimAccount() {
+function listSimAccounts() {
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
-        sqlite.get('SELECT * FROM sim_accounts WHERE id = 1', [], (err, row) => {
+        sqlite.all('SELECT * FROM simulator_sleeves ORDER BY id ASC', [], (err, rows) => {
+            sqlite.close();
+            err ? reject(err) : resolve(rows || []);
+        });
+    });
+}
+
+function getSimAccount(accountId = 1) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.get('SELECT * FROM simulator_sleeves WHERE id = ?', [Number(accountId)], (err, row) => {
             sqlite.close();
             err ? reject(err) : resolve(row || null);
         });
     });
 }
 
-function setSimTaxBracket(bracket) {
+function setSimTaxBracket(bracket, accountId = 1) {
     const valid = [10, 12, 22, 24, 32, 35, 37];
     if (!valid.includes(Number(bracket))) {
         return Promise.reject(new Error(`invalid tax bracket: ${bracket}`));
     }
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
-        sqlite.run('UPDATE sim_accounts SET tax_bracket = ? WHERE id = 1', [Number(bracket)], function(err) {
+        sqlite.run('UPDATE simulator_sleeves SET tax_bracket = ? WHERE id = ?', [Number(bracket), Number(accountId)], function(err) {
             sqlite.close();
-            err ? reject(err) : resolve({ tax_bracket: Number(bracket) });
+            err ? reject(err) : resolve({ tax_bracket: Number(bracket), changed: this.changes });
         });
     });
 }
@@ -920,26 +951,27 @@ function addSimTransaction(txn) {
     }
     const amount = isTrade ? Number(txn.shares) * Number(txn.price) : Number(txn.amount);
     const symbol = txn.symbol ? String(txn.symbol).toUpperCase() : null;
+    const accountId = Number(txn.account_id ?? 1);
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
         sqlite.run(
             `INSERT INTO sim_transactions (account_id, symbol, type, shares, price, amount, fees, txn_date, notes)
-             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [symbol, txn.type, txn.shares ?? null, txn.price ?? null, amount, Number(txn.fees ?? 0), txn.txn_date, txn.notes ?? null],
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [accountId, symbol, txn.type, txn.shares ?? null, txn.price ?? null, amount, Number(txn.fees ?? 0), txn.txn_date, txn.notes ?? null],
             function(err) {
                 sqlite.close();
-                err ? reject(err) : resolve({ id: this.lastID, symbol, type: txn.type, amount });
+                err ? reject(err) : resolve({ id: this.lastID, account_id: accountId, symbol, type: txn.type, amount });
             }
         );
     });
 }
 
-function listSimTransactions() {
+function listSimTransactions(accountId = 1) {
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
         sqlite.all(
-            'SELECT * FROM sim_transactions ORDER BY txn_date ASC, id ASC',
-            [],
+            'SELECT * FROM sim_transactions WHERE account_id = ? ORDER BY txn_date ASC, id ASC',
+            [Number(accountId)],
             (err, rows) => {
                 sqlite.close();
                 err ? reject(err) : resolve(rows || []);
@@ -948,10 +980,10 @@ function listSimTransactions() {
     });
 }
 
-function deleteAllSimTransactions() {
+function deleteAllSimTransactions(accountId = 1) {
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
-        sqlite.run('DELETE FROM sim_transactions', [], function(err) {
+        sqlite.run('DELETE FROM sim_transactions WHERE account_id = ?', [Number(accountId)], function(err) {
             sqlite.close();
             err ? reject(err) : resolve({ deleted: this.changes });
         });
@@ -994,6 +1026,7 @@ module.exports = {
     listTransactions,
     getTransactionById,
     deleteTransaction,
+    listSimAccounts,
     getSimAccount,
     setSimTaxBracket,
     addSimTransaction,

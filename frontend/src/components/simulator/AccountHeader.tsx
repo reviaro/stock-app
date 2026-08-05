@@ -7,11 +7,15 @@ function fmt(n: number) {
 
 const TAX_BRACKETS = [10, 12, 22, 24, 32, 35, 37]
 
-export function AccountHeader() {
-  const { data: account, isLoading } = useSimAccount()
-  const deposit = useSimDeposit()
-  const setTaxBracket = useSetTaxBracket()
-  const reset = useSimReset()
+interface Props {
+  accountId: number
+}
+
+export function AccountHeader({ accountId }: Props) {
+  const { data: account, isLoading } = useSimAccount(accountId)
+  const deposit = useSimDeposit(accountId)
+  const setTaxBracket = useSetTaxBracket(accountId)
+  const reset = useSimReset(accountId)
   const [depositInput, setDepositInput] = useState('')
   const [showDeposit, setShowDeposit] = useState(false)
   const [showResetConfirm, setShowResetConfirm] = useState(false)
