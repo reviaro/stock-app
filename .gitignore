@@ -6,8 +6,10 @@ venv/
 __pycache__/
 *.pyc
 
-# Database (runtime-generated)
+# Database (runtime-generated) and backups
 *.db
+*.db.backup.*
+*.db.manual-backup-*
 
 # Environment
 .env
