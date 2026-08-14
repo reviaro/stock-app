@@ -29,13 +29,15 @@ export function SimulatorReviewPanel({ accountId }: Props) {
         {isError && <p className="text-xs text-destructive">Failed to load simulator review.</p>}
         {data && (
           <>
-            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2 text-xs">
+            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-9 gap-2 text-xs">
               <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Return</p><p className={`font-mono font-semibold ${data.total_return_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>{data.total_return_pct >= 0 ? '+' : ''}{fmt(data.total_return_pct)}%</p></div>
               <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Cash</p><p className="font-mono font-semibold">{fmt(data.cash_pct)}%</p></div>
               <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Total value</p><p className="font-mono font-semibold">${fmt(data.total_value)}</p></div>
               <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Unrealized</p><p className={`font-mono font-semibold ${data.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>{data.unrealized_pnl >= 0 ? '+' : ''}${fmt(data.unrealized_pnl)}</p></div>
               <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Realized</p><p className={`font-mono font-semibold ${data.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>{data.realized_pnl >= 0 ? '+' : ''}${fmt(data.realized_pnl)}</p></div>
               <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Positions</p><p className="font-mono font-semibold">{data.position_count}</p></div>
+              <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Realized exits</p><p className="font-mono font-semibold">{data.closed_trade_count}</p></div>
+              <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Win rate</p><p className="font-mono font-semibold">{data.hit_rate_pct == null ? '—' : `${fmt(data.hit_rate_pct, 0)}%`}</p></div>
               <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Largest</p><p className="font-mono font-semibold">{data.largest_position ? `${data.largest_position.symbol} ${fmt(data.largest_position.weight_pct, 1)}%` : '—'}</p></div>
             </div>
 

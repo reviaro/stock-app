@@ -8,12 +8,19 @@ process.env.DB_PATH_OVERRIDE = TEST_DB;
 const db = require('../database/db');
 const { runMigration001 } = require('../database/migrations/001_portfolio_to_ledger');
 
+function cleanupTestDb() {
+  for (const suffix of ['', '-wal', '-shm', '-journal']) {
+    const candidate = `${TEST_DB}${suffix}`;
+    if (fs.existsSync(candidate)) fs.unlinkSync(candidate);
+  }
+}
+
 beforeEach(async () => {
-  if (fs.existsSync(TEST_DB)) fs.unlinkSync(TEST_DB);
+  cleanupTestDb();
 });
 
 after(() => {
-  if (fs.existsSync(TEST_DB)) fs.unlinkSync(TEST_DB);
+  cleanupTestDb();
   for (const file of fs.readdirSync(__dirname).filter((name) => name.startsWith('test_migration.db.backup.'))) {
     fs.unlinkSync(path.join(__dirname, file));
   }
@@ -26,7 +33,7 @@ test('migration copies portfolio rows as buy transactions', async () => {
     sqlite.run(
       'INSERT INTO portfolio (symbol, shares, buy_price, buy_date, notes) VALUES (?, ?, ?, ?, ?)',
       ['AAPL', 10, 150, '2025-12-01', 'legacy note'],
-      (err) => { sqlite.close(); err ? reject(err) : resolve(); }
+      (err) => sqlite.close((closeError) => (err || closeError) ? reject(err || closeError) : resolve())
     );
   });
 
@@ -56,7 +63,7 @@ test('migration is idempotent (second run is a no-op)', async () => {
     sqlite.run(
       'INSERT INTO portfolio (symbol, shares, buy_price, buy_date, notes) VALUES (?, ?, ?, ?, ?)',
       ['AAPL', 10, 150, '2025-12-01', 'legacy note'],
-      (err) => { sqlite.close(); err ? reject(err) : resolve(); }
+      (err) => sqlite.close((closeError) => (err || closeError) ? reject(err || closeError) : resolve())
     );
   });
   await runMigration001({ dbPath: TEST_DB });
@@ -72,7 +79,7 @@ test('migration falls back to 1970-01-01 when buy_date missing', async () => {
     sqlite.run(
       'INSERT INTO portfolio (symbol, shares, buy_price, buy_date, notes) VALUES (?, ?, ?, ?, ?)',
       ['MSFT', 5, 300, null, null],
-      (err) => { sqlite.close(); err ? reject(err) : resolve(); }
+      (err) => sqlite.close((closeError) => (err || closeError) ? reject(err || closeError) : resolve())
     );
   });
   await runMigration001({ dbPath: TEST_DB });

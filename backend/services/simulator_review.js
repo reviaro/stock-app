@@ -30,8 +30,33 @@ function buildSimulatorReview(txns, currentPrices = {}) {
     const totalValue = cash + holdingsValue;
     for (const p of positions) p.weight_pct = totalValue > 0 ? round((p.market_value / totalValue) * 100) : 0;
 
-    const closedTrades = txns.filter((t) => t.type === 'sell');
-    const winners = closedTrades.filter((t) => Number(t.amount || 0) > 0).length;
+    // A sell always has positive proceeds, so amount cannot determine whether it won.
+    // Match the simulator's weighted-average realized-P&L accounting to score each sale.
+    const basisBySymbol = {};
+    const closedTrades = [];
+    for (const txn of [...txns].sort((a, b) => {
+        if (a.txn_date < b.txn_date) return -1;
+        if (a.txn_date > b.txn_date) return 1;
+        return (a.id ?? 0) - (b.id ?? 0);
+    })) {
+        if (!txn.symbol) continue;
+        const symbol = txn.symbol.toUpperCase();
+        const basis = basisBySymbol[symbol] ?? { shares: 0, avg_cost: 0 };
+        basisBySymbol[symbol] = basis;
+
+        if (txn.type === 'buy') {
+            const totalCost = basis.avg_cost * basis.shares + Number(txn.amount || 0);
+            basis.shares += Number(txn.shares || 0);
+            basis.avg_cost = basis.shares > 0 ? totalCost / basis.shares : 0;
+        } else if (txn.type === 'sell') {
+            const shares = Number(txn.shares || 0);
+            const realizedPnl = (Number(txn.price || 0) - basis.avg_cost) * shares;
+            closedTrades.push({ ...txn, realized_pnl: realizedPnl });
+            basis.shares = Math.max(0, basis.shares - shares);
+            if (basis.shares === 0) basis.avg_cost = 0;
+        }
+    }
+    const winners = closedTrades.filter((t) => t.realized_pnl > 0).length;
     const actionNotes = txns
         .filter((t) => ['buy', 'sell'].includes(t.type) && t.notes)
         .slice(-10)
