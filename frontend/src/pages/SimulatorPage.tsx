@@ -4,6 +4,8 @@ import { HoldingsPanel } from '@/components/simulator/HoldingsPanel'
 import { TradePanel } from '@/components/simulator/TradePanel'
 import { TransactionHistory } from '@/components/simulator/TransactionHistory'
 import { SimulatorReviewPanel } from '@/components/simulator/SimulatorReviewPanel'
+import { RiskMonitorPanel } from '@/components/simulator/RiskMonitorPanel'
+import { JournalAnalyticsPanel } from '@/components/simulator/JournalAnalyticsPanel'
 import { useSimSleeves } from '@/hooks/useSimulator'
 import type { SimHolding } from '@/types/simulator'
 
@@ -58,10 +60,16 @@ export function SimulatorPage() {
             <HoldingsPanel accountId={selectedAccountId} onSell={(holding) => setSellTarget(holding)} />
           </div>
           <div className="min-h-[320px]">
-            <TradePanel accountId={selectedAccountId} sellTarget={sellTarget} onSellClose={() => setSellTarget(null)} />
+            <TradePanel accountId={selectedAccountId} sellTarget={sellTarget} onSellClose={() => setSellTarget(null)} structuredJournal={selectedSleeve?.slug === 'day-trading'} />
           </div>
         </div>
         <SimulatorReviewPanel accountId={selectedAccountId} />
+        {selectedSleeve?.slug === 'day-trading' && (
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <RiskMonitorPanel accountId={selectedAccountId} />
+            <JournalAnalyticsPanel accountId={selectedAccountId} />
+          </div>
+        )}
         <TransactionHistory accountId={selectedAccountId} />
       </div>
     </div>

@@ -9,13 +9,20 @@ interface Props {
   accountId: number
   sellTarget: SimHolding | null
   onSellClose: () => void
+  structuredJournal?: boolean
 }
 
-function BuyForm({ accountId }: { accountId: number }) {
+function BuyForm({ accountId, structuredJournal = false }: { accountId: number; structuredJournal?: boolean }) {
   const trade = useSimTrade(accountId)
   const { data: account } = useSimAccount(accountId)
   const [symbol, setSymbol] = useState('')
   const [shares, setShares] = useState('')
+  const [setup, setSetup] = useState('')
+  const [catalyst, setCatalyst] = useState('')
+  const [thesis, setThesis] = useState('')
+  const [stopPrice, setStopPrice] = useState('')
+  const [targetPrice, setTargetPrice] = useState('')
+  const [invalidation, setInvalidation] = useState('')
   const today = new Date().toISOString().slice(0, 10)
 
   const { data: priceData } = useQuery({
@@ -38,15 +45,32 @@ function BuyForm({ accountId }: { accountId: number }) {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!symbol || !shares || currentPrice == null) return
+    if (structuredJournal && (!setup || !thesis || !stopPrice || !targetPrice)) return
     await trade.mutateAsync({
       type: 'buy',
       symbol: symbol.toUpperCase(),
       shares: Number(shares),
       price: currentPrice,
       txn_date: today,
+      ...(structuredJournal ? {
+        trade_plan: {
+          setup,
+          catalyst,
+          thesis,
+          stop_price: Number(stopPrice),
+          target_price: Number(targetPrice),
+          invalidation,
+        },
+      } : {}),
     })
     setSymbol('')
     setShares('')
+    setSetup('')
+    setCatalyst('')
+    setThesis('')
+    setStopPrice('')
+    setTargetPrice('')
+    setInvalidation('')
   }
 
   return (
@@ -66,6 +90,19 @@ function BuyForm({ accountId }: { accountId: number }) {
         placeholder="Shares"
         className="w-full rounded-md border border-border bg-secondary px-2 py-1.5 text-xs"
       />
+      {structuredJournal && (
+        <div className="space-y-2 rounded-md border border-border/70 bg-background/50 p-2">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Structured plan</p>
+          <label className="block text-[11px] text-muted-foreground">Setup<input aria-label="Setup" value={setup} onChange={(e) => setSetup(e.target.value)} className="mt-1 w-full rounded-md border border-border bg-secondary px-2 py-1.5 text-xs text-foreground" /></label>
+          <label className="block text-[11px] text-muted-foreground">Catalyst<input aria-label="Catalyst" value={catalyst} onChange={(e) => setCatalyst(e.target.value)} className="mt-1 w-full rounded-md border border-border bg-secondary px-2 py-1.5 text-xs text-foreground" /></label>
+          <label className="block text-[11px] text-muted-foreground">Thesis<textarea aria-label="Thesis" value={thesis} onChange={(e) => setThesis(e.target.value)} rows={2} className="mt-1 w-full rounded-md border border-border bg-secondary px-2 py-1.5 text-xs text-foreground" /></label>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="block text-[11px] text-muted-foreground">Hard stop<input aria-label="Hard stop" type="number" step="any" value={stopPrice} onChange={(e) => setStopPrice(e.target.value)} className="mt-1 w-full rounded-md border border-border bg-secondary px-2 py-1.5 text-xs text-foreground" /></label>
+            <label className="block text-[11px] text-muted-foreground">Target<input aria-label="Target" type="number" step="any" value={targetPrice} onChange={(e) => setTargetPrice(e.target.value)} className="mt-1 w-full rounded-md border border-border bg-secondary px-2 py-1.5 text-xs text-foreground" /></label>
+          </div>
+          <label className="block text-[11px] text-muted-foreground">Invalidation<input aria-label="Invalidation" value={invalidation} onChange={(e) => setInvalidation(e.target.value)} className="mt-1 w-full rounded-md border border-border bg-secondary px-2 py-1.5 text-xs text-foreground" /></label>
+        </div>
+      )}
       <div className="text-sm text-muted-foreground">
         Current price: {currentPrice != null ? `$${currentPrice.toFixed(2)}` : '—'}
       </div>
@@ -88,7 +125,7 @@ function BuyForm({ accountId }: { accountId: number }) {
       )}
       <button
         type="submit"
-        disabled={trade.isPending || !symbol || !shares || currentPrice == null}
+        disabled={trade.isPending || !symbol || !shares || currentPrice == null || (structuredJournal && (!setup || !thesis || !stopPrice || !targetPrice))}
         className="w-full rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground disabled:opacity-50"
       >
         {trade.isPending ? 'Placing order…' : 'Buy'}
@@ -101,11 +138,17 @@ interface SellFormProps {
   accountId: number
   holding: SimHolding
   onClose: () => void
+  structuredJournal?: boolean
 }
 
-function SellForm({ accountId, holding, onClose }: SellFormProps) {
+function SellForm({ accountId, holding, onClose, structuredJournal = false }: SellFormProps) {
   const trade = useSimTrade(accountId)
   const [shares, setShares] = useState(String(holding.shares))
+  const [exitReason, setExitReason] = useState<'stop' | 'target' | 'time_exit' | 'thesis_break' | 'discretionary'>('time_exit')
+  const [thesisValid, setThesisValid] = useState(true)
+  const [mfe, setMfe] = useState('')
+  const [mae, setMae] = useState('')
+  const [reviewNotes, setReviewNotes] = useState('')
   const today = new Date().toISOString().slice(0, 10)
 
   const sharesNum = Number(shares)
@@ -126,6 +169,15 @@ function SellForm({ accountId, holding, onClose }: SellFormProps) {
       shares: sharesNum,
       price,
       txn_date: today,
+      ...(structuredJournal ? {
+        journal: {
+          exit_reason: exitReason,
+          thesis_valid: thesisValid,
+          ...(mfe ? { mfe: Number(mfe) } : {}),
+          ...(mae ? { mae: Number(mae) } : {}),
+          review_notes: reviewNotes,
+        },
+      } : {}),
     })
     onClose()
   }
@@ -160,6 +212,18 @@ function SellForm({ accountId, holding, onClose }: SellFormProps) {
           All
         </button>
       </div>
+      {structuredJournal && (
+        <div className="space-y-2 rounded-md border border-border/70 bg-background/50 p-2">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Exit review</p>
+          <label className="block text-[11px] text-muted-foreground">Exit reason<select aria-label="Exit reason" value={exitReason} onChange={(e) => setExitReason(e.target.value as typeof exitReason)} className="mt-1 w-full rounded-md border border-border bg-secondary px-2 py-1.5 text-xs text-foreground"><option value="stop">Stop</option><option value="target">Target</option><option value="time_exit">Time exit</option><option value="thesis_break">Thesis break</option><option value="discretionary">Discretionary</option></select></label>
+          <label className="flex items-center gap-2 text-[11px] text-muted-foreground"><input aria-label="Thesis remained valid" type="checkbox" checked={thesisValid} onChange={(e) => setThesisValid(e.target.checked)} />Thesis remained valid</label>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="block text-[11px] text-muted-foreground">MFE ($)<input aria-label="Maximum favorable excursion" type="number" step="any" value={mfe} onChange={(e) => setMfe(e.target.value)} className="mt-1 w-full rounded-md border border-border bg-secondary px-2 py-1.5 text-xs text-foreground" /></label>
+            <label className="block text-[11px] text-muted-foreground">MAE ($)<input aria-label="Maximum adverse excursion" type="number" step="any" value={mae} onChange={(e) => setMae(e.target.value)} className="mt-1 w-full rounded-md border border-border bg-secondary px-2 py-1.5 text-xs text-foreground" /></label>
+          </div>
+          <label className="block text-[11px] text-muted-foreground">Review notes<textarea aria-label="Review notes" rows={2} value={reviewNotes} onChange={(e) => setReviewNotes(e.target.value)} className="mt-1 w-full rounded-md border border-border bg-secondary px-2 py-1.5 text-xs text-foreground" /></label>
+        </div>
+      )}
       {taxPreview && <TaxPreview preview={taxPreview} isLoading={taxLoading} />}
       {!taxPreview && taxLoading && <p className="text-xs text-muted-foreground">Calculating tax…</p>}
       {trade.isError && (
@@ -176,7 +240,7 @@ function SellForm({ accountId, holding, onClose }: SellFormProps) {
   )
 }
 
-export function TradePanel({ accountId, sellTarget, onSellClose }: Props) {
+export function TradePanel({ accountId, sellTarget, onSellClose, structuredJournal = false }: Props) {
   return (
     <Card className="h-full flex flex-col">
       <CardHeader className="pb-2">
@@ -184,9 +248,9 @@ export function TradePanel({ accountId, sellTarget, onSellClose }: Props) {
       </CardHeader>
       <CardContent className="flex-1 overflow-y-auto min-h-0 px-3 pb-3 space-y-4">
         {sellTarget ? (
-          <SellForm accountId={accountId} holding={sellTarget} onClose={onSellClose} />
+          <SellForm accountId={accountId} holding={sellTarget} onClose={onSellClose} structuredJournal={structuredJournal} />
         ) : (
-          <BuyForm accountId={accountId} />
+          <BuyForm accountId={accountId} structuredJournal={structuredJournal} />
         )}
       </CardContent>
     </Card>

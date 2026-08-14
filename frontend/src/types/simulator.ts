@@ -80,6 +80,23 @@ export interface SimReview {
   recent_buffett_actions: Array<{ id: number; date: string; type: string; symbol: string | null; amount: number; notes: string }>
 }
 
+export interface TradePlanPayload {
+  setup: string
+  catalyst?: string
+  thesis: string
+  stop_price: number
+  target_price: number
+  invalidation?: string
+}
+
+export interface TradeJournalExitPayload {
+  exit_reason: 'stop' | 'target' | 'time_exit' | 'thesis_break' | 'discretionary'
+  thesis_valid: boolean
+  mfe?: number
+  mae?: number
+  review_notes?: string
+}
+
 export interface TradePayload {
   type: 'buy' | 'sell'
   symbol: string
@@ -88,4 +105,57 @@ export interface TradePayload {
   txn_date?: string
   fees?: number
   notes?: string
+  trade_plan?: TradePlanPayload
+  journal?: TradeJournalExitPayload
+}
+
+export interface SimRiskAlert {
+  type: 'missing_plan' | 'plan_share_mismatch' | 'stop_breached' | 'target_hit' | 'price_unavailable' | 'stale_price' | 'orphan_plan'
+  severity: 'critical' | 'warning' | 'info'
+  symbol: string
+  message: string
+  current_price?: number
+  threshold?: number
+}
+
+export interface SimRiskPosition {
+  symbol: string
+  shares: number | null
+  avg_cost: number | null
+  current_price: number | null
+  quote_timestamp: string | null
+  price_age_seconds: number | null
+  market_state: string | null
+  data_source: 'alpaca_iex' | 'alpaca_sip' | 'yfinance' | 'unavailable' | string
+  plan: Record<string, unknown> | null
+}
+
+export interface SimRiskMonitor {
+  read_only: true
+  execution_enabled: false
+  checked_at: string
+  market_open: boolean
+  alerts: SimRiskAlert[]
+  positions: SimRiskPosition[]
+}
+
+export interface SimJournalSetupStats {
+  trade_count: number
+  win_rate_pct: number | null
+  expectancy: number | null
+  average_r: number | null
+  total_pnl: number
+}
+
+export interface SimJournal {
+  analytics: {
+    closed_trade_count: number
+    win_rate_pct: number | null
+    expectancy: number | null
+    profit_factor: number | null
+    average_r: number | null
+    total_pnl: number
+    by_setup: Record<string, SimJournalSetupStats>
+  }
+  trades: Array<Record<string, unknown>>
 }

@@ -10,6 +10,9 @@ const {
     computeRealizedPnl,
 } = require('../services/simulator_ledger');
 const { buildSimulatorReview, simulatorTransactionsToCsv } = require('../services/simulator_review');
+const { normalizeTradePlan, closeStructuredTrade, computeJournalAnalytics } = require('../services/trade_journal');
+const { buildRiskMonitor } = require('../services/simulator_risk_monitor');
+const { getDefaultHybridQuote } = require('../services/hybrid_market_data');
 
 function accountIdFrom(req) {
     const raw = req.query?.account_id ?? req.body?.account_id ?? 1;
@@ -183,7 +186,7 @@ router.get('/holdings', async (req, res) => {
 router.post('/trade', async (req, res) => {
     try {
         const body = req.body ?? {};
-        const { accountId } = await requireSleeve(req);
+        const { accountId, account } = await requireSleeve(req);
         const today = new Date().toISOString().slice(0, 10);
         const txn = {
             account_id: accountId,
@@ -205,21 +208,72 @@ router.post('/trade', async (req, res) => {
 
         const txns = await db.listSimTransactions(accountId);
         const cash = computeCashBalance(txns);
+        const holdings = computeHoldings(txns);
         const cost = txn.shares * txn.price + txn.fees;
 
         if (txn.type === 'buy' && cash < cost) {
             return res.status(400).json({ status: 'error', error: `insufficient cash: have $${Math.round(cash * 100) / 100}, need $${Math.round(cost * 100) / 100}` });
         }
 
-        if (txn.type === 'sell') {
-            const holdings = computeHoldings(txns);
-            const ownedShares = holdings[txn.symbol.toUpperCase()]?.shares ?? 0;
-            if (txn.shares > ownedShares + 0.000001) {
-                return res.status(400).json({ status: 'error', error: `insufficient shares: own ${ownedShares}, tried to sell ${txn.shares}` });
-            }
+        const symbol = txn.symbol.toUpperCase();
+        const ownedShares = holdings[symbol]?.shares ?? 0;
+        if (txn.type === 'sell' && txn.shares > ownedShares + 0.000001) {
+            return res.status(400).json({ status: 'error', error: `insufficient shares: own ${ownedShares}, tried to sell ${txn.shares}` });
         }
 
-        const result = await db.addSimTransaction(txn);
+        let result;
+        if (txn.type === 'buy' && body.trade_plan) {
+            if (account.slug !== 'day-trading') {
+                return res.status(400).json({ status: 'error', error: 'structured trade plans are limited to the day-trading sleeve' });
+            }
+            const existingPlan = await db.getActiveSimTradePlan(accountId, symbol);
+            if (existingPlan) {
+                return res.status(400).json({ status: 'error', error: `${symbol} already has an active structured trade plan` });
+            }
+            const plan = normalizeTradePlan({
+                ...body.trade_plan,
+                account_id: accountId,
+                symbol,
+                planned_entry: txn.price,
+                shares: txn.shares,
+            });
+            result = await db.addSimTransactionWithPlan(txn, plan);
+        } else if (txn.type === 'sell') {
+            const activePlan = await db.getActiveSimTradePlan(accountId, symbol);
+            const closesPosition = Math.abs(txn.shares - ownedShares) <= 0.000001;
+            if (body.journal && !activePlan) {
+                return res.status(400).json({ status: 'error', error: `${symbol} has no active structured trade plan to review` });
+            }
+            if (body.journal && !closesPosition) {
+                return res.status(400).json({ status: 'error', error: 'structured exit review is recorded only when the full position is closed' });
+            }
+            if (activePlan && closesPosition) {
+                const inferredReason = txn.price <= Number(activePlan.stop_price)
+                    ? 'stop'
+                    : (txn.price >= Number(activePlan.target_price) ? 'target' : 'discretionary');
+                const review = body.journal || {
+                    exit_reason: inferredReason,
+                    thesis_valid: null,
+                    review_notes: 'Auto-closed from a full simulator exit; thesis validity was not supplied.',
+                };
+                const closure = closeStructuredTrade(activePlan, {
+                    exit_price: txn.price,
+                    shares: txn.shares,
+                    cost_basis: holdings[symbol].total_cost,
+                    fees: txn.fees,
+                    exit_reason: review.exit_reason,
+                    thesis_valid: review.thesis_valid,
+                    mfe: review.mfe,
+                    mae: review.mae,
+                    review_notes: review.review_notes,
+                });
+                result = await db.addSimTransactionAndCloseTradePlan(txn, activePlan.id, closure);
+            } else {
+                result = await db.addSimTransaction(txn);
+            }
+        } else {
+            result = await db.addSimTransaction(txn);
+        }
         res.json({ status: 'success', data: result });
     } catch (err) {
         sendError(res, err);
@@ -231,6 +285,52 @@ router.get('/transactions', async (req, res) => {
     try {
         const { txns } = await accountAndTransactions(req);
         res.json({ status: 'success', data: txns.reverse() });
+    } catch (err) {
+        sendError(res, err);
+    }
+});
+
+// GET /api/simulator/trade-plans — structured plan history for one sleeve
+router.get('/trade-plans', async (req, res) => {
+    try {
+        const { accountId } = await requireSleeve(req);
+        const status = req.query.status == null ? null : String(req.query.status);
+        if (status && !['active', 'closed', 'cancelled'].includes(status)) {
+            return res.status(400).json({ status: 'error', error: 'invalid trade-plan status' });
+        }
+        const plans = await db.listSimTradePlans(accountId, status);
+        res.json({ status: 'success', data: plans });
+    } catch (err) {
+        sendError(res, err);
+    }
+});
+
+// GET /api/simulator/journal — deterministic process analytics from closed structured trades
+router.get('/journal', async (req, res) => {
+    try {
+        const { accountId } = await requireSleeve(req);
+        const trades = await db.listSimTradePlans(accountId);
+        res.json({ status: 'success', data: { analytics: computeJournalAnalytics(trades), trades } });
+    } catch (err) {
+        sendError(res, err);
+    }
+});
+
+// GET /api/simulator/risk-monitor — read-only threshold and quote-health evaluation
+router.get('/risk-monitor', async (req, res) => {
+    try {
+        const { accountId } = await requireSleeve(req);
+        const [txns, plans] = await Promise.all([
+            db.listSimTransactions(accountId),
+            db.listSimTradePlans(accountId, 'active'),
+        ]);
+        const holdings = computeHoldings(txns);
+        const quotes = {};
+        await Promise.all(Object.keys(holdings).map(async (symbol) => {
+            quotes[symbol] = await getDefaultHybridQuote(symbol);
+        }));
+        const marketOpen = Object.values(quotes).some((quote) => quote.market_state === 'REGULAR');
+        res.json({ status: 'success', data: buildRiskMonitor({ holdings, plans, quotes, marketOpen }) });
     } catch (err) {
         sendError(res, err);
     }

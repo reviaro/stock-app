@@ -33,7 +33,7 @@ small Python bridge to yfinance for market data.
 ## Architecture
 
 ```
-frontend/   React 18 + TypeScript + Vite + Tailwind + React Query (port 5173, proxies /api → 3002)
+frontend/   React 19 + TypeScript + Vite + Tailwind + React Query (port 5173, proxies /api → 3002)
 backend/    Express (port 3002) + SQLite (backend/database/stocks.db) + node:test
   python/   yf_wrapper.py — yfinance quotes/quality/news via a venv (pybridge spawns it)
 docs/       dated plans and progress handoffs
@@ -51,7 +51,7 @@ from port 3002.
 cd backend
 npm install
 python3 -m venv venv && venv/bin/pip install yfinance pandas beautifulsoup4
-cp .env.example .env   # or create .env — see below
+cp .env.example .env   # configure the required auth values documented below
 node server.js         # http://localhost:3002
 ```
 
@@ -63,8 +63,37 @@ node server.js         # http://localhost:3002
 | `LMSTUDIO_BASE_URL` | Optional local-model fallback (default `http://localhost:1234/v1`) |
 | `LMSTUDIO_MODEL` | Model name as shown in LM Studio's server tab |
 | `PYTHON_PATH` | Optional override for the venv python used by pybridge |
+| `STOCK_DASHBOARD_USERNAME` | Required single-user login name |
+| `STOCK_DASHBOARD_PASSWORD_HASH` | Required scrypt password hash; never store the plaintext password |
+| `STOCK_DASHBOARD_SESSION_SECRET` | Required random session-signing secret of at least 32 characters |
+| `STOCK_DASHBOARD_API_TOKEN` | Optional bearer token for non-browser automation |
+| `STOCK_DASHBOARD_ALLOW_LOOPBACK` | Permit tightly validated `127.0.0.1` automation without a browser login; defaults to `1` |
+| `STOCK_DASHBOARD_HOST` | Loopback listener (`127.0.0.1` by default, or `::1`); non-loopback binding is rejected |
+| `STOCK_DASHBOARD_PUBLIC_ORIGIN` | Optional exact HTTPS browser origin when a local TLS reverse proxy provides remote access |
+| `STOCK_DASHBOARD_SECURE_COOKIE` | Required explicit `0` or `1`; use `1` whenever HTTPS is enabled |
+| `PYTHON_TIMEOUT_MS` | Maximum runtime for each market-data Python process; defaults to 45 seconds |
+| `PYTHON_MAX_OUTPUT_BYTES` | Combined Python stdout/stderr limit; defaults to 5 MiB |
+| `ALPACA_API_KEY` / `ALPACA_API_SECRET` | Optional Alpaca **paper** credentials; never commit real values |
+| `ALPACA_TRADING_BASE_URL` | Must remain `https://paper-api.alpaca.markets`; live endpoint is rejected |
+| `ALPACA_PAPER_ORDER_ENTRY_ENABLED` | Paper-order master switch; disabled unless explicitly set to `true` |
+| `ALPACA_PAPER_ORDER_ENTRY_TOKEN` | Independent token required by the paper-order and reconciliation routes |
 | `DB_PATH_OVERRIDE` | Tests only — point db.js at a scratch database |
 | `ENABLE_LEDGER_MIGRATION` | One-time portfolio→ledger migration gate. Already run on the live DB — do not set again. |
+
+Generate a password hash without putting the password in shell history:
+
+```bash
+cd backend
+read -rsp "New password: " NEW_PASSWORD; echo
+NEW_PASSWORD="$NEW_PASSWORD" node -e \
+  "console.log(require('./services/auth').hashPassword(process.env.NEW_PASSWORD))"
+unset NEW_PASSWORD
+```
+
+Copy the resulting `scrypt$...` value into `STOCK_DASHBOARD_PASSWORD_HASH`.
+Generate `STOCK_DASHBOARD_SESSION_SECRET` with a cryptographically random secret,
+for example `openssl rand -base64 48`. Restarting the backend invalidates existing
+browser sessions.
 
 ### Frontend
 

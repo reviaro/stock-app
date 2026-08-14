@@ -9,6 +9,15 @@ import sys
 import argparse
 import pandas as pd
 import numpy as np
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+
+def _utc_iso_from_epoch(value):
+    """Convert a provider epoch timestamp to a stable UTC ISO string."""
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat().replace('+00:00', 'Z')
+    except (TypeError, ValueError, OSError):
+        return None
 
 def _letter_to_number(letter):
     return {'A': 90, 'B': 75, 'C': 60, 'D': 40, 'F': 20}.get(letter)
@@ -203,6 +212,9 @@ def get_demo_data(symbol):
                 'sector': d['sector'],
                 'industry': d['industry'],
                 'currency': 'USD',
+                'isDemo': True,
+                'timestamp': None,
+                'marketState': 'UNKNOWN',
                 'price': d['price'],
                 'change': d['change'],
                 'changePercent': (d['change'] / d['price']) * 100,
@@ -395,6 +407,9 @@ def get_stock_info(symbol):
                 'sector': info.get('sector', 'Unknown'),
                 'industry': info.get('industry', 'Unknown'),
                 'currency': info.get('currency', 'USD'),
+                'isDemo': False,
+                'timestamp': _utc_iso_from_epoch(info.get('regularMarketTime')),
+                'marketState': info.get('marketState', 'UNKNOWN'),
                 'price': price,
                 'change': change,
                 'changePercent': changePercent,
@@ -441,6 +456,22 @@ def get_stock_info(symbol):
     except Exception as e:
         demo = get_demo_data(symbol)
         return demo if demo else {'status': 'error', 'error': str(e)}
+
+def get_stock_info_batch(symbols):
+    """Fetch several symbols concurrently inside one Python process."""
+    normalized = list(dict.fromkeys(
+        str(symbol).strip().upper() for symbol in (symbols or []) if str(symbol).strip()
+    ))
+    if not normalized:
+        return {'status': 'success', 'data': {}}
+
+    worker_count = min(8, len(normalized))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        results = list(executor.map(get_stock_info, normalized))
+    return {
+        'status': 'success',
+        'data': dict(zip(normalized, results)),
+    }
 
 def get_history(symbol, period='1y', interval='1d'):
     """Get historical price data"""
@@ -1286,6 +1317,8 @@ def main():
     
     if action == 'info':
         result = get_stock_info(symbol)
+    elif action == 'info_batch':
+        result = get_stock_info_batch(request.get('symbols', []))
     elif action == 'history':
         result = get_history(symbol, period, interval)
     elif action == 'canslim':

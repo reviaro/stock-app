@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { SimAccount, SimHolding, SimTransaction, TaxPreview, TradePayload, SimReview, SimSleeve } from '@/types/simulator'
+import type { SimAccount, SimHolding, SimTransaction, TaxPreview, TradePayload, SimReview, SimSleeve, SimRiskMonitor, SimJournal } from '@/types/simulator'
 
 async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, options)
@@ -17,6 +17,8 @@ function invalidateSleeve(qc: ReturnType<typeof useQueryClient>, accountId: numb
   qc.invalidateQueries({ queryKey: ['sim-holdings', accountId] })
   qc.invalidateQueries({ queryKey: ['sim-transactions', accountId] })
   qc.invalidateQueries({ queryKey: ['sim-review', accountId] })
+  qc.invalidateQueries({ queryKey: ['sim-risk-monitor', accountId] })
+  qc.invalidateQueries({ queryKey: ['sim-journal', accountId] })
   qc.invalidateQueries({ queryKey: ['sim-tax-preview', accountId] })
 }
 
@@ -56,6 +58,22 @@ export function useSimReview(accountId = 1) {
   return useQuery<SimReview>({
     queryKey: ['sim-review', accountId],
     queryFn: () => apiFetch(`/api/simulator/review${sleeveQuery(accountId)}`),
+    refetchInterval: 60_000,
+  })
+}
+
+export function useSimRiskMonitor(accountId = 1) {
+  return useQuery<SimRiskMonitor>({
+    queryKey: ['sim-risk-monitor', accountId],
+    queryFn: () => apiFetch(`/api/simulator/risk-monitor${sleeveQuery(accountId)}`),
+    refetchInterval: 60_000,
+  })
+}
+
+export function useSimJournal(accountId = 1) {
+  return useQuery<SimJournal>({
+    queryKey: ['sim-journal', accountId],
+    queryFn: () => apiFetch(`/api/simulator/journal${sleeveQuery(accountId)}`),
     refetchInterval: 60_000,
   })
 }

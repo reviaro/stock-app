@@ -241,6 +241,115 @@ function initDb() {
 
             db.run('CREATE INDEX IF NOT EXISTS idx_sim_transactions_symbol ON sim_transactions(symbol, txn_date)');
 
+            // Structured paper-trade plans are isolated from both the real portfolio and
+            // Alpaca audit mirror. They document risk and post-trade evidence only.
+            db.run(`
+                CREATE TABLE IF NOT EXISTS sim_trade_plans (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    setup TEXT NOT NULL,
+                    catalyst TEXT,
+                    thesis TEXT NOT NULL,
+                    invalidation TEXT,
+                    entry_transaction_id INTEGER NOT NULL,
+                    exit_transaction_id INTEGER,
+                    shares REAL NOT NULL CHECK (shares > 0),
+                    planned_entry REAL NOT NULL CHECK (planned_entry > 0),
+                    stop_price REAL NOT NULL CHECK (stop_price > 0),
+                    target_price REAL NOT NULL CHECK (target_price > 0),
+                    planned_risk REAL NOT NULL CHECK (planned_risk > 0),
+                    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'closed', 'cancelled')),
+                    exit_reason TEXT CHECK (exit_reason IN ('stop', 'target', 'time_exit', 'thesis_break', 'discretionary')),
+                    thesis_valid INTEGER,
+                    exit_price REAL,
+                    exit_shares REAL,
+                    exit_cost_basis REAL,
+                    realized_pnl REAL,
+                    realized_r REAL,
+                    mfe REAL,
+                    mae REAL,
+                    review_notes TEXT,
+                    opened_at TEXT DEFAULT (datetime('now')),
+                    closed_at TEXT,
+                    FOREIGN KEY(account_id) REFERENCES simulator_sleeves(id),
+                    FOREIGN KEY(entry_transaction_id) REFERENCES sim_transactions(id),
+                    FOREIGN KEY(exit_transaction_id) REFERENCES sim_transactions(id)
+                )
+            `);
+            db.run('ALTER TABLE sim_trade_plans ADD COLUMN exit_shares REAL', ignoreDuplicateColumnError);
+            db.run('ALTER TABLE sim_trade_plans ADD COLUMN exit_cost_basis REAL', ignoreDuplicateColumnError);
+            db.run('CREATE INDEX IF NOT EXISTS idx_sim_trade_plans_account_status ON sim_trade_plans(account_id, status, opened_at DESC)');
+            db.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_sim_trade_plans_one_active ON sim_trade_plans(account_id, symbol) WHERE status = 'active'");
+
+            // Separate, broker-facing paper-order audit mirror. It never feeds the local
+            // simulator or real portfolio ledgers; idempotency prevents duplicate submits.
+            db.run(`
+                CREATE TABLE IF NOT EXISTS alpaca_paper_orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    broker_order_id TEXT UNIQUE,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+                    qty INTEGER NOT NULL CHECK (qty > 0),
+                    order_type TEXT NOT NULL CHECK (order_type IN ('market', 'limit')),
+                    time_in_force TEXT NOT NULL CHECK (time_in_force = 'day'),
+                    limit_price REAL,
+                    status TEXT NOT NULL,
+                    request_payload TEXT NOT NULL,
+                    broker_payload TEXT,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    updated_at TEXT DEFAULT (datetime('now'))
+                )
+            `);
+            db.run('CREATE INDEX IF NOT EXISTS idx_alpaca_paper_orders_status ON alpaca_paper_orders(status, created_at DESC)');
+
+            // Strategy Lab is an evidence registry only. These isolated tables contain
+            // experiment definitions, versioned rules, and observed test/paper runs.
+            db.run(`
+                CREATE TABLE IF NOT EXISTS strategy_experiments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    hypothesis TEXT NOT NULL,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    updated_at TEXT DEFAULT (datetime('now'))
+                )
+            `);
+            db.run(`
+                CREATE TABLE IF NOT EXISTS strategy_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    experiment_id INTEGER NOT NULL,
+                    version_number INTEGER NOT NULL,
+                    rules_json TEXT NOT NULL,
+                    notes TEXT,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    UNIQUE(experiment_id, version_number),
+                    FOREIGN KEY(experiment_id) REFERENCES strategy_experiments(id)
+                )
+            `);
+            db.run(`
+                CREATE TABLE IF NOT EXISTS strategy_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    version_id INTEGER NOT NULL,
+                    run_type TEXT NOT NULL CHECK (run_type IN ('backtest', 'out_of_sample', 'paper')),
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL,
+                    trade_count INTEGER NOT NULL CHECK (trade_count >= 0),
+                    total_return_pct REAL NOT NULL,
+                    benchmark_return_pct REAL NOT NULL,
+                    max_drawdown_pct REAL NOT NULL CHECK (max_drawdown_pct >= 0),
+                    sharpe REAL,
+                    win_rate REAL,
+                    expectancy REAL,
+                    avg_r REAL,
+                    notes TEXT,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY(version_id) REFERENCES strategy_versions(id)
+                )
+            `);
+            db.run('CREATE INDEX IF NOT EXISTS idx_strategy_versions_experiment ON strategy_versions(experiment_id, version_number)');
+            db.run('CREATE INDEX IF NOT EXISTS idx_strategy_runs_version ON strategy_runs(version_id, id)');
+
             db.run(`
                 CREATE INDEX IF NOT EXISTS idx_chat_history_session
                 ON chat_history(session_id, created_at DESC)
@@ -251,7 +360,14 @@ function initDb() {
                     return;
                 }
 
-                db.close();
+                try {
+                    await new Promise((resolveClose, rejectClose) => {
+                        db.close((closeError) => closeError ? rejectClose(closeError) : resolveClose());
+                    });
+                } catch (closeError) {
+                    reject(closeError);
+                    return;
+                }
 
                 if (process.env.ENABLE_LEDGER_MIGRATION === '1') {
                     try {
@@ -966,6 +1082,124 @@ function addSimTransaction(txn) {
     });
 }
 
+function listSimTradePlans(accountId = 1, status = null) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        const where = status ? 'WHERE account_id = ? AND status = ?' : 'WHERE account_id = ?';
+        const params = status ? [Number(accountId), status] : [Number(accountId)];
+        sqlite.all(`SELECT * FROM sim_trade_plans ${where} ORDER BY id DESC`, params, (err, rows) => {
+            sqlite.close();
+            err ? reject(err) : resolve(rows || []);
+        });
+    });
+}
+
+function getActiveSimTradePlan(accountId, symbol) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.get(
+            "SELECT * FROM sim_trade_plans WHERE account_id = ? AND symbol = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
+            [Number(accountId), String(symbol).toUpperCase()],
+            (err, row) => {
+                sqlite.close();
+                err ? reject(err) : resolve(row || null);
+            },
+        );
+    });
+}
+
+function addSimTransactionWithPlan(txn, plan) {
+    const accountId = Number(txn.account_id ?? 1);
+    const symbol = String(txn.symbol).toUpperCase();
+    const amount = Number(txn.shares) * Number(txn.price);
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        let finished = false;
+        const fail = (error) => {
+            if (finished) return;
+            finished = true;
+            sqlite.run('ROLLBACK', () => { sqlite.close(); reject(error); });
+        };
+        sqlite.serialize(() => {
+            sqlite.run('BEGIN IMMEDIATE');
+            sqlite.run(
+                `INSERT INTO sim_transactions (account_id, symbol, type, shares, price, amount, fees, txn_date, notes)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [accountId, symbol, txn.type, txn.shares, txn.price, amount, Number(txn.fees ?? 0), txn.txn_date, txn.notes ?? null],
+                function(err) {
+                    if (err) return fail(err);
+                    const transactionId = this.lastID;
+                    sqlite.run(
+                        `INSERT INTO sim_trade_plans
+                         (account_id, symbol, setup, catalyst, thesis, invalidation, entry_transaction_id,
+                          shares, planned_entry, stop_price, target_price, planned_risk)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        [accountId, symbol, plan.setup, plan.catalyst, plan.thesis, plan.invalidation,
+                            transactionId, plan.shares, plan.planned_entry, plan.stop_price, plan.target_price, plan.planned_risk],
+                        function(planErr) {
+                            if (planErr) return fail(planErr);
+                            const planId = this.lastID;
+                            sqlite.run('COMMIT', (commitErr) => {
+                                if (commitErr) return fail(commitErr);
+                                finished = true;
+                                sqlite.close();
+                                resolve({ id: transactionId, account_id: accountId, symbol, type: txn.type, amount, trade_plan_id: planId });
+                            });
+                        },
+                    );
+                },
+            );
+        });
+    });
+}
+
+function addSimTransactionAndCloseTradePlan(txn, planId, closure) {
+    const accountId = Number(txn.account_id ?? 1);
+    const symbol = String(txn.symbol).toUpperCase();
+    const amount = Number(txn.shares) * Number(txn.price);
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        let finished = false;
+        const fail = (error) => {
+            if (finished) return;
+            finished = true;
+            sqlite.run('ROLLBACK', () => { sqlite.close(); reject(error); });
+        };
+        sqlite.serialize(() => {
+            sqlite.run('BEGIN IMMEDIATE');
+            sqlite.run(
+                `INSERT INTO sim_transactions (account_id, symbol, type, shares, price, amount, fees, txn_date, notes)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [accountId, symbol, txn.type, txn.shares, txn.price, amount, Number(txn.fees ?? 0), txn.txn_date, txn.notes ?? null],
+                function(err) {
+                    if (err) return fail(err);
+                    const transactionId = this.lastID;
+                    sqlite.run(
+                        `UPDATE sim_trade_plans
+                         SET status = 'closed', exit_transaction_id = ?, exit_reason = ?, thesis_valid = ?,
+                             exit_price = ?, exit_shares = ?, exit_cost_basis = ?, realized_pnl = ?, realized_r = ?, mfe = ?, mae = ?, review_notes = ?,
+                             closed_at = datetime('now')
+                         WHERE id = ? AND account_id = ? AND status = 'active'`,
+                        [transactionId, closure.exit_reason, closure.thesis_valid == null ? null : (closure.thesis_valid ? 1 : 0), closure.exit_price, closure.exit_shares, closure.exit_cost_basis,
+                            closure.realized_pnl, closure.realized_r, closure.mfe, closure.mae, closure.review_notes,
+                            Number(planId), accountId],
+                        function(updateErr) {
+                            if (updateErr) return fail(updateErr);
+                            if (this.changes !== 1) return fail(new Error('active trade plan was not found'));
+                            sqlite.run('COMMIT', (commitErr) => {
+                                if (commitErr) return fail(commitErr);
+                                finished = true;
+                                sqlite.close();
+                                resolve({ id: transactionId, account_id: accountId, symbol, type: txn.type, amount, trade_plan_id: Number(planId) });
+                            });
+                        },
+                    );
+                },
+            );
+        });
+    });
+}
+
 function listSimTransactions(accountId = 1) {
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
@@ -983,10 +1217,213 @@ function listSimTransactions(accountId = 1) {
 function deleteAllSimTransactions(accountId = 1) {
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
-        sqlite.run('DELETE FROM sim_transactions WHERE account_id = ?', [Number(accountId)], function(err) {
-            sqlite.close();
-            err ? reject(err) : resolve({ deleted: this.changes });
+        const id = Number(accountId);
+        sqlite.serialize(() => {
+            sqlite.run('BEGIN IMMEDIATE');
+            sqlite.run('DELETE FROM sim_trade_plans WHERE account_id = ?', [id], function(planErr) {
+                if (planErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(planErr); });
+                sqlite.run('DELETE FROM sim_transactions WHERE account_id = ?', [id], function(txnErr) {
+                    if (txnErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(txnErr); });
+                    const deleted = this.changes;
+                    sqlite.run('COMMIT', (commitErr) => {
+                        sqlite.close();
+                        commitErr ? reject(commitErr) : resolve({ deleted });
+                    });
+                });
+            });
         });
+    });
+}
+
+function createAlpacaPaperOrderAudit(order) {
+    const normalized = {
+        idempotency_key: String(order.idempotency_key || '').trim(),
+        symbol: String(order.symbol || '').trim().toUpperCase(),
+        side: order.side,
+        qty: Number(order.qty),
+        order_type: order.order_type,
+        time_in_force: order.time_in_force,
+        limit_price: order.limit_price == null ? null : Number(order.limit_price),
+        status: order.status,
+    };
+    if (!normalized.idempotency_key || !normalized.symbol || !['buy', 'sell'].includes(normalized.side)
+        || !Number.isInteger(normalized.qty) || normalized.qty <= 0
+        || !['market', 'limit'].includes(normalized.order_type) || normalized.time_in_force !== 'day'
+        || !normalized.status) {
+        return Promise.reject(new Error('invalid Alpaca paper order audit record'));
+    }
+    if (normalized.order_type === 'limit' && !(normalized.limit_price > 0)) {
+        return Promise.reject(new Error('limit paper-order audit requires positive limit_price'));
+    }
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            `INSERT INTO alpaca_paper_orders (
+                idempotency_key, symbol, side, qty, order_type, time_in_force, limit_price, status, request_payload
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                normalized.idempotency_key, normalized.symbol, normalized.side, normalized.qty,
+                normalized.order_type, normalized.time_in_force, normalized.limit_price, normalized.status,
+                JSON.stringify(normalized),
+            ],
+            function(err) {
+                sqlite.close();
+                if (err) {
+                    if (/UNIQUE constraint failed: alpaca_paper_orders\.idempotency_key/i.test(err.message)) {
+                        return reject(new Error('duplicate Alpaca paper-order idempotency key'));
+                    }
+                    return reject(err);
+                }
+                return resolve({ id: this.lastID, ...normalized });
+            },
+        );
+    });
+}
+
+function updateAlpacaPaperOrderAudit(idempotencyKey, { status, broker_order_id = null, broker_payload = null }) {
+    const key = String(idempotencyKey || '').trim();
+    if (!key || !status) return Promise.reject(new Error('invalid Alpaca paper order audit update'));
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            `UPDATE alpaca_paper_orders
+             SET status = ?, broker_order_id = COALESCE(?, broker_order_id), broker_payload = ?, updated_at = datetime('now')
+             WHERE idempotency_key = ?`,
+            [status, broker_order_id, broker_payload == null ? null : JSON.stringify(broker_payload), key],
+            function(err) {
+                sqlite.close();
+                if (err) return reject(err);
+                if (this.changes !== 1) return reject(new Error('Alpaca paper order audit record not found'));
+                return resolve({ updated: this.changes });
+            },
+        );
+    });
+}
+
+function listAlpacaPaperOrderAudits() {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.all('SELECT * FROM alpaca_paper_orders ORDER BY id DESC', [], (err, rows) => {
+            sqlite.close();
+            err ? reject(err) : resolve(rows || []);
+        });
+    });
+}
+
+function settleAfterClose(sqlite, sqlError, value, resolve, reject) {
+    sqlite.close((closeError) => {
+        const error = sqlError || closeError;
+        error ? reject(error) : resolve(value);
+    });
+}
+
+function createStrategyExperiment({ name, hypothesis }) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            'INSERT INTO strategy_experiments (name, hypothesis) VALUES (?, ?)',
+            [name, hypothesis],
+            function(err) {
+                settleAfterClose(sqlite, err, { id: this.lastID, name, hypothesis }, resolve, reject);
+            },
+        );
+    });
+}
+
+function listStrategyExperiments() {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.all('SELECT * FROM strategy_experiments ORDER BY id DESC', [], (err, rows) => {
+            settleAfterClose(sqlite, err, rows || [], resolve, reject);
+        });
+    });
+}
+
+function getStrategyExperimentById(id) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.get('SELECT * FROM strategy_experiments WHERE id = ?', [Number(id)], (err, row) => {
+            settleAfterClose(sqlite, err, row || null, resolve, reject);
+        });
+    });
+}
+
+function createStrategyVersion({ experiment_id, version_number, rules_json, notes = null }) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            `INSERT INTO strategy_versions (experiment_id, version_number, rules_json, notes)
+             VALUES (?, ?, ?, ?)`,
+            [Number(experiment_id), Number(version_number), rules_json, notes],
+            function(err) {
+                settleAfterClose(sqlite, err, {
+                    id: this.lastID,
+                    experiment_id: Number(experiment_id),
+                    version_number: Number(version_number),
+                    rules_json,
+                    notes,
+                }, resolve, reject);
+            },
+        );
+    });
+}
+
+function listStrategyVersions(experimentId) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.all(
+            'SELECT * FROM strategy_versions WHERE experiment_id = ? ORDER BY version_number ASC',
+            [Number(experimentId)],
+            (err, rows) => {
+                settleAfterClose(sqlite, err, rows || [], resolve, reject);
+            },
+        );
+    });
+}
+
+function getStrategyVersionById(id) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.get('SELECT * FROM strategy_versions WHERE id = ?', [Number(id)], (err, row) => {
+            settleAfterClose(sqlite, err, row || null, resolve, reject);
+        });
+    });
+}
+
+function createStrategyRun(run) {
+    const fields = [
+        'version_id', 'run_type', 'start_date', 'end_date', 'trade_count',
+        'total_return_pct', 'benchmark_return_pct', 'max_drawdown_pct',
+        'sharpe', 'win_rate', 'expectancy', 'avg_r', 'notes',
+    ];
+    const values = fields.map((field) => run[field] ?? null);
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            `INSERT INTO strategy_runs (${fields.join(', ')})
+             VALUES (${fields.map(() => '?').join(', ')})`,
+            values,
+            function(err) {
+                settleAfterClose(sqlite, err, { id: this.lastID, ...run }, resolve, reject);
+            },
+        );
+    });
+}
+
+function listStrategyRunsForExperiment(experimentId) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.all(
+            `SELECT r.*
+             FROM strategy_runs r
+             INNER JOIN strategy_versions v ON v.id = r.version_id
+             WHERE v.experiment_id = ?
+             ORDER BY r.id ASC`,
+            [Number(experimentId)],
+            (err, rows) => {
+                settleAfterClose(sqlite, err, rows || [], resolve, reject);
+            },
+        );
     });
 }
 
@@ -1030,6 +1467,21 @@ module.exports = {
     getSimAccount,
     setSimTaxBracket,
     addSimTransaction,
+    addSimTransactionWithPlan,
+    addSimTransactionAndCloseTradePlan,
+    listSimTradePlans,
+    getActiveSimTradePlan,
     listSimTransactions,
     deleteAllSimTransactions,
+    createAlpacaPaperOrderAudit,
+    updateAlpacaPaperOrderAudit,
+    listAlpacaPaperOrderAudits,
+    createStrategyExperiment,
+    listStrategyExperiments,
+    getStrategyExperimentById,
+    createStrategyVersion,
+    listStrategyVersions,
+    getStrategyVersionById,
+    createStrategyRun,
+    listStrategyRunsForExperiment,
 };

@@ -52,8 +52,9 @@ function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketC
   const isPositive = (entry.changePercent ?? 0) >= 0
   const hasPriceData = entry.price !== undefined
 
-  // Earnings date badge
-  const { data: earningsData } = useEarningsDate(entry.symbol)
+  // Fetch the expensive earnings calendar only for the selected row. Loading it for
+  // every watchlist entry created an N+1 burst of Python/provider requests.
+  const { data: earningsData } = useEarningsDate(isSelected ? entry.symbol : null)
   const earningsDate = earningsData?.earningsDate ?? null
   const earningsDaysAway = earningsDate
     ? Math.ceil((new Date(earningsDate).getTime() - Date.now()) / 86_400_000)
