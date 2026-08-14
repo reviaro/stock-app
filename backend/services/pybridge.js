@@ -98,6 +98,7 @@ function createPybridge({
     });
     const marketCache = createAsyncTtlCache({ ttlMs: marketTtlMs });
     const sectorCache = createAsyncTtlCache({ ttlMs: Math.max(marketTtlMs, 5 * 60_000) });
+    const screenerCache = createAsyncTtlCache({ ttlMs: 5 * 60_000 });
 
     return {
         getStockInfo(symbol) {
@@ -133,10 +134,24 @@ function createPybridge({
         getQualityMetrics(symbol) {
             return runPython({ action: 'quality', symbol });
         },
+        getScreenerInputs(symbols) {
+            const normalized = [...new Set((symbols || [])
+                .map((symbol) => String(symbol).trim().toUpperCase())
+                .filter(Boolean))].sort();
+            const key = normalized.join(',');
+            return screenerCache.get(key, async () => {
+                const result = await runPython({ action: 'screener_batch', symbols: normalized });
+                if (result?.status !== 'success' || !result.data) {
+                    throw new Error(result?.error || 'Batch screener data request failed');
+                }
+                return result.data;
+            });
+        },
         clearMarketDataCache(symbol) {
             stockInfoLoader.clear(symbol);
             marketCache.clear();
             sectorCache.clear();
+            screenerCache.clear();
         },
     };
 }

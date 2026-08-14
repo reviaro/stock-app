@@ -9,22 +9,24 @@ async function safe(fn, fallback = null) {
     try { return await fn(); } catch { return fallback; }
 }
 
-router.get('/value', async (req, res) => {
+function createValueHandler({ db: database = db, pybridge: bridge = pybridge } = {}) {
+    return async (req, res) => {
     try {
         const universe = req.query.universe || 'watchlist';
         if (universe !== 'watchlist') {
             return res.status(400).json({ status: 'error', error: 'only universe=watchlist is supported for now' });
         }
 
-        const watchlist = await db.getWatchlist();
+        const watchlist = await database.getWatchlist();
+        const symbols = watchlist.map((item) => item.symbol.toUpperCase());
+        const inputs = await bridge.getScreenerInputs(symbols);
         const rows = await Promise.all(watchlist.map(async (item) => {
             const symbol = item.symbol.toUpperCase();
-            const [stockRes, qualityRes, technicalRes, memo] = await Promise.all([
-                safe(() => pybridge.getStockInfo(symbol)),
-                safe(() => pybridge.getQualityMetrics(symbol)),
-                safe(() => pybridge.getTechnicalIndicators(symbol)),
-                safe(() => db.getMemo(symbol)),
-            ]);
+            const batch = inputs[symbol] ?? {};
+            const memo = await safe(() => database.getMemo(symbol));
+            const stockRes = batch.stock;
+            const qualityRes = batch.quality;
+            const technicalRes = batch.technical;
 
             const stock = stockRes?.data ?? item;
             const quality = qualityRes?.data ?? {};
@@ -49,6 +51,10 @@ router.get('/value', async (req, res) => {
     } catch (err) {
         res.status(500).json({ status: 'error', error: err.message });
     }
-});
+    };
+}
+
+router.get('/value', createValueHandler());
 
 module.exports = router;
+module.exports.createValueHandler = createValueHandler;

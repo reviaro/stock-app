@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const net = require('node:net');
 const path = require('path');
 const db = require('./database/db');
 
@@ -27,9 +28,26 @@ const { createAuthFromEnv } = require('./services/auth');
 const PORT = Number(process.env.PORT || 3002);
 const FRONTEND_DIST = path.join(__dirname, '..', 'frontend', 'dist');
 
-function createApp({ auth = createAuthFromEnv() } = {}) {
+function normalizeAddress(address = '') {
+    return String(address).startsWith('::ffff:') ? String(address).slice(7) : String(address);
+}
+
+function isAllowedClientAddress(address, env = process.env) {
+    const normalized = normalizeAddress(address);
+    if (normalized === '127.0.0.1' || normalized === '::1') return true;
+    const trustedProxy = normalizeAddress(env.STOCK_DASHBOARD_TRUSTED_PROXY_IP || '');
+    return Boolean(trustedProxy) && normalized === trustedProxy;
+}
+
+function createApp({ auth = createAuthFromEnv(), env = process.env } = {}) {
     const app = express();
     app.disable('x-powered-by');
+    app.use((req, res, next) => {
+        if (!isAllowedClientAddress(req.socket.remoteAddress, env)) {
+            return res.status(403).json({ status: 'error', error: 'Client address is not allowed' });
+        }
+        return next();
+    });
     app.use(auth.securityHeaders);
     app.use(cors({
         origin: [
@@ -85,8 +103,21 @@ function createApp({ auth = createAuthFromEnv() } = {}) {
 
 function resolveListenHost(env = process.env) {
     const host = env.STOCK_DASHBOARD_HOST || '127.0.0.1';
-    if (host !== '127.0.0.1' && host !== '::1') {
-        throw new Error('Stock Dashboard must listen on loopback; expose it only through a local TLS reverse proxy');
+    if (host === '127.0.0.1' || host === '::1') return host;
+    if (host !== '0.0.0.0') throw new Error('Stock Dashboard listener must use loopback or the guarded LAN proxy mode');
+    if (env.STOCK_DASHBOARD_SECURE_COOKIE !== '1') throw new Error('LAN proxy mode requires secure cookies');
+    let publicOrigin;
+    try {
+        publicOrigin = new URL(env.STOCK_DASHBOARD_PUBLIC_ORIGIN || '');
+    } catch (_error) {
+        throw new Error('LAN proxy mode requires an HTTPS public origin');
+    }
+    if (publicOrigin.protocol !== 'https:' || publicOrigin.origin !== env.STOCK_DASHBOARD_PUBLIC_ORIGIN) {
+        throw new Error('LAN proxy mode requires an exact HTTPS public origin');
+    }
+    const trustedProxy = env.STOCK_DASHBOARD_TRUSTED_PROXY_IP || '';
+    if (net.isIP(trustedProxy) !== 4 || trustedProxy.startsWith('127.')) {
+        throw new Error('LAN proxy mode requires one exact trusted proxy IPv4 address');
     }
     return host;
 }
@@ -116,4 +147,4 @@ if (require.main === module) {
     start().catch(() => {});
 }
 
-module.exports = { createApp, resolveListenHost, start };
+module.exports = { createApp, isAllowedClientAddress, resolveListenHost, start };

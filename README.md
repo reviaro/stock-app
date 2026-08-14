@@ -68,9 +68,10 @@ node server.js         # http://localhost:3002
 | `STOCK_DASHBOARD_SESSION_SECRET` | Required random session-signing secret of at least 32 characters |
 | `STOCK_DASHBOARD_API_TOKEN` | Optional bearer token for non-browser automation |
 | `STOCK_DASHBOARD_ALLOW_LOOPBACK` | Permit tightly validated `127.0.0.1` automation without a browser login; defaults to `1` |
-| `STOCK_DASHBOARD_HOST` | Loopback listener (`127.0.0.1` by default, or `::1`); non-loopback binding is rejected |
-| `STOCK_DASHBOARD_PUBLIC_ORIGIN` | Optional exact HTTPS browser origin when a local TLS reverse proxy provides remote access |
-| `STOCK_DASHBOARD_SECURE_COOKIE` | Required explicit `0` or `1`; use `1` whenever HTTPS is enabled |
+| `STOCK_DASHBOARD_HOST` | `127.0.0.1` by default; use `0.0.0.0` only in guarded LAN proxy mode |
+| `STOCK_DASHBOARD_TRUSTED_PROXY_IP` | Exact LAN IPv4 allowed to proxy requests when `HOST=0.0.0.0`; all other non-loopback clients are rejected |
+| `STOCK_DASHBOARD_PUBLIC_ORIGIN` | Exact HTTPS browser origin used for mutation Origin checks, such as `https://stocks.example.com` |
+| `STOCK_DASHBOARD_SECURE_COOKIE` | Required explicit `0` or `1`; guarded LAN proxy mode requires `1` |
 | `PYTHON_TIMEOUT_MS` | Maximum runtime for each market-data Python process; defaults to 45 seconds |
 | `PYTHON_MAX_OUTPUT_BYTES` | Combined Python stdout/stderr limit; defaults to 5 MiB |
 | `ALPACA_API_KEY` / `ALPACA_API_SECRET` | Optional Alpaca **paper** credentials; never commit real values |

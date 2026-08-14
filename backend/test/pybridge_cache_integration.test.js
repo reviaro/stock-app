@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createPybridge } = require('../services/pybridge');
+const { callPython, createPybridge } = require('../services/pybridge');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -51,4 +51,35 @@ test('pybridge caches market indexes and deduplicates in-flight calls', async ()
 
     await bridge.getMarketIndexes();
     assert.equal(calls, 1);
+});
+
+test('pybridge loads screener inputs for all symbols in one cached Python batch', async () => {
+    const requests = [];
+    const bridge = createPybridge({
+        callPython: async (request) => {
+            requests.push(request);
+            return {
+                status: 'success',
+                data: Object.fromEntries(request.symbols.map((symbol) => [symbol, {
+                    stock: { status: 'success', data: { symbol, price: 100 } },
+                    quality: { status: 'success', data: { composite: 80 } },
+                    technical: { status: 'success', data: { current: { rsi: 50 } } },
+                }])),
+            };
+        },
+    });
+
+    const first = await bridge.getScreenerInputs(['aapl', 'MSFT', 'AAPL']);
+    const second = await bridge.getScreenerInputs(['MSFT', 'AAPL']);
+
+    assert.equal(first.AAPL.stock.data.price, 100);
+    assert.equal(first.MSFT.quality.data.composite, 80);
+    assert.deepEqual(second, first);
+    assert.equal(requests.length, 1);
+    assert.deepEqual(requests[0], { action: 'screener_batch', symbols: ['AAPL', 'MSFT'] });
+});
+
+test('Python screener batch action accepts an empty universe', async () => {
+    const result = await callPython({ action: 'screener_batch', symbols: [] });
+    assert.deepEqual(result, { status: 'success', data: {} });
 });

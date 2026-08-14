@@ -473,6 +473,29 @@ def get_stock_info_batch(symbols):
         'data': dict(zip(normalized, results)),
     }
 
+def get_screener_inputs_batch(symbols):
+    """Load stock, quality, and technical inputs in one bounded process."""
+    normalized = list(dict.fromkeys(
+        str(symbol).strip().upper() for symbol in (symbols or []) if str(symbol).strip()
+    ))
+    if not normalized:
+        return {'status': 'success', 'data': {}}
+
+    def load_symbol(symbol):
+        return {
+            'stock': get_stock_info(symbol),
+            'quality': get_quality_metrics(symbol),
+            'technical': get_technical_indicators(symbol),
+        }
+
+    worker_count = min(8, len(normalized))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        results = list(executor.map(load_symbol, normalized))
+    return {
+        'status': 'success',
+        'data': dict(zip(normalized, results)),
+    }
+
 def get_history(symbol, period='1y', interval='1d'):
     """Get historical price data"""
     # Try yfinance first, fallback to demo if needed
@@ -1319,6 +1342,8 @@ def main():
         result = get_stock_info(symbol)
     elif action == 'info_batch':
         result = get_stock_info_batch(request.get('symbols', []))
+    elif action == 'screener_batch':
+        result = get_screener_inputs_batch(request.get('symbols', []))
     elif action == 'history':
         result = get_history(symbol, period, interval)
     elif action == 'canslim':
