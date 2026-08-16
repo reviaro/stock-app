@@ -6,8 +6,9 @@ import { SimulatorPage } from '@/pages/SimulatorPage'
 import { OpportunitiesPage } from '@/pages/OpportunitiesPage'
 import { AlpacaPaperPage } from '@/pages/AlpacaPaperPage'
 import { StrategyLabPage } from '@/pages/StrategyLabPage'
+import { PortfolioLabPage } from '@/pages/PortfolioLabPage'
 
-type Tab = 'dashboard' | 'opportunities' | 'simulator' | 'research-lab' | 'alpaca-paper'
+type Tab = 'dashboard' | 'opportunities' | 'simulator' | 'research-lab' | 'portfolio-lab' | 'alpaca-paper'
 type AuthState =
   | { status: 'loading' }
   | { status: 'guest'; error?: string }
@@ -18,6 +19,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'opportunities', label: 'Opportunities' },
   { id: 'simulator', label: 'Simulator' },
   { id: 'research-lab', label: 'Research Lab' },
+  { id: 'portfolio-lab', label: 'Portfolio Lab' },
   { id: 'alpaca-paper', label: 'Alpaca Paper' },
 ]
 
@@ -140,7 +142,7 @@ function App() {
 
   return (
     <div>
-      <nav className="sticky top-0 z-50 flex items-end gap-1 border-b border-border bg-background/90 backdrop-blur-sm px-4 pt-3 pb-0">
+      <nav className="sticky top-0 z-50 flex items-end gap-1 overflow-x-auto border-b border-border bg-background/90 backdrop-blur-sm px-4 pt-3 pb-0">
         {TABS.map((tab) => (
           <button
             key={tab.id}
@@ -184,7 +186,9 @@ function App() {
                 ? <SimulatorPage />
                 : activeTab === 'research-lab'
                   ? <StrategyLabPage />
-                  : <AlpacaPaperPage /> }
+                  : activeTab === 'portfolio-lab'
+                    ? <PortfolioLabPage />
+                    : <AlpacaPaperPage /> }
         </motion.div>
       </AnimatePresence>
     </div>

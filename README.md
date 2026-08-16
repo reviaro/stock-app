@@ -21,6 +21,9 @@ small Python bridge to yfinance for market data.
   levels, invalidation, conviction) plus structured research notes, with AI
   draft and bear-case pressure-test helpers.
 - **Value screener** — scores candidates on quality vs. valuation.
+- **Portfolio Lab** — read-only skfolio allocation research comparing equal
+  weight, inverse volatility, HRP, minimum variance, and constrained CVaR with
+  rolling walk-forward validation and optional Strategy Lab evidence capture.
 - **AI analyst** — chat agent with tool access to live quotes, technicals,
   news, quality metrics, risk checks, and the simulator; plus five one-shot
   analyst modes (decision memo, bear case, compare, weekly review, monthly
@@ -36,6 +39,7 @@ small Python bridge to yfinance for market data.
 frontend/   React 19 + TypeScript + Vite + Tailwind + React Query (port 5173, proxies /api → 3002)
 backend/    Express (port 3002) + SQLite (backend/database/stocks.db) + node:test
   python/   yf_wrapper.py — yfinance quotes/quality/news via a venv (pybridge spawns it)
+  portfolio_lab/  isolated skfolio worker, tests, requirements, and dedicated venv
 docs/       dated plans and progress handoffs
 HANDOFF.md  current repo status for the next session
 ```
@@ -51,6 +55,7 @@ from port 3002.
 cd backend
 npm install
 python3 -m venv venv && venv/bin/pip install yfinance pandas beautifulsoup4
+python3 -m venv portfolio_lab/venv && portfolio_lab/venv/bin/pip install -r portfolio_lab/requirements.txt
 cp .env.example .env   # configure the required auth values documented below
 node server.js         # http://localhost:3002
 ```
@@ -74,6 +79,9 @@ node server.js         # http://localhost:3002
 | `STOCK_DASHBOARD_SECURE_COOKIE` | Required explicit `0` or `1`; guarded LAN proxy mode requires `1` |
 | `PYTHON_TIMEOUT_MS` | Maximum runtime for each market-data Python process; defaults to 45 seconds |
 | `PYTHON_MAX_OUTPUT_BYTES` | Combined Python stdout/stderr limit; defaults to 5 MiB |
+| `PORTFOLIO_LAB_PYTHON` | Optional override for the isolated Portfolio Lab Python executable |
+| `PORTFOLIO_LAB_TIMEOUT_MS` | Maximum Portfolio Lab worker runtime; defaults to 180 seconds |
+| `PORTFOLIO_LAB_MAX_OUTPUT_BYTES` | Combined Portfolio Lab worker output limit; defaults to 10 MiB |
 | `ALPACA_API_KEY` / `ALPACA_API_SECRET` | Optional Alpaca **paper** credentials; never commit real values |
 | `ALPACA_TRADING_BASE_URL` | Must remain `https://paper-api.alpaca.markets`; live endpoint is rejected |
 | `ALPACA_PAPER_ORDER_ENTRY_ENABLED` | Paper-order master switch; disabled unless explicitly set to `true` |
@@ -109,6 +117,7 @@ npm run build   # emits frontend/dist, served by the backend
 
 ```bash
 cd backend && npm test        # node --test — routes, ledger, tax math, migration, AI simulator tools
+cd backend && portfolio_lab/venv/bin/python -m unittest portfolio_lab/test_worker.py -v
 cd frontend && npm test       # vitest + testing-library
 cd frontend && npx tsc -b     # type check
 ```

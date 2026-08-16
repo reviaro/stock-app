@@ -332,6 +332,7 @@ function initDb() {
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     version_id INTEGER NOT NULL,
                     run_type TEXT NOT NULL CHECK (run_type IN ('backtest', 'out_of_sample', 'paper')),
+                    evidence_domain TEXT NOT NULL DEFAULT 'trading' CHECK (evidence_domain IN ('trading', 'allocation')),
                     start_date TEXT NOT NULL,
                     end_date TEXT NOT NULL,
                     trade_count INTEGER NOT NULL CHECK (trade_count >= 0),
@@ -347,6 +348,7 @@ function initDb() {
                     FOREIGN KEY(version_id) REFERENCES strategy_versions(id)
                 )
             `);
+            db.run("ALTER TABLE strategy_runs ADD COLUMN evidence_domain TEXT NOT NULL DEFAULT 'trading' CHECK (evidence_domain IN ('trading', 'allocation'))", ignoreDuplicateColumnError);
             db.run('CREATE INDEX IF NOT EXISTS idx_strategy_versions_experiment ON strategy_versions(experiment_id, version_number)');
             db.run('CREATE INDEX IF NOT EXISTS idx_strategy_runs_version ON strategy_runs(version_id, id)');
 
@@ -1392,7 +1394,7 @@ function getStrategyVersionById(id) {
 
 function createStrategyRun(run) {
     const fields = [
-        'version_id', 'run_type', 'start_date', 'end_date', 'trade_count',
+        'version_id', 'run_type', 'evidence_domain', 'start_date', 'end_date', 'trade_count',
         'total_return_pct', 'benchmark_return_pct', 'max_drawdown_pct',
         'sharpe', 'win_rate', 'expectancy', 'avg_r', 'notes',
     ];

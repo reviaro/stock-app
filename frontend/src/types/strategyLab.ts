@@ -1,4 +1,5 @@
 export type StrategyRunType = 'backtest' | 'out_of_sample' | 'paper'
+export type StrategyEvidenceDomain = 'trading' | 'allocation'
 
 export interface PromotionGate {
   ready: boolean
@@ -14,6 +15,7 @@ export interface StrategyRun {
   id: number
   version_id: number
   run_type: StrategyRunType
+  evidence_domain: StrategyEvidenceDomain
   start_date: string
   end_date: string
   trade_count: number
@@ -62,6 +64,7 @@ export interface CreateStrategyVersionPayload {
 
 export interface CreateStrategyRunPayload {
   run_type: StrategyRunType
+  evidence_domain?: StrategyEvidenceDomain
   start_date: string
   end_date: string
   trade_count: number

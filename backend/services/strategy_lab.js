@@ -73,7 +73,9 @@ function finiteMetric(input, field, optional = false) {
 }
 
 function assessPromotionReadiness(runs) {
-    const evidence = new Set(runs.map((run) => run.run_type));
+    const evidence = new Set(runs
+        .filter((run) => run.evidence_domain !== 'allocation')
+        .map((run) => run.run_type));
     const paperBlockers = [];
     if (!evidence.has('backtest')) paperBlockers.push('missing_backtest_evidence');
     if (!evidence.has('out_of_sample')) paperBlockers.push('missing_out_of_sample_evidence');
@@ -142,6 +144,13 @@ async function addRun(versionId, input = {}) {
     if (!RUN_TYPES.includes(input.run_type)) {
         throw validationError(`run_type must be one of: ${RUN_TYPES.join(', ')}`);
     }
+    const evidenceDomain = input.evidence_domain == null ? 'trading' : input.evidence_domain;
+    if (!['trading', 'allocation'].includes(evidenceDomain)) {
+        throw validationError('evidence_domain must be one of: trading, allocation');
+    }
+    if (evidenceDomain === 'allocation' && (input.run_type !== 'out_of_sample' || Number(input.trade_count) !== 0)) {
+        throw validationError('allocation evidence must be out_of_sample with trade_count 0');
+    }
     if (!isRealDate(input.start_date)) throw validationError('start_date must be a real date in YYYY-MM-DD format');
     if (!isRealDate(input.end_date)) throw validationError('end_date must be a real date in YYYY-MM-DD format');
     if (input.start_date > input.end_date) throw validationError('start_date must be on or before end_date');
@@ -157,6 +166,7 @@ async function addRun(versionId, input = {}) {
     return db.createStrategyRun({
         version_id: version.id,
         run_type: input.run_type,
+        evidence_domain: evidenceDomain,
         start_date: input.start_date,
         end_date: input.end_date,
         trade_count: tradeCount,

@@ -141,6 +141,21 @@ test('records runs and deterministically reports paper and live readiness withou
     assert.strictEqual(Object.hasOwn(detail, 'live'), false);
 });
 
+test('allocation evidence is stored without satisfying trading-strategy readiness gates', async () => {
+    const experiment = await strategyLab.createExperiment({ name: 'Allocation evidence', hypothesis: 'Risk allocations improve outcomes.' });
+    const version = await strategyLab.addVersion(experiment.id, { rules: { universe: ['AAPL', 'MSFT', 'JPM'] } });
+    const run = await strategyLab.addRun(version.id, {
+        run_type: 'out_of_sample', evidence_domain: 'allocation', start_date: '2024-01-01', end_date: '2024-12-31', trade_count: 0,
+        total_return_pct: 8, benchmark_return_pct: 7, max_drawdown_pct: 5, sharpe: 0.8,
+    });
+    assert.strictEqual(run.run_type, 'out_of_sample');
+    assert.strictEqual(run.evidence_domain, 'allocation');
+    const detail = await strategyLab.getExperiment(experiment.id);
+    assert.deepStrictEqual(detail.promotion_readiness.paper.blockers, [
+        'missing_backtest_evidence', 'missing_out_of_sample_evidence',
+    ]);
+});
+
 test('assesses readiness from explicit evidence without side effects', () => {
     assert.deepStrictEqual(strategyLab.assessPromotionReadiness([
         { run_type: 'backtest' },

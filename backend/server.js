@@ -21,6 +21,7 @@ const researchNotesRoutes = require('./routes/research_notes');
 const screenerRoutes = require('./routes/screener');
 const alpacaPaperRoutes = require('./routes/alpaca_paper');
 const strategyLabRoutes = require('./routes/strategy_lab');
+const portfolioLabRoutes = require('./routes/portfolio_lab');
 const { initUniverseScheduler } = require('./services/universeCache');
 const { initSnapshotScheduler } = require('./services/snapshotScheduler');
 const { createAuthFromEnv } = require('./services/auth');
@@ -92,6 +93,7 @@ function createApp({ auth = createAuthFromEnv(), env = process.env } = {}) {
     app.use('/api/screener', screenerRoutes);
     app.use('/api/alpaca-paper', alpacaPaperRoutes);
     app.use('/api/strategy-lab', strategyLabRoutes);
+    app.use('/api/portfolio-lab', portfolioLabRoutes);
 
     app.get('*', (_req, res) => {
         res.setHeader('Cache-Control', 'no-cache');

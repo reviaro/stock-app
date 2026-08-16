@@ -16,6 +16,10 @@ vi.mock('@/pages/StrategyLabPage', () => ({
   StrategyLabPage: () => <div>Research evidence screen</div>,
 }))
 
+vi.mock('@/pages/PortfolioLabPage', () => ({
+  PortfolioLabPage: () => <div>Portfolio allocation screen</div>,
+}))
+
 function renderWithProviders(ui: React.ReactElement) {
   const queryClient = new QueryClient({
     defaultOptions: { 
@@ -80,6 +84,12 @@ describe('App', () => {
     renderWithProviders(<App />)
     fireEvent.click(await screen.findByRole('button', { name: 'Research Lab' }))
     expect(await screen.findByText('Research evidence screen')).toBeInTheDocument()
+  })
+
+  it('opens the separate read-only Portfolio Lab screen', async () => {
+    renderWithProviders(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Portfolio Lab' }))
+    expect(await screen.findByText('Portfolio allocation screen')).toBeInTheDocument()
   })
 
   it('opens the separate Alpaca paper broker screen', async () => {
