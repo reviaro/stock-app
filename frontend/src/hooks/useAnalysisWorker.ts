@@ -1,5 +1,5 @@
 import * as Comlink from 'comlink'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { Remote } from 'comlink'
 import type { WatchlistEntry } from '@/types'
 import type { SortCriteria, SortField, RankedEntry } from '../workers/analysis.worker.ts'
@@ -31,28 +31,28 @@ export interface AnalysisWorkerApi {
  * The worker is automatically terminated when the consuming component unmounts.
  */
 export function useAnalysisWorker() {
-  const workerRef = useRef<Worker | null>(null)
   const [workerApi, setWorkerApi] = useState<Remote<AnalysisWorkerApi> | null>(null)
   const [isReady, setIsReady] = useState(false)
 
   useEffect(() => {
+    let active = true
     const worker = new Worker(
       new URL('../workers/analysis.worker.ts', import.meta.url),
       { type: 'module' }
     )
-
     const api = Comlink.wrap<AnalysisWorkerApi>(worker)
-    workerRef.current = worker
-    setWorkerApi(api)
-    setIsReady(true)
+
+    queueMicrotask(() => {
+      if (!active) return
+      setWorkerApi(api)
+      setIsReady(true)
+    })
 
     return () => {
+      active = false
       // Release Comlink proxy and terminate the underlying worker thread to prevent leaks
       api[Comlink.releaseProxy]()
       worker.terminate()
-      workerRef.current = null
-      setWorkerApi(null)
-      setIsReady(false)
     }
   }, [])
 

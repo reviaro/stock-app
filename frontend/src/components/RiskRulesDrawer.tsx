@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { useSaveRiskRules } from '@/hooks/useRisk'
 import type { RiskRules } from '@/types/risk'
@@ -10,17 +10,21 @@ interface Props {
 }
 
 export function RiskRulesDrawer({ open, onOpenChange, rules }: Props) {
+  const formKey = rules
+    ? `${rules.max_position_pct}:${rules.max_sector_pct}:${rules.max_risk_per_trade_pct}:${rules.target_cash_pct}`
+    : 'defaults'
+
+  return <RiskRulesForm key={`${formKey}:${open ? 'open' : 'closed'}`} open={open} onOpenChange={onOpenChange} rules={rules} />
+}
+
+function RiskRulesForm({ open, onOpenChange, rules }: Props) {
   const save = useSaveRiskRules()
-  const [form, setForm] = useState<RiskRules>({
+  const [form, setForm] = useState<RiskRules>(() => rules ?? ({
     max_position_pct: 10,
     max_sector_pct: 30,
     max_risk_per_trade_pct: 1,
     target_cash_pct: 20,
-  })
-
-  useEffect(() => {
-    if (rules) setForm(rules)
-  }, [rules])
+  }))
 
   const updateField = (field: keyof RiskRules, value: string) => {
     setForm((prev) => ({ ...prev, [field]: Number(value) } as RiskRules))

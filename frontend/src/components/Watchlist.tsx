@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { MemoDrawer } from '@/components/MemoDrawer'
 import { useMemosListQuery } from '@/hooks/useMemo'
@@ -46,9 +46,10 @@ interface WatchlistRowProps {
   isRemoving: boolean
   displayMode: SortField
   snapshots?: Partial<Record<'openish' | 'midday' | 'closeish' | 'manual-open', { price: number; captured_at: string }>>
+  now: number
 }
 
-function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketChange, hasMemo, isMemoStale, isRemoving, displayMode, snapshots }: WatchlistRowProps) {
+function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketChange, hasMemo, isMemoStale, isRemoving, displayMode, snapshots, now }: WatchlistRowProps) {
   const isPositive = (entry.changePercent ?? 0) >= 0
   const hasPriceData = entry.price !== undefined
 
@@ -57,7 +58,7 @@ function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketC
   const { data: earningsData } = useEarningsDate(isSelected ? entry.symbol : null)
   const earningsDate = earningsData?.earningsDate ?? null
   const earningsDaysAway = earningsDate
-    ? Math.ceil((new Date(earningsDate).getTime() - Date.now()) / 86_400_000)
+    ? Math.ceil((new Date(earningsDate).getTime() - now) / 86_400_000)
     : null
   const showEarningsBadge = earningsDaysAway != null && earningsDaysAway >= 0 && earningsDaysAway <= 30
 
@@ -224,29 +225,38 @@ function AddStockSearch({ onClose }: { onClose: () => void }) {
   const addMutation = useAddToWatchlist()
   const inputRef = useRef<HTMLInputElement>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const requestGenerationRef = useRef(0)
 
   // Auto-focus on mount
   useEffect(() => {
     inputRef.current?.focus()
+    return () => { requestGenerationRef.current += 1 }
+  }, [])
+
+  const runSearch = useCallback(async (searchQuery: string) => {
+    const generation = ++requestGenerationRef.current
+    setIsSearching(true)
+    try {
+      const data = await searchStocks(searchQuery)
+      if (generation === requestGenerationRef.current) setResults(data)
+    } catch {
+      if (generation === requestGenerationRef.current) setResults([])
+    } finally {
+      if (generation === requestGenerationRef.current) setIsSearching(false)
+    }
   }, [])
 
   // Debounced search
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
-    if (!query.trim()) {
-      setResults([])
-      return
-    }
-    setIsSearching(true)
-    debounceRef.current = setTimeout(async () => {
-      const data = await searchStocks(query)
-      setResults(data)
-      setIsSearching(false)
+    if (!query.trim()) return
+    debounceRef.current = setTimeout(() => {
+      void runSearch(query)
     }, 250)
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
     }
-  }, [query])
+  }, [query, runSearch])
 
   const handleAdd = async (symbol: string) => {
     try {
@@ -260,10 +270,7 @@ function AddStockSearch({ onClose }: { onClose: () => void }) {
   const triggerSearch = async () => {
     if (!query.trim()) return
     if (debounceRef.current) clearTimeout(debounceRef.current)
-    setIsSearching(true)
-    const data = await searchStocks(query)
-    setResults(data)
-    setIsSearching(false)
+    await runSearch(query)
   }
 
   return (
@@ -279,7 +286,13 @@ function AddStockSearch({ onClose }: { onClose: () => void }) {
             ref={inputRef}
             type="text"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              const nextQuery = e.target.value
+              requestGenerationRef.current += 1
+              setQuery(nextQuery)
+              setResults([])
+              setIsSearching(Boolean(nextQuery.trim()))
+            }}
             placeholder="Search by symbol or name…"
             className="w-full pl-3 pr-8 py-1.5 rounded-md bg-secondary text-foreground text-sm border border-border focus:border-primary focus:outline-none transition-colors placeholder:text-muted-foreground"
             onKeyDown={(e) => {
@@ -357,13 +370,18 @@ function AddStockSearch({ onClose }: { onClose: () => void }) {
  * Includes add-stock search and per-row delete functionality.
  */
 export function Watchlist() {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const clock = window.setInterval(() => setNow(Date.now()), 60_000)
+    return () => window.clearInterval(clock)
+  }, [])
   const [memoSymbol, setMemoSymbol] = useState<string | null>(null)
   const { data: memos } = useMemosListQuery()
-  const memoMap = new Map((memos ?? []).map(m => [m.symbol, m]))
+  const memoMap = useMemo(() => new Map((memos ?? []).map(m => [m.symbol, m])), [memos])
 
   function isStale(m: { last_reviewed_at: string | null } | undefined) {
     if (!m || !m.last_reviewed_at) return false
-    return Date.now() - new Date(m.last_reviewed_at).getTime() > 30 * 86400000
+    return now - new Date(m.last_reviewed_at).getTime() > 30 * 86400000
   }
 
   const { data, isLoading, isError, error } = useWatchlist()
@@ -379,10 +397,17 @@ export function Watchlist() {
   for (const b of BUCKETS) bucketCounts[b] = 0
   for (const row of data ?? []) bucketCounts[row.bucket] = (bucketCounts[row.bucket] ?? 0) + 1
 
-  const filteredData = bucketFilter === 'all' ? (data ?? []) : (data ?? []).filter(r => r.bucket === bucketFilter)
+  const filteredData = useMemo(
+    () => bucketFilter === 'all' ? (data ?? []) : (data ?? []).filter(r => r.bucket === bucketFilter),
+    [bucketFilter, data]
+  )
 
   const { workerApi } = useAnalysisWorker()
-  const [sortedData, setSortedData] = useState<WatchlistEntry[]>([])
+  const [workerSort, setWorkerSort] = useState<{
+    source: WatchlistEntry[]
+    sortIdx: number
+    entries: WatchlistEntry[]
+  } | null>(null)
   const [activeSortIdx, setActiveSortIdx] = useState(0)
   const [showAddSearch, setShowAddSearch] = useState(false)
 
@@ -417,6 +442,7 @@ export function Watchlist() {
           cmp = (aVal as number) - (bVal as number)
         }
 
+        if (cmp === 0) return a.symbol.localeCompare(b.symbol)
         return option.direction === 'desc' ? -cmp : cmp
       })
       return sorted
@@ -424,41 +450,30 @@ export function Watchlist() {
     []
   )
 
-  const runSort = useCallback(
-    async (entries: WatchlistEntry[], sortIdx: number) => {
-      if (!entries.length) {
-        setSortedData(entries)
-        return
-      }
-      // Try worker first, fall back to main-thread sort
-      if (workerApi) {
-        const option = SORT_OPTIONS[sortIdx]
-        const criteria: SortCriteria[] = [
-          { field: option.field, direction: option.direction },
-          { field: 'symbol', direction: 'asc' },
-        ]
-        try {
-          const result = await workerApi.sortEntries(entries, criteria)
-          setSortedData(result)
-          return
-        } catch {
-          // Worker failed — fall through to local sort
-        }
-      }
-      // Fallback: sort on main thread
-      setSortedData(sortLocal(entries, sortIdx))
-    },
-    [workerApi, sortLocal]
-  )
-
   useEffect(() => {
-    if (!filteredData.length) {
-      setSortedData([])
-      // Don't return here if data exists but filtered is empty, 
-      // otherwise sortedData won't clear when switching buckets
-    }
-    void runSort(filteredData, activeSortIdx)
-  }, [filteredData, activeSortIdx, runSort])
+    if (!filteredData.length || !workerApi) return
+
+    let cancelled = false
+    const option = SORT_OPTIONS[activeSortIdx]
+    const criteria: SortCriteria[] = [
+      { field: option.field, direction: option.direction },
+      { field: 'symbol', direction: 'asc' },
+    ]
+    const result = workerApi.sortEntries(filteredData, criteria)
+      .catch(() => sortLocal(filteredData, activeSortIdx))
+
+    void result.then((entries) => {
+      if (!cancelled) setWorkerSort({ source: filteredData, sortIdx: activeSortIdx, entries })
+    })
+    return () => { cancelled = true }
+  }, [filteredData, activeSortIdx, workerApi, sortLocal])
+
+  const displayData = useMemo(() => {
+    if (!filteredData.length) return []
+    return workerSort?.source === filteredData && workerSort.sortIdx === activeSortIdx
+      ? workerSort.entries
+      : sortLocal(filteredData, activeSortIdx)
+  }, [filteredData, workerSort, sortLocal, activeSortIdx])
 
   const handleRemove = async (symbol: string) => {
     try {
@@ -499,7 +514,7 @@ export function Watchlist() {
               + Add
             </button>
             {/* Sort controls */}
-            {sortedData.length > 1 &&
+            {displayData.length > 1 &&
               SORT_OPTIONS.map((opt, idx) => (
                 <button
                   key={opt.field}
@@ -556,16 +571,16 @@ export function Watchlist() {
           </p>
         )}
 
-        {!isLoading && !isError && sortedData.length === 0 && (
+        {!isLoading && !isError && displayData.length === 0 && (
           <p className="text-muted-foreground text-sm px-3">
             Your watchlist is empty. Click "+ Add" to get started.
           </p>
         )}
 
-        {sortedData.length > 0 && (
+        {displayData.length > 0 && (
           <div className="flex flex-col gap-1">
             <AnimatePresence initial={false}>
-              {sortedData.map((entry, i) => (
+              {displayData.map((entry, i) => (
                 <motion.div
                   key={entry.symbol}
                   initial={{ opacity: 0, x: -12 }}
@@ -582,6 +597,7 @@ export function Watchlist() {
                     onBucketChange={(symbol, bucket) => setBucket.mutate({ symbol, bucket })}
                     hasMemo={memoMap.has(entry.symbol)}
                     isMemoStale={isStale(memoMap.get(entry.symbol))}
+                    now={now}
                     isRemoving={removeMutation.isPending}
                     displayMode={SORT_OPTIONS[activeSortIdx].field}
                     snapshots={snapshotMap?.get(entry.symbol)}

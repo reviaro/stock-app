@@ -1,18 +1,23 @@
-import { useState, useEffect } from 'react'
+import { lazy, Suspense, useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { Sun, Moon } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { useTickerStore } from '@/lib/store'
 import { MarketPulse } from '@/components/MarketPulse'
 import { Watchlist } from '@/components/Watchlist'
-import { StockChart } from '@/components/StockChart'
 import { CANSLIMScorecard } from '@/components/CANSLIMScorecard'
 import { QualityScorecard } from '@/components/QualityScorecard'
-import { ChatPanel } from '@/components/chat/ChatPanel'
 import { Glossary } from '@/components/Glossary'
 import { HistoryPanel } from '@/components/HistoryPanel'
 import { PortfolioPanel } from '@/components/PortfolioPanel'
 import { SectorRotation } from '@/components/SectorRotation'
+
+const StockChart = lazy(() => import('@/components/StockChart').then((module) => ({ default: module.StockChart })))
+const ChatPanel = lazy(() => import('@/components/chat/ChatPanel').then((module) => ({ default: module.ChatPanel })))
+
+function PanelFallback({ label }: { label: string }) {
+  return <div className="flex min-h-[180px] items-center justify-center text-sm text-muted-foreground">Loading {label}…</div>
+}
 
 /** Animation variants for bento grid cards */
 const cardVariants = {
@@ -35,21 +40,16 @@ const panelMotion = {}
 export function Dashboard() {
   const selectedTicker = useTickerStore((s) => s.selectedTicker)
   const [glossaryOpen, setGlossaryOpen] = useState(false)
-  const [isDark, setIsDark] = useState(true)
+  const [isDark, setIsDark] = useState(() => localStorage.getItem('theme') !== 'light')
 
-  // Initialize theme from localStorage or default to dark
   useEffect(() => {
-    const saved = localStorage.getItem('theme')
-    const dark = saved ? saved === 'dark' : true
-    setIsDark(dark)
-    document.documentElement.classList.toggle('dark', dark)
-  }, [])
+    document.documentElement.classList.toggle('dark', isDark)
+    localStorage.setItem('theme', isDark ? 'dark' : 'light')
+  }, [isDark])
 
   const toggleTheme = () => {
     const next = !isDark
     setIsDark(next)
-    document.documentElement.classList.toggle('dark', next)
-    localStorage.setItem('theme', next ? 'dark' : 'light')
   }
 
   return (
@@ -127,7 +127,9 @@ export function Dashboard() {
                 </CardTitle>
               </CardHeader>
               <CardContent className="h-[calc(100%-4rem)] p-2">
-                <StockChart />
+                <Suspense fallback={<PanelFallback label="chart" />}>
+                  <StockChart />
+                </Suspense>
               </CardContent>
             </Card>
           </motion.div>
@@ -212,7 +214,9 @@ export function Dashboard() {
             variants={cardVariants}
             {...panelMotion}
           >
-            <ChatPanel />
+            <Suspense fallback={<PanelFallback label="analyst" />}>
+              <ChatPanel />
+            </Suspense>
           </motion.div>
 
         </div>

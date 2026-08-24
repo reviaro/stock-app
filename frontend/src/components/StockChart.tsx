@@ -59,7 +59,7 @@ function ChartSkeleton() {
             key={i}
             className="flex-1 bg-muted/40 rounded-sm"
             style={{
-              height: `${20 + Math.sin(i * 0.4) * 30 + Math.random() * 20}%`,
+              height: `${30 + Math.sin(i * 0.4) * 24 + ((i * 17) % 19)}%`,
               minHeight: '4px',
             }}
           />

@@ -1,12 +1,13 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Dashboard } from '@/components/Dashboard'
-import { SimulatorPage } from '@/pages/SimulatorPage'
-import { OpportunitiesPage } from '@/pages/OpportunitiesPage'
-import { AlpacaPaperPage } from '@/pages/AlpacaPaperPage'
-import { StrategyLabPage } from '@/pages/StrategyLabPage'
-import { PortfolioLabPage } from '@/pages/PortfolioLabPage'
+
+const Dashboard = lazy(() => import('@/components/Dashboard').then((module) => ({ default: module.Dashboard })))
+const SimulatorPage = lazy(() => import('@/pages/SimulatorPage').then((module) => ({ default: module.SimulatorPage })))
+const OpportunitiesPage = lazy(() => import('@/pages/OpportunitiesPage').then((module) => ({ default: module.OpportunitiesPage })))
+const AlpacaPaperPage = lazy(() => import('@/pages/AlpacaPaperPage').then((module) => ({ default: module.AlpacaPaperPage })))
+const StrategyLabPage = lazy(() => import('@/pages/StrategyLabPage').then((module) => ({ default: module.StrategyLabPage })))
+const PortfolioLabPage = lazy(() => import('@/pages/PortfolioLabPage').then((module) => ({ default: module.PortfolioLabPage })))
 
 type Tab = 'dashboard' | 'opportunities' | 'simulator' | 'research-lab' | 'portfolio-lab' | 'alpaca-paper'
 type AuthState =
@@ -170,7 +171,7 @@ function App() {
         </div>
       </nav>
 
-      <AnimatePresence mode="wait">
+      <AnimatePresence mode="sync" initial={false}>
         <motion.div
           key={activeTab}
           initial={{ opacity: 0, y: 12 }}
@@ -178,17 +179,19 @@ function App() {
           exit={{ opacity: 0, y: -12 }}
           transition={{ duration: 0.25, ease: 'easeOut' }}
         >
-          {activeTab === 'dashboard'
-            ? <Dashboard />
-            : activeTab === 'opportunities'
-              ? <OpportunitiesPage />
-              : activeTab === 'simulator'
-                ? <SimulatorPage />
-                : activeTab === 'research-lab'
-                  ? <StrategyLabPage />
-                  : activeTab === 'portfolio-lab'
-                    ? <PortfolioLabPage />
-                    : <AlpacaPaperPage /> }
+          <Suspense fallback={<main className="min-h-screen flex items-center justify-center bg-background text-sm text-muted-foreground">Loading workspace…</main>}>
+            {activeTab === 'dashboard'
+              ? <Dashboard />
+              : activeTab === 'opportunities'
+                ? <OpportunitiesPage />
+                : activeTab === 'simulator'
+                  ? <SimulatorPage />
+                  : activeTab === 'research-lab'
+                    ? <StrategyLabPage />
+                    : activeTab === 'portfolio-lab'
+                      ? <PortfolioLabPage />
+                      : <AlpacaPaperPage /> }
+          </Suspense>
         </motion.div>
       </AnimatePresence>
     </div>

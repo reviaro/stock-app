@@ -59,12 +59,17 @@ from port 3002.
 
 ## Setup
 
+### Prerequisites
+
+- Node.js **20.17.0 or newer** (required by the backend's `sqlite3` dependency)
+- Python **3.11 or newer** (required by the backend's `pandas` dependency)
+
 ### Backend
 
 ```bash
 cd backend
 npm install
-python3 -m venv venv && venv/bin/pip install yfinance pandas beautifulsoup4
+python3 -m venv venv && venv/bin/pip install -r python/requirements.txt
 python3 -m venv portfolio_lab/venv && portfolio_lab/venv/bin/pip install -r portfolio_lab/requirements.txt
 cp .env.example .env   # configure the required auth values documented below
 node server.js         # http://localhost:3002

@@ -50,7 +50,7 @@ export function MemoDrawer({ symbol, open, onOpenChange, initialDraft = null }: 
       setForm((prev) => ({ ...prev, ...initialDraft }))
     }
     setPressureText(null)
-  }, [memo?.symbol, symbol, initialDraft])
+  }, [memo, symbol, initialDraft])
 
   if (!symbol) return null
 
