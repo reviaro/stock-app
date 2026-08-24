@@ -3,17 +3,66 @@ node_modules/
 
 # Python
 venv/
+.venv/
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# Database (runtime-generated) and backups
+# Databases and SQLite runtime files
 *.db
-*.db.backup.*
-*.db.manual-backup-*
+*.db.*
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
 
-# Environment
+# Environment and credentials
 .env
-.env.local
+.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+
+# Backups, logs, exports, and generated reports
+*.bak
+*.backup
+*.backup.*
+*.oldbackup
+*.log
+logs/
+exports/
+*.csv
+*.xlsx
+*.xls
+coverage/
+.nyc_output/
+
+# Frontend/build output
+frontend/dist/
+dist/
+build/
+
+# Local planning and agent workflow artifacts
+.planning/
+docs/plans/
+docs/superpowers/
+HANDOFF.md
+AI_AGENT_STATUS.md
+ai_agent_status.md
+
+# Local tools
+.tools/
 
 # OS
 .DS_Store
@@ -22,3 +71,5 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo

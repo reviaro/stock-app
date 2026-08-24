@@ -1,6 +1,6 @@
 # Stock Dashboard
 
-A personal stock research and portfolio management app: a market dashboard, a
+A self-hosted stock research and portfolio management app: a market dashboard, a
 transaction-ledger portfolio, an AI analyst, and a paper-trading simulator —
 built with Express + SQLite on the backend, React + Vite on the frontend, and a
 small Python bridge to yfinance for market data.
@@ -33,6 +33,18 @@ small Python bridge to yfinance for market data.
   preview (short/long-term split by your bracket), performance review, and CSV
   export. The AI agent can trade in either sleeve via `account_id`.
 
+## Safety and scope
+
+This project is educational and research software, not financial advice. It
+does not guarantee returns. The broker integration supports Alpaca paper
+trading only: the backend rejects the live trading endpoint, and paper-order
+submission remains disabled unless its independent enablement controls are
+explicitly configured.
+
+Use only your own locally supplied credentials. Never commit API keys, session
+secrets, runtime databases, portfolio exports, logs, or other personal
+financial data.
+
 ## Architecture
 
 ```
@@ -40,8 +52,6 @@ frontend/   React 19 + TypeScript + Vite + Tailwind + React Query (port 5173, pr
 backend/    Express (port 3002) + SQLite (backend/database/stocks.db) + node:test
   python/   yf_wrapper.py — yfinance quotes/quality/news via a venv (pybridge spawns it)
   portfolio_lab/  isolated skfolio worker, tests, requirements, and dedicated venv
-docs/       dated plans and progress handoffs
-HANDOFF.md  current repo status for the next session
 ```
 
 The backend also serves `frontend/dist`, so a production build runs entirely
@@ -87,7 +97,7 @@ node server.js         # http://localhost:3002
 | `ALPACA_PAPER_ORDER_ENTRY_ENABLED` | Paper-order master switch; disabled unless explicitly set to `true` |
 | `ALPACA_PAPER_ORDER_ENTRY_TOKEN` | Independent token required by the paper-order and reconciliation routes |
 | `DB_PATH_OVERRIDE` | Tests only — point db.js at a scratch database |
-| `ENABLE_LEDGER_MIGRATION` | One-time portfolio→ledger migration gate. Already run on the live DB — do not set again. |
+| `ENABLE_LEDGER_MIGRATION` | One-time legacy portfolio→ledger migration gate; leave unset for new installations and back up before migration |
 
 Generate a password hash without putting the password in shell history:
 
@@ -132,5 +142,9 @@ they need no network and never touch `stocks.db`.
   trading).
 - Tax preview uses FIFO lot matching and your configured US bracket; long-term
   rates apply to lots held ≥ 365 days.
-- `stocks.db` is live personal data — the `*.backup.*` files beside it are
-  pre-migration safety copies, not fixtures.
+- Runtime databases and their backups may contain sensitive portfolio and
+  transaction data. They are ignored by Git and must never be committed.
+
+## License
+
+Licensed under the MIT License. See [LICENSE](LICENSE).

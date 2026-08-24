@@ -114,7 +114,7 @@ test('returns a sanitized cash-based summary from the verified paper account', a
         buyingPower: '400000.00',
         multiplier: '4',
     });
-    assert.doesNotMatch(JSON.stringify(summary), /PA32|test-account-id/);
+    assert.doesNotMatch(JSON.stringify(summary), /TEST-PAPER-ACCOUNT|test-account-id/i);
 });
 
 test('returns a sanitized read-only reconciliation snapshot', async () => {

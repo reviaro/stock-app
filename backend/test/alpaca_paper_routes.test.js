@@ -83,7 +83,7 @@ test('GET status verifies the configured paper account without exposing account 
     assert.strictEqual(result.body.data.connection, 'verified');
     assert.strictEqual(result.body.data.cash, '100000.00');
     assert.strictEqual(result.body.data.orderEntryEnabled, false);
-    assert.doesNotMatch(JSON.stringify(result.body), /PA32|test-account-id|paper-secret/i);
+    assert.doesNotMatch(JSON.stringify(result.body), /TEST-PAPER-ACCOUNT|test-account-id|paper-secret/i);
 });
 
 test('GET snapshot returns broker clock, positions, and open orders without private identifiers', async () => {
