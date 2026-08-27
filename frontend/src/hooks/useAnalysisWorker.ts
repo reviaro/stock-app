@@ -44,7 +44,8 @@ export function useAnalysisWorker() {
 
     queueMicrotask(() => {
       if (!active) return
-      setWorkerApi(api)
+      // Comlink proxies are callable. Wrap the value so React does not invoke it as a state updater.
+      setWorkerApi(() => api)
       setIsReady(true)
     })
 
