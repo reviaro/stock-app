@@ -15,6 +15,13 @@ export interface SimAccount {
   total_value: number
   unrealized_pnl: number
   realized_pnl: number
+  dividend_reinvestment_mode: 'cash' | 'drip'
+  profit_reinvestment_mode: 'hold_cash' | 'redeploy_excess'
+  target_cash_pct: number
+  dividend_income: number
+  reinvested_dividends: number
+  redeployable_cash: number | null
+  reinvestment_data_complete: boolean
 }
 
 export interface SimHolding {
@@ -36,7 +43,7 @@ export interface SimTransaction {
   id: number
   account_id: number
   symbol: string | null
-  type: 'buy' | 'sell' | 'deposit' | 'withdrawal'
+  type: 'buy' | 'sell' | 'dividend' | 'deposit' | 'withdrawal'
   shares: number | null
   price: number | null
   amount: number
@@ -44,6 +51,9 @@ export interface SimTransaction {
   txn_date: string
   notes: string | null
   created_at: string
+  idempotency_key?: string | null
+  reinvestment_mode?: 'cash' | 'drip' | null
+  reinvested_shares?: number | null
 }
 
 export interface TaxPreview {
@@ -71,6 +81,8 @@ export interface SimReview {
   total_return_pct: number
   realized_pnl: number
   unrealized_pnl: number
+  dividend_income: number
+  reinvested_dividends: number
   cash_pct: number
   position_count: number
   largest_position: { symbol: string; weight_pct: number; market_value: number } | null
@@ -78,6 +90,21 @@ export interface SimReview {
   hit_rate_pct: number | null
   positions: Array<{ symbol: string; shares: number; cost: number; market_value: number; pnl: number; weight_pct: number }>
   recent_buffett_actions: Array<{ id: number; date: string; type: string; symbol: string | null; amount: number; notes: string }>
+}
+
+export interface SimReinvestmentSettings {
+  dividend_reinvestment_mode: 'cash' | 'drip'
+  profit_reinvestment_mode: 'hold_cash' | 'redeploy_excess'
+  target_cash_pct: number
+}
+
+export interface SimDividendPayload {
+  symbol: string
+  amount: number
+  price: number
+  txn_date: string
+  idempotency_key: string
+  notes?: string
 }
 
 export interface TradePlanPayload {

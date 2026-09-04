@@ -6,6 +6,7 @@ import { TransactionHistory } from '@/components/simulator/TransactionHistory'
 import { SimulatorReviewPanel } from '@/components/simulator/SimulatorReviewPanel'
 import { RiskMonitorPanel } from '@/components/simulator/RiskMonitorPanel'
 import { JournalAnalyticsPanel } from '@/components/simulator/JournalAnalyticsPanel'
+import { ReinvestmentPanel } from '@/components/simulator/ReinvestmentPanel'
 import { useSimSleeves } from '@/hooks/useSimulator'
 import type { SimHolding } from '@/types/simulator'
 
@@ -55,6 +56,7 @@ export function SimulatorPage() {
 
         {/* key resets confirm/deposit inputs so they can't fire against a different sleeve */}
         <AccountHeader key={selectedAccountId} accountId={selectedAccountId} />
+        <ReinvestmentPanel key={`reinvestment-${selectedAccountId}`} accountId={selectedAccountId} />
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="lg:col-span-2 min-h-[320px]">
             <HoldingsPanel accountId={selectedAccountId} onSell={(holding) => setSellTarget(holding)} />

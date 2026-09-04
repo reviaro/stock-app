@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { SimAccount, SimHolding, SimTransaction, TaxPreview, TradePayload, SimReview, SimSleeve, SimRiskMonitor, SimJournal } from '@/types/simulator'
+import type { SimAccount, SimHolding, SimTransaction, TaxPreview, TradePayload, SimReview, SimSleeve, SimRiskMonitor, SimJournal, SimReinvestmentSettings, SimDividendPayload } from '@/types/simulator'
 
 async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, options)
@@ -107,6 +107,32 @@ export function useSetTaxBracket(accountId: number) {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tax_bracket: bracket }),
+      }),
+    onSuccess: () => invalidateSleeve(qc, accountId),
+  })
+}
+
+export function useSetSimReinvestmentSettings(accountId: number) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (settings: SimReinvestmentSettings) =>
+      apiFetch(`/api/simulator/reinvestment-settings${sleeveQuery(accountId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings),
+      }),
+    onSuccess: () => invalidateSleeve(qc, accountId),
+  })
+}
+
+export function useRecordSimDividend(accountId: number) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (dividend: SimDividendPayload) =>
+      apiFetch('/api/simulator/dividend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...dividend, account_id: accountId }),
       }),
     onSuccess: () => invalidateSleeve(qc, accountId),
   })

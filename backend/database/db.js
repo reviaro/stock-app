@@ -23,11 +23,15 @@ function getDb() {
         fs.mkdirSync(dbDir, { recursive: true });
     }
 
-    return new sqlite3.Database(DB_PATH, (err) => {
+    const conn = new sqlite3.Database(DB_PATH, (err) => {
         if (err) {
             console.error('Database connection error:', err.message);
         }
     });
+    // Serialize lock acquisition across connections: without a busy timeout a
+    // contended BEGIN IMMEDIATE fails instantly instead of waiting its turn.
+    conn.configure('busyTimeout', 5000);
+    return conn;
 }
 
 function initDb() {
@@ -241,6 +245,49 @@ function initDb() {
 
             db.run('CREATE INDEX IF NOT EXISTS idx_sim_transactions_symbol ON sim_transactions(symbol, txn_date)');
 
+            // Reinvestment preferences are sleeve-specific. Keeping them separate avoids
+            // mutating the established sleeve schema and gives each strategy safe defaults.
+            db.run(`
+                CREATE TABLE IF NOT EXISTS sim_reinvestment_settings (
+                    account_id INTEGER PRIMARY KEY,
+                    dividend_reinvestment_mode TEXT NOT NULL CHECK (dividend_reinvestment_mode IN ('cash', 'drip')),
+                    profit_reinvestment_mode TEXT NOT NULL CHECK (profit_reinvestment_mode IN ('hold_cash', 'redeploy_excess')),
+                    target_cash_pct REAL NOT NULL CHECK (target_cash_pct >= 0 AND target_cash_pct <= 100),
+                    updated_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY(account_id) REFERENCES simulator_sleeves(id)
+                )
+            `);
+            db.run(`INSERT OR IGNORE INTO sim_reinvestment_settings
+                    (account_id, dividend_reinvestment_mode, profit_reinvestment_mode, target_cash_pct)
+                    VALUES (1, 'drip', 'redeploy_excess', 10)`);
+            db.run(`INSERT OR IGNORE INTO sim_reinvestment_settings
+                    (account_id, dividend_reinvestment_mode, profit_reinvestment_mode, target_cash_pct)
+                    VALUES (2, 'cash', 'hold_cash', 10)`);
+
+            // Dividend events live separately because the original simulator transaction
+            // table intentionally has a CHECK constraint that excludes dividends. DRIP's
+            // linked fractional buy is still a normal simulator transaction.
+            db.run(`
+                CREATE TABLE IF NOT EXISTS sim_dividends (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    amount REAL NOT NULL CHECK (amount > 0),
+                    txn_date TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    reinvestment_mode TEXT NOT NULL CHECK (reinvestment_mode IN ('cash', 'drip')),
+                    reinvestment_price REAL,
+                    reinvested_shares REAL,
+                    drip_transaction_id INTEGER,
+                    notes TEXT,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    UNIQUE(account_id, idempotency_key),
+                    FOREIGN KEY(account_id) REFERENCES simulator_sleeves(id),
+                    FOREIGN KEY(drip_transaction_id) REFERENCES sim_transactions(id)
+                )
+            `);
+            db.run('CREATE INDEX IF NOT EXISTS idx_sim_dividends_account_date ON sim_dividends(account_id, txn_date, id)');
+
             // Structured paper-trade plans are isolated from both the real portfolio and
             // Alpaca audit mirror. They document risk and post-trade evidence only.
             db.run(`
@@ -406,8 +453,27 @@ function initDb() {
                     console.log('[migration 001] skipped; set ENABLE_LEDGER_MIGRATION=1 to run the portfolio -> transactions migration');
                 }
 
-                console.log('Database initialized');
-                resolve();
+                // Verify the schema this build actually needs before declaring success:
+                // serialized db.run fire-and-forget callbacks can swallow failures and
+                // let initDb resolve over a partially migrated database. The setup
+                // connection was closed above, so verify on a fresh connection.
+                const REQUIRED_TABLES = ['watchlist', 'simulator_sleeves', 'sim_transactions', 'sim_reinvestment_settings', 'sim_dividends', 'sim_trade_plans'];
+                const verifyDb = getDb();
+                verifyDb.all(
+                    `SELECT name FROM sqlite_master WHERE type = 'table'`,
+                    [],
+                    (tablesErr, tables) => {
+                        verifyDb.close();
+                        if (tablesErr) return reject(tablesErr);
+                        const present = new Set((tables || []).map((row) => row.name));
+                        const missing = REQUIRED_TABLES.filter((name) => !present.has(name));
+                        if (missing.length > 0) {
+                            return reject(new Error(`initDb failed: missing tables after initialization: ${missing.join(', ')}`));
+                        }
+                        console.log('Database initialized');
+                        resolve();
+                    },
+                );
             });
         });
     });
@@ -1020,7 +1086,13 @@ function deleteTransaction(id) {
 function listSimAccounts() {
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
-        sqlite.all('SELECT * FROM simulator_sleeves ORDER BY id ASC', [], (err, rows) => {
+        sqlite.all(`SELECT s.*,
+                           COALESCE(r.dividend_reinvestment_mode, CASE WHEN s.id = 1 THEN 'drip' ELSE 'cash' END) AS dividend_reinvestment_mode,
+                           COALESCE(r.profit_reinvestment_mode, CASE WHEN s.id = 1 THEN 'redeploy_excess' ELSE 'hold_cash' END) AS profit_reinvestment_mode,
+                           COALESCE(r.target_cash_pct, 10) AS target_cash_pct
+                    FROM simulator_sleeves s
+                    LEFT JOIN sim_reinvestment_settings r ON r.account_id = s.id
+                    ORDER BY s.id ASC`, [], (err, rows) => {
             sqlite.close();
             err ? reject(err) : resolve(rows || []);
         });
@@ -1030,9 +1102,94 @@ function listSimAccounts() {
 function getSimAccount(accountId = 1) {
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
-        sqlite.get('SELECT * FROM simulator_sleeves WHERE id = ?', [Number(accountId)], (err, row) => {
+        sqlite.get(`SELECT s.*,
+                           COALESCE(r.dividend_reinvestment_mode, CASE WHEN s.id = 1 THEN 'drip' ELSE 'cash' END) AS dividend_reinvestment_mode,
+                           COALESCE(r.profit_reinvestment_mode, CASE WHEN s.id = 1 THEN 'redeploy_excess' ELSE 'hold_cash' END) AS profit_reinvestment_mode,
+                           COALESCE(r.target_cash_pct, 10) AS target_cash_pct
+                    FROM simulator_sleeves s
+                    LEFT JOIN sim_reinvestment_settings r ON r.account_id = s.id
+                    WHERE s.id = ?`, [Number(accountId)], (err, row) => {
             sqlite.close();
             err ? reject(err) : resolve(row || null);
+        });
+    });
+}
+
+function setSimReinvestmentSettings(settings, accountId = 1) {
+    const dividendMode = settings.dividend_reinvestment_mode;
+    const profitMode = settings.profit_reinvestment_mode;
+    const targetCashPct = settings.target_cash_pct == null ? null : Number(settings.target_cash_pct);
+    const hasDividend = dividendMode !== undefined;
+    const hasProfit = profitMode !== undefined;
+    const hasTarget = targetCashPct !== null;
+    if (!hasDividend && !hasProfit && !hasTarget) {
+        return Promise.reject(new Error('at least one reinvestment setting is required'));
+    }
+    if (hasDividend && !['cash', 'drip'].includes(dividendMode)) {
+        return Promise.reject(new Error('invalid dividend reinvestment mode'));
+    }
+    if (hasProfit && !['hold_cash', 'redeploy_excess'].includes(profitMode)) {
+        return Promise.reject(new Error('invalid profit reinvestment mode'));
+    }
+    if (hasTarget && (!Number.isFinite(targetCashPct) || targetCashPct < 0 || targetCashPct > 100)) {
+        return Promise.reject(new Error('target_cash_pct must be between 0 and 100'));
+    }
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.serialize(() => {
+            sqlite.run('BEGIN IMMEDIATE', (beginErr) => {
+                if (beginErr) {
+                    sqlite.close();
+                    return reject(beginErr);
+                }
+                // Field-specific update: omitted fields keep their stored values, so
+                // concurrent partial PATCHes cannot overwrite each other. The insert
+                // branch must supply full safe defaults because excluded.* carries the
+                // resolved insert tuple (defaults included), not the caller's NULLs —
+                // COALESCE(excluded.x, stored.x) inside DO UPDATE would therefore push
+                // insert-time defaults over live settings on every later partial patch.
+                sqlite.run(
+                    `INSERT INTO sim_reinvestment_settings
+                     (account_id, dividend_reinvestment_mode, profit_reinvestment_mode, target_cash_pct)
+                     VALUES (?, ?, ?, ?)
+                     ON CONFLICT(account_id) DO UPDATE SET
+                         dividend_reinvestment_mode = CASE WHEN ? = 1 THEN ? ELSE sim_reinvestment_settings.dividend_reinvestment_mode END,
+                         profit_reinvestment_mode = CASE WHEN ? = 1 THEN ? ELSE sim_reinvestment_settings.profit_reinvestment_mode END,
+                         target_cash_pct = CASE WHEN ? = 1 THEN ? ELSE sim_reinvestment_settings.target_cash_pct END,
+                         updated_at = datetime('now')`,
+                    [
+                        Number(accountId),
+                        hasDividend ? dividendMode : (Number(accountId) === 1 ? 'drip' : 'cash'),
+                        hasProfit ? profitMode : (Number(accountId) === 1 ? 'redeploy_excess' : 'hold_cash'),
+                        hasTarget ? targetCashPct : 10,
+                        hasDividend ? 1 : 0, hasDividend ? dividendMode : null,
+                        hasProfit ? 1 : 0, hasProfit ? profitMode : null,
+                        hasTarget ? 1 : 0, hasTarget ? targetCashPct : null,
+                    ],
+                    function(err) {
+                        if (err) {
+                            return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(err); });
+                        }
+                        sqlite.get(
+                            'SELECT account_id, dividend_reinvestment_mode, profit_reinvestment_mode, target_cash_pct FROM sim_reinvestment_settings WHERE account_id = ?',
+                            [Number(accountId)],
+                            (readErr, row) => {
+                                if (readErr) {
+                                    return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(readErr); });
+                                }
+                                sqlite.run('COMMIT', (commitErr) => {
+                                    if (commitErr) {
+                                        sqlite.close();
+                                        return reject(commitErr);
+                                    }
+                                    sqlite.close();
+                                    resolve({ ...row, changed: this.changes });
+                                });
+                            },
+                        );
+                    },
+                );
+            });
         });
     });
 }
@@ -1202,12 +1359,117 @@ function addSimTransactionAndCloseTradePlan(txn, planId, closure) {
     });
 }
 
+function recordSimDividend(dividend) {
+    const accountId = Number(dividend.account_id ?? 1);
+    const symbol = String(dividend.symbol || '').trim().toUpperCase();
+    const amount = Number(dividend.amount);
+    const txnDate = String(dividend.txn_date || '');
+    const key = String(dividend.idempotency_key || '').trim();
+    const mode = dividend.reinvestment_mode;
+    const price = dividend.reinvestment_price == null ? null : Number(dividend.reinvestment_price);
+    if (!symbol || !Number.isFinite(amount) || amount <= 0 || !DATE_RE.test(txnDate) || !key || key.length > 200) {
+        return Promise.reject(new Error('invalid simulator dividend'));
+    }
+    if (!['cash', 'drip'].includes(mode) || (mode === 'drip' && (!Number.isFinite(price) || price <= 0))) {
+        return Promise.reject(new Error('invalid simulator dividend reinvestment'));
+    }
+    const reinvestedShares = mode === 'drip' ? amount / price : null;
+
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        let finished = false;
+        const fail = (error) => {
+            if (finished) return;
+            finished = true;
+            sqlite.run('ROLLBACK', () => { sqlite.close(); reject(error); });
+        };
+        sqlite.serialize(() => {
+            sqlite.run('BEGIN IMMEDIATE', (beginErr) => {
+                if (beginErr) return fail(beginErr);
+            // Re-read the sleeve policy inside the write transaction: a concurrent
+            // settings save must not leave this dividend applying a stale mode.
+            sqlite.get(
+                'SELECT dividend_reinvestment_mode FROM sim_reinvestment_settings WHERE account_id = ?',
+                [accountId],
+                (policyErr, policyRow) => {
+                    if (policyErr) return fail(policyErr);
+                    const effectiveMode = policyRow ? policyRow.dividend_reinvestment_mode : mode;
+                    if (!['cash', 'drip'].includes(effectiveMode)) {
+                        return fail(new Error('invalid simulator dividend reinvestment'));
+                    }
+                    if (effectiveMode === 'drip' && !(Number.isFinite(price) && price > 0)) {
+                        return fail(Object.assign(new Error('dividend reinvestment price is required for DRIP mode'), { code: 'SIM_DIVIDEND_PRICE_REQUIRED' }));
+                    }
+                    const dripShares = effectiveMode === 'drip' ? amount / price : null;
+            sqlite.run(
+                `INSERT INTO sim_dividends
+                 (account_id, symbol, amount, txn_date, idempotency_key, reinvestment_mode,
+                  reinvestment_price, reinvested_shares, notes)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [accountId, symbol, amount, txnDate, key, effectiveMode, effectiveMode === 'drip' ? price : null, dripShares, dividend.notes ?? null],
+                function(dividendErr) {
+                    if (dividendErr) {
+                        if (/UNIQUE constraint failed: sim_dividends\.account_id, sim_dividends\.idempotency_key/i.test(dividendErr.message)) {
+                            dividendErr.code = 'DUPLICATE_SIM_DIVIDEND';
+                        }
+                        return fail(dividendErr);
+                    }
+                    const dividendId = this.lastID;
+                    if (effectiveMode === 'cash') {
+                        return sqlite.run('COMMIT', (commitErr) => {
+                            if (commitErr) return fail(commitErr);
+                            finished = true;
+                            sqlite.close();
+                            resolve({ id: dividendId, account_id: accountId, symbol, amount, mode: effectiveMode, reinvested_shares: null });
+                        });
+                    }
+
+                    sqlite.run(
+                        `INSERT INTO sim_transactions
+                         (account_id, symbol, type, shares, price, amount, fees, txn_date, notes)
+                         VALUES (?, ?, 'buy', ?, ?, ?, 0, ?, ?)`,
+                        [accountId, symbol, dripShares, price, amount, txnDate, `DRIP ${key}: reinvested $${amount}`],
+                        function(buyErr) {
+                            if (buyErr) return fail(buyErr);
+                            const transactionId = this.lastID;
+                            sqlite.run(
+                                'UPDATE sim_dividends SET drip_transaction_id = ? WHERE id = ?',
+                                [transactionId, dividendId],
+                                (updateErr) => {
+                                    if (updateErr) return fail(updateErr);
+                                    sqlite.run('COMMIT', (commitErr) => {
+                                        if (commitErr) return fail(commitErr);
+                                        finished = true;
+                                        sqlite.close();
+                                        resolve({ id: dividendId, account_id: accountId, symbol, amount, mode: effectiveMode, reinvested_shares: dripShares, drip_transaction_id: transactionId });
+                                    });
+                                },
+                            );
+                        },
+                    );
+                },
+            );
+                });
+            });
+        });
+    });
+}
+
 function listSimTransactions(accountId = 1) {
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
         sqlite.all(
-            'SELECT * FROM sim_transactions WHERE account_id = ? ORDER BY txn_date ASC, id ASC',
-            [Number(accountId)],
+            `SELECT id, account_id, symbol, type, shares, price, amount, fees, txn_date, notes,
+                    created_at, NULL AS idempotency_key, NULL AS reinvestment_mode,
+                    NULL AS reinvested_shares, NULL AS drip_transaction_id
+             FROM sim_transactions WHERE account_id = ?
+             UNION ALL
+             SELECT 1000000000000 + id AS id, account_id, symbol, 'dividend' AS type, NULL AS shares,
+                    reinvestment_price AS price, amount, 0 AS fees, txn_date, notes, created_at,
+                    idempotency_key, reinvestment_mode, reinvested_shares, drip_transaction_id
+             FROM sim_dividends WHERE account_id = ?
+             ORDER BY txn_date ASC, id ASC`,
+            [Number(accountId), Number(accountId)],
             (err, rows) => {
                 sqlite.close();
                 err ? reject(err) : resolve(rows || []);
@@ -1222,14 +1484,17 @@ function deleteAllSimTransactions(accountId = 1) {
         const id = Number(accountId);
         sqlite.serialize(() => {
             sqlite.run('BEGIN IMMEDIATE');
-            sqlite.run('DELETE FROM sim_trade_plans WHERE account_id = ?', [id], function(planErr) {
-                if (planErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(planErr); });
-                sqlite.run('DELETE FROM sim_transactions WHERE account_id = ?', [id], function(txnErr) {
-                    if (txnErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(txnErr); });
-                    const deleted = this.changes;
-                    sqlite.run('COMMIT', (commitErr) => {
-                        sqlite.close();
-                        commitErr ? reject(commitErr) : resolve({ deleted });
+            sqlite.run('DELETE FROM sim_dividends WHERE account_id = ?', [id], function(dividendErr) {
+                if (dividendErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(dividendErr); });
+                sqlite.run('DELETE FROM sim_trade_plans WHERE account_id = ?', [id], function(planErr) {
+                    if (planErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(planErr); });
+                    sqlite.run('DELETE FROM sim_transactions WHERE account_id = ?', [id], function(txnErr) {
+                        if (txnErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(txnErr); });
+                        const deleted = this.changes;
+                        sqlite.run('COMMIT', (commitErr) => {
+                            sqlite.close();
+                            commitErr ? reject(commitErr) : resolve({ deleted });
+                        });
                     });
                 });
             });
@@ -1468,7 +1733,9 @@ module.exports = {
     listSimAccounts,
     getSimAccount,
     setSimTaxBracket,
+    setSimReinvestmentSettings,
     addSimTransaction,
+    recordSimDividend,
     addSimTransactionWithPlan,
     addSimTransactionAndCloseTradePlan,
     listSimTradePlans,

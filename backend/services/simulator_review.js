@@ -11,6 +11,11 @@ function buildSimulatorReview(txns, currentPrices = {}) {
     const cash = computeCashBalance(txns);
     const holdings = computeHoldings(txns);
     const realized = computeRealizedPnl(txns).total;
+    const dividends = txns.filter((txn) => txn.type === 'dividend');
+    const dividendIncome = dividends.reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
+    const reinvestedDividends = dividends
+        .filter((txn) => txn.reinvestment_mode === 'drip')
+        .reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
 
     const positions = Object.entries(holdings).map(([symbol, h]) => {
         const price = currentPrices[symbol] ?? h.avg_cost;
@@ -71,6 +76,8 @@ function buildSimulatorReview(txns, currentPrices = {}) {
         total_return_pct: netCapital > 0 ? round(((totalValue - netCapital) / netCapital) * 100) : 0,
         realized_pnl: round(realized),
         unrealized_pnl: round(positions.reduce((sum, p) => sum + p.pnl, 0)),
+        dividend_income: round(dividendIncome),
+        reinvested_dividends: round(reinvestedDividends),
         cash_pct: totalValue > 0 ? round((cash / totalValue) * 100) : 0,
         position_count: positions.length,
         largest_position: positions.slice().sort((a, b) => b.weight_pct - a.weight_pct)[0] || null,
@@ -83,7 +90,14 @@ function buildSimulatorReview(txns, currentPrices = {}) {
 
 function simulatorTransactionsToCsv(txns) {
     const header = ['id', 'date', 'type', 'symbol', 'shares', 'price', 'amount', 'fees', 'notes'];
-    const rows = txns.map((t) => [t.id, t.txn_date, t.type, t.symbol ?? '', t.shares ?? '', t.price ?? '', t.amount ?? '', t.fees ?? 0, t.notes ?? '']);
+    // Notes are user-supplied free text. Prefixing a tab neutralizes spreadsheet
+    // formula interpretation (=, +, -, @) in Excel/Sheets without changing the
+    // visible content meaningfully.
+    const neutralize = (value) => {
+        const text = String(value ?? '');
+        return /^[=+\-@\t\r]/.test(text) ? `\t${text}` : text;
+    };
+    const rows = txns.map((t) => [t.id, t.txn_date, t.type, t.symbol ?? '', t.shares ?? '', t.price ?? '', t.amount ?? '', t.fees ?? 0, neutralize(t.notes ?? '')]);
     return [header, ...rows]
         .map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
         .join('\n');
