@@ -22,7 +22,7 @@ export function AccountHeader({ accountId }: Props) {
 
   if (isLoading) return <div className="h-14 rounded-lg border border-border bg-card/60 animate-pulse" />
 
-  const totalPnl = (account?.unrealized_pnl ?? 0) + (account?.realized_pnl ?? 0)
+  const totalPnl = (account?.unrealized_pnl ?? 0) + (account?.realized_pnl ?? 0) + (account?.dividend_income ?? 0)
 
   return (
     <div className="rounded-lg border border-border bg-card/60 px-4 py-3 flex flex-wrap items-center gap-4">

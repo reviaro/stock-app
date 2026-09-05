@@ -47,6 +47,24 @@ function sendError(res, err) {
     res.status(status).json({ status: 'error', error: err.message });
 }
 
+function reinvestmentMetrics(account, txns, cash, totalValue, dataComplete = true) {
+    const dividends = txns.filter((txn) => txn.type === 'dividend');
+    const dividendIncome = dividends.reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
+    const reinvestedDividends = dividends
+        .filter((txn) => txn.reinvestment_mode === 'drip')
+        .reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
+    const targetCash = totalValue * (Number(account.target_cash_pct || 0) / 100);
+    const redeployableCash = account.profit_reinvestment_mode === 'redeploy_excess'
+        ? (dataComplete ? Math.max(0, cash - targetCash) : null)
+        : 0;
+    return {
+        dividend_income: Math.round(dividendIncome * 100) / 100,
+        reinvested_dividends: Math.round(reinvestedDividends * 100) / 100,
+        redeployable_cash: redeployableCash == null ? null : Math.round(redeployableCash * 100) / 100,
+        reinvestment_data_complete: dataComplete,
+    };
+}
+
 // GET /api/simulator/accounts
 router.get('/accounts', async (_req, res) => {
     try {
@@ -82,14 +100,18 @@ router.get('/account', async (req, res) => {
             return price != null ? sum + (price * h.shares - h.total_cost) : sum;
         }, 0);
 
+        const totalValue = cash + holdingsValue;
+
         res.json({
             status: 'success',
             data: {
                 ...account,
                 cash,
-                total_value: Math.round((cash + holdingsValue) * 100) / 100,
+                total_value: Math.round(totalValue * 100) / 100,
                 unrealized_pnl: Math.round(unrealizedPnl * 100) / 100,
                 realized_pnl: Math.round(computeRealizedPnl(txns).total * 100) / 100,
+                ...reinvestmentMetrics(account, txns, cash, totalValue,
+                    symbols.every((symbol) => Number.isFinite(prices[symbol]))),
             },
         });
     } catch (err) {
@@ -123,6 +145,76 @@ router.patch('/account', async (req, res) => {
         const cash = computeCashBalance(txns);
         res.json({ status: 'success', data: { ...updatedAccount, cash } });
     } catch (err) {
+        sendError(res, err);
+    }
+});
+
+// PATCH /api/simulator/reinvestment-settings
+router.patch('/reinvestment-settings', async (req, res) => {
+    try {
+        const { accountId, account } = await requireSleeve(req);
+        const body = req.body ?? {};
+        if (!['dividend_reinvestment_mode', 'profit_reinvestment_mode', 'target_cash_pct']
+            .some((field) => Object.hasOwn(body, field))) {
+            return res.status(400).json({ status: 'error', error: 'at least one reinvestment setting is required' });
+        }
+        // Pass only the fields the client sent; the DB layer keeps omitted fields
+        // at their stored values inside the write transaction.
+        const settings = {};
+        if (Object.hasOwn(body, 'dividend_reinvestment_mode')) settings.dividend_reinvestment_mode = body.dividend_reinvestment_mode;
+        if (Object.hasOwn(body, 'profit_reinvestment_mode')) settings.profit_reinvestment_mode = body.profit_reinvestment_mode;
+        if (Object.hasOwn(body, 'target_cash_pct')) settings.target_cash_pct = body.target_cash_pct;
+        await db.setSimReinvestmentSettings(settings, accountId);
+        const updated = await db.getSimAccount(accountId);
+        res.json({ status: 'success', data: updated });
+    } catch (err) {
+        sendError(res, err);
+    }
+});
+
+// POST /api/simulator/dividend — record income and apply the sleeve DRIP policy atomically.
+router.post('/dividend', async (req, res) => {
+    try {
+        const { accountId, account, txns } = await accountAndTransactions(req);
+        const body = req.body ?? {};
+        const symbol = String(body.symbol || '').trim().toUpperCase();
+        const amount = Number(body.amount);
+        const txnDate = body.txn_date || new Date().toISOString().slice(0, 10);
+        const idempotencyKey = String(body.idempotency_key || '').trim();
+        const isValidCalendarDate = (value) => {
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+            const [y, m, d] = value.split('-').map(Number);
+            const parsed = new Date(Date.UTC(y, m - 1, d));
+            return parsed.getUTCFullYear() === y && parsed.getUTCMonth() === m - 1 && parsed.getUTCDate() === d;
+        };
+        const isFutureDate = (value) => value > new Date().toISOString().slice(0, 10);
+        if (!/^[A-Z0-9.-]{1,15}$/.test(symbol) || !Number.isFinite(amount) || amount <= 0
+            || !isValidCalendarDate(txnDate) || isFutureDate(txnDate) || !idempotencyKey || idempotencyKey.length > 200) {
+            return res.status(400).json({ status: 'error', error: 'symbol, positive amount, valid non-future date, and idempotency_key are required' });
+        }
+        const holdingsOnDate = computeHoldings(txns.filter((txn) => txn.txn_date <= txnDate));
+        if (!(holdingsOnDate[symbol]?.shares > 0)) {
+            return res.status(400).json({ status: 'error', error: `${symbol} has no open position on the dividend date` });
+        }
+
+        const price = body.price == null ? null : Number(body.price);
+        if (account.dividend_reinvestment_mode === 'drip' && !Number.isFinite(price)) {
+            return res.status(400).json({ status: 'error', error: 'dividend reinvestment price is required for DRIP mode' });
+        }
+
+        const result = await db.recordSimDividend({
+            account_id: accountId,
+            symbol,
+            amount,
+            txn_date: txnDate,
+            idempotency_key: idempotencyKey,
+            reinvestment_mode: account.dividend_reinvestment_mode,
+            reinvestment_price: price,
+            notes: body.notes ?? `Dividend ${idempotencyKey}`,
+        });
+        res.json({ status: 'success', data: result });
+    } catch (err) {
+        if (err.code === 'DUPLICATE_SIM_DIVIDEND') err.status = 409;
         sendError(res, err);
     }
 });

@@ -39,3 +39,24 @@ test('simulatorTransactionsToCsv includes notes for review', () => {
     assert.match(csv, /"notes"/);
     assert.match(csv, /"thesis"/);
 });
+
+test('simulatorTransactionsToCsv neutralizes spreadsheet formula payloads in notes', () => {
+    const csv = simulatorTransactionsToCsv([
+        { id: 1, type: 'dividend', symbol: 'PEP', shares: '', price: 200, amount: 50, fees: 0, txn_date: '2026-03-01',
+          notes: '=HYPERLINK("http://evil.example","click")' },
+        { id: 2, type: 'dividend', symbol: 'PEP', shares: '', price: 200, amount: 50, fees: 0, txn_date: '2026-06-01',
+          notes: '+SUM(1,2)' },
+        { id: 3, type: 'dividend', symbol: 'PEP', shares: '', price: 200, amount: 50, fees: 0, txn_date: '2026-09-01',
+          notes: '-2+3|cmd' },
+        { id: 4, type: 'dividend', symbol: 'PEP', shares: '', price: 200, amount: 50, fees: 0, txn_date: '2026-12-01',
+          notes: '@SUM(A1:A2)' },
+        { id: 5, type: 'buy', symbol: 'MSFT', shares: 2, price: 50, amount: 100, fees: 0, txn_date: '2026-01-01',
+          notes: 'thesis-free' },
+    ]);
+    assert.doesNotMatch(csv, /"=\w/);
+    assert.doesNotMatch(csv, /"\+/);
+    assert.doesNotMatch(csv, /"-2\+/);
+    assert.doesNotMatch(csv, /"@SUM/);
+    // Ordinary text, including leading hyphens inside words, is preserved.
+    assert.match(csv, /"thesis-free"/);
+});

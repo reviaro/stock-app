@@ -1,4 +1,11 @@
-const { computeHoldings, computeCashBalance, computeRealizedPnl } = require('./portfolio_ledger');
+const portfolioLedger = require('./portfolio_ledger');
+
+function computeHoldings(transactions) {
+    const holdings = portfolioLedger.computeHoldings(transactions);
+    return Object.fromEntries(Object.entries(holdings).filter(([, holding]) => holding.shares > 0.000001));
+}
+
+const { computeCashBalance, computeRealizedPnl } = portfolioLedger;
 
 const LONG_TERM_TAX = { 10: 0, 12: 0, 22: 0.15, 24: 0.15, 32: 0.20, 35: 0.20, 37: 0.20 };
 

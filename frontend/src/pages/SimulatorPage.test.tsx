@@ -8,6 +8,7 @@ vi.mock('@/components/simulator/TransactionHistory', () => ({ TransactionHistory
 vi.mock('@/components/simulator/SimulatorReviewPanel', () => ({ SimulatorReviewPanel: () => <div /> }))
 vi.mock('@/components/simulator/RiskMonitorPanel', () => ({ RiskMonitorPanel: () => <div>Risk Monitor Loaded</div> }))
 vi.mock('@/components/simulator/JournalAnalyticsPanel', () => ({ JournalAnalyticsPanel: () => <div>Journal Analytics Loaded</div> }))
+vi.mock('@/components/simulator/ReinvestmentPanel', () => ({ ReinvestmentPanel: () => <div>Compounding Loaded</div> }))
 vi.mock('@/hooks/useSimulator', () => ({
   useSimSleeves: () => ({
     data: [
