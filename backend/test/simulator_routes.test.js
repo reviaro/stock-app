@@ -107,6 +107,17 @@ test('GET /api/simulator/accounts exposes isolated long-term and day-trading sle
     );
 });
 
+test('account and review return incomplete valuation when a holding has no quote', async () => {
+    await db.addSimTransaction({ account_id: 1, type: 'deposit', amount: 1000, txn_date: '2026-09-04' });
+    await db.addSimTransaction({ account_id: 1, type: 'buy', symbol: 'FAIL', shares: 5, price: 100, txn_date: '2026-09-04' });
+    const account = await request('GET', '/api/simulator/account?account_id=1');
+    const review = await request('GET', '/api/simulator/review?account_id=1');
+    assert.equal(account.body.data.total_value, null);
+    assert.equal(account.body.data.valuation_complete, false);
+    assert.deepEqual(account.body.data.missing_symbols, ['FAIL']);
+    assert.equal(review.body.data.total_value, null);
+});
+
 test('GET /api/simulator/account returns account with cash=0 initially', async () => {
     const res = await request('GET', '/api/simulator/account');
     assert.strictEqual(res.status, 200);
@@ -152,7 +163,8 @@ test('PATCH /api/simulator/account invalid tax_bracket -> 400', async () => {
 
 test('POST /api/simulator/trade buy -> recorded', async () => {
     await request('PATCH', '/api/simulator/account', { deposit: 10000 });
-    const res = await request('POST', '/api/simulator/trade', {
+    const res = await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'buy', symbol: 'AAPL', shares: 10, price: 150, txn_date: '2026-01-01',
     });
     assert.strictEqual(res.status, 200);
@@ -160,7 +172,8 @@ test('POST /api/simulator/trade buy -> recorded', async () => {
 });
 
 test('POST /api/simulator/trade buy without enough cash -> 400', async () => {
-    const res = await request('POST', '/api/simulator/trade', {
+    const res = await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'buy', symbol: 'AAPL', shares: 100, price: 150, txn_date: '2026-01-01',
     });
     assert.strictEqual(res.status, 400);
@@ -168,7 +181,8 @@ test('POST /api/simulator/trade buy without enough cash -> 400', async () => {
 });
 
 test('POST /api/simulator/trade sell without position -> 400', async () => {
-    const res = await request('POST', '/api/simulator/trade', {
+    const res = await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'sell', symbol: 'AAPL', shares: 5, price: 200, txn_date: '2026-01-15',
     });
     assert.strictEqual(res.status, 400);
@@ -177,10 +191,12 @@ test('POST /api/simulator/trade sell without position -> 400', async () => {
 
 test('buy then sell -> cash updated correctly', async () => {
     await request('PATCH', '/api/simulator/account', { deposit: 10000 });
-    await request('POST', '/api/simulator/trade', {
+    await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'buy', symbol: 'AAPL', shares: 10, price: 100, txn_date: '2026-01-01',
     });
-    await request('POST', '/api/simulator/trade', {
+    await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'sell', symbol: 'AAPL', shares: 10, price: 150, txn_date: '2026-06-01',
     });
     const res = await request('GET', '/api/simulator/account');
@@ -189,7 +205,8 @@ test('buy then sell -> cash updated correctly', async () => {
 
 test('GET /api/simulator/holdings includes live stock daily performance', async () => {
     await request('PATCH', '/api/simulator/account', { deposit: 10000 });
-    await request('POST', '/api/simulator/trade', {
+    await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'buy', symbol: 'AAPL', shares: 10, price: 150, txn_date: '2026-01-01',
     });
 
@@ -212,7 +229,8 @@ test('GET /api/simulator/transactions returns list', async () => {
 
 test('GET /api/simulator/tax-preview returns breakdown', async () => {
     await request('PATCH', '/api/simulator/account', { deposit: 10000 });
-    await request('POST', '/api/simulator/trade', {
+    await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'buy', symbol: 'AAPL', shares: 10, price: 100, txn_date: '2024-01-01',
     });
     const res = await request('GET', '/api/simulator/tax-preview?symbol=AAPL&shares=5');
@@ -270,7 +288,8 @@ test('export.csv names the download after the sleeve slug', async () => {
 
 test('POST /api/simulator/trade negative shares -> 400', async () => {
     await request('PATCH', '/api/simulator/account', { deposit: 10000 });
-    const res = await request('POST', '/api/simulator/trade', {
+    const res = await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'buy', symbol: 'AAPL', shares: -5, price: 150, txn_date: '2026-01-01',
     });
     assert.strictEqual(res.status, 400);
@@ -344,7 +363,8 @@ test('cash dividend credits simulator cash and total return without changing sha
         target_cash_pct: 10,
     });
     await request('PATCH', '/api/simulator/account', { deposit: 10000 });
-    await request('POST', '/api/simulator/trade', {
+    await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'buy', symbol: 'AAPL', shares: 10, price: 150, txn_date: '2026-01-01',
     });
 
@@ -367,7 +387,8 @@ test('cash dividend credits simulator cash and total return without changing sha
 
 test('DRIP rejects a dividend without an explicit reinvestment price', async () => {
     await request('PATCH', '/api/simulator/account', { deposit: 10000 });
-    await request('POST', '/api/simulator/trade', {
+    await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'buy', symbol: 'AAPL', shares: 10, price: 150, txn_date: '2026-01-01',
     });
 
@@ -380,7 +401,8 @@ test('DRIP rejects a dividend without an explicit reinvestment price', async () 
 
 test('dividend rejects calendar-invalid and future payment dates', async () => {
     await request('PATCH', '/api/simulator/account', { deposit: 10000 });
-    await request('POST', '/api/simulator/trade', {
+    await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'buy', symbol: 'AAPL', shares: 10, price: 150, txn_date: '2026-01-01',
     });
 
@@ -405,7 +427,8 @@ test('DRIP records dividend and fractional buy atomically without changing cash'
         target_cash_pct: 10,
     });
     await request('PATCH', '/api/simulator/account', { deposit: 10000 });
-    await request('POST', '/api/simulator/trade', {
+    await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'buy', symbol: 'AAPL', shares: 10, price: 150, txn_date: '2026-01-01',
     });
 
@@ -430,7 +453,8 @@ test('DRIP records dividend and fractional buy atomically without changing cash'
 
 test('dividend idempotency prevents duplicate cash and DRIP entries', async () => {
     await request('PATCH', '/api/simulator/account', { deposit: 10000 });
-    await request('POST', '/api/simulator/trade', {
+    await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'buy', symbol: 'AAPL', shares: 10, price: 150, txn_date: '2026-01-01',
     });
     const payload = {
@@ -454,14 +478,16 @@ test('dividend requires an owned position on the dividend date', async () => {
 
 test('dividend idempotency still wins after the original position is closed', async () => {
     await request('PATCH', '/api/simulator/account', { deposit: 10000 });
-    await request('POST', '/api/simulator/trade', {
+    await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'buy', symbol: 'AAPL', shares: 10, price: 150, txn_date: '2026-01-01',
     });
     const payload = {
         symbol: 'AAPL', amount: 50, price: 200, txn_date: '2026-03-01', idempotency_key: 'AAPL-2026-Q1',
     };
     await request('POST', '/api/simulator/dividend', payload);
-    await request('POST', '/api/simulator/trade', {
+    await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'sell', symbol: 'AAPL', shares: 10.25, price: 210, txn_date: '2026-04-01',
     });
 
@@ -476,7 +502,8 @@ test('redeploy-excess policy reports only cash above the configured target', asy
         target_cash_pct: 10,
     });
     await request('PATCH', '/api/simulator/account', { deposit: 10000 });
-    await request('POST', '/api/simulator/trade', {
+    await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'buy', symbol: 'AAPL', shares: 40, price: 200, txn_date: '2026-01-01',
     });
 
@@ -493,7 +520,8 @@ test('redeploy-excess policy reports only cash above the configured target', asy
 
 test('redeployable cash fails closed when a holding quote is unavailable', async () => {
     await request('PATCH', '/api/simulator/account', { deposit: 10000 });
-    await request('POST', '/api/simulator/trade', {
+    await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'buy', symbol: 'FAIL', shares: 40, price: 200, txn_date: '2026-01-01',
     });
 
@@ -510,13 +538,15 @@ test('dividend income appears in simulator review and does not keep a sold posit
         target_cash_pct: 10,
     });
     await request('PATCH', '/api/simulator/account', { deposit: 10000 });
-    await request('POST', '/api/simulator/trade', {
+    await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'buy', symbol: 'AAPL', shares: 10, price: 150, txn_date: '2026-01-01',
     });
     await request('POST', '/api/simulator/dividend', {
         symbol: 'AAPL', amount: 50, txn_date: '2026-03-01', idempotency_key: 'AAPL-2026-Q1',
     });
-    await request('POST', '/api/simulator/trade', {
+    await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'sell', symbol: 'AAPL', shares: 10, price: 200, txn_date: '2026-04-01',
     });
 
@@ -531,7 +561,8 @@ test('dividend income appears in simulator review and does not keep a sold posit
 
 test('reset removes dividend events together with simulator trades', async () => {
     await request('PATCH', '/api/simulator/account', { deposit: 10000 });
-    await request('POST', '/api/simulator/trade', {
+    await request('POST', '/api/simulator/record', {
+        source: 'operator-manual',
         type: 'buy', symbol: 'AAPL', shares: 10, price: 150, txn_date: '2026-01-01',
     });
     await request('POST', '/api/simulator/dividend', {

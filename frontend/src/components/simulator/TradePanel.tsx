@@ -23,7 +23,6 @@ function BuyForm({ accountId, structuredJournal = false }: { accountId: number; 
   const [stopPrice, setStopPrice] = useState('')
   const [targetPrice, setTargetPrice] = useState('')
   const [invalidation, setInvalidation] = useState('')
-  const today = new Date().toISOString().slice(0, 10)
 
   const { data: priceData } = useQuery({
     queryKey: ['stock-price', symbol],
@@ -46,12 +45,12 @@ function BuyForm({ accountId, structuredJournal = false }: { accountId: number; 
     e.preventDefault()
     if (!symbol || !shares || currentPrice == null) return
     if (structuredJournal && (!setup || !thesis || !stopPrice || !targetPrice)) return
+    // The server validates its own quote and prices the fill; the client only
+    // declares the intention (type/symbol/shares), never price or date.
     await trade.mutateAsync({
       type: 'buy',
       symbol: symbol.toUpperCase(),
       shares: Number(shares),
-      price: currentPrice,
-      txn_date: today,
       ...(structuredJournal ? {
         trade_plan: {
           setup,
@@ -141,6 +140,61 @@ interface SellFormProps {
   structuredJournal?: boolean
 }
 
+function PendingOrderGate({ trade }: { trade: ReturnType<typeof useSimTrade> }) {
+  const pending = trade.pendingOrder
+  const [checking, setChecking] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+  const [found, setFound] = useState<unknown>(null)
+
+  if (!pending) return null
+
+  const verb = pending.type === 'buy' ? 'Buy' : 'Sell'
+  const checkStatus = async () => {
+    setChecking(true)
+    setMessage(null)
+    try {
+      const fill = await trade.reconcileOrder()
+      if (fill) setFound(fill)
+      else setMessage('The server has no fill for this order yet — it is safe to retry it.')
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Order lookup failed; try again.')
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2" role="alert">
+      <p className="text-xs font-semibold text-amber-700 dark:text-amber-100">
+        Last order outcome is unknown — reconcile before trading again.
+      </p>
+      <p className="text-xs text-muted-foreground">
+        {verb} {pending.shares} {pending.symbol} · key <span className="font-mono">{pending.client_order_id.slice(0, 8)}</span>
+      </p>
+      <div className="flex gap-1.5">
+        <button
+          type="button"
+          onClick={() => trade.retryOrder()}
+          disabled={trade.isPending}
+          className="data-hover text-xs px-2 py-0.5 rounded-md bg-primary text-primary-foreground"
+        >
+          {trade.isPending ? 'Retrying…' : 'Retry order (same key)'}
+        </button>
+        <button
+          type="button"
+          onClick={checkStatus}
+          disabled={checking}
+          className="data-hover text-xs px-2 py-0.5 rounded-md border border-border text-muted-foreground"
+        >
+          {checking ? 'Checking…' : 'Check status'}
+        </button>
+      </div>
+      {message && <p className="text-xs text-muted-foreground">{message}</p>}
+      {found != null && <p className="text-xs text-green-400">A fill was found and applied. You can place a new order.</p>}
+    </div>
+  )
+}
+
 function SellForm({ accountId, holding, onClose, structuredJournal = false }: SellFormProps) {
   const trade = useSimTrade(accountId)
   const [shares, setShares] = useState(String(holding.shares))
@@ -149,7 +203,6 @@ function SellForm({ accountId, holding, onClose, structuredJournal = false }: Se
   const [mfe, setMfe] = useState('')
   const [mae, setMae] = useState('')
   const [reviewNotes, setReviewNotes] = useState('')
-  const today = new Date().toISOString().slice(0, 10)
 
   const sharesNum = Number(shares)
   const price = holding.currentPrice
@@ -163,12 +216,11 @@ function SellForm({ accountId, holding, onClose, structuredJournal = false }: Se
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!shares || !price) return
+    // Server-priced fill: intention only, no client price or date.
     await trade.mutateAsync({
       type: 'sell',
       symbol: holding.symbol,
       shares: sharesNum,
-      price,
-      txn_date: today,
       ...(structuredJournal ? {
         journal: {
           exit_reason: exitReason,
@@ -241,13 +293,16 @@ function SellForm({ accountId, holding, onClose, structuredJournal = false }: Se
 }
 
 export function TradePanel({ accountId, sellTarget, onSellClose, structuredJournal = false }: Props) {
+  const trade = useSimTrade(accountId)
   return (
     <Card className="h-full flex flex-col">
       <CardHeader className="pb-2">
         <CardTitle>Trade</CardTitle>
       </CardHeader>
       <CardContent className="flex-1 overflow-y-auto min-h-0 px-3 pb-3 space-y-4">
-        {sellTarget ? (
+        {trade.pendingOrder ? (
+          <PendingOrderGate trade={trade} />
+        ) : sellTarget ? (
           <SellForm accountId={accountId} holding={sellTarget} onClose={onSellClose} structuredJournal={structuredJournal} />
         ) : (
           <BuyForm accountId={accountId} structuredJournal={structuredJournal} />

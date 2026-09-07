@@ -387,7 +387,7 @@ def get_stock_info(symbol):
         if len(hist) > 0:
             latest = hist.iloc[-1]
             price = float(latest['Close'])
-            prev_close = float(hist.iloc[0]['Open']) if len(hist) > 1 else price
+            prev_close = float(hist.iloc[-2]['Close']) if len(hist) > 1 else price  # One row: zero change; prior session unknown.
             change = price - prev_close
             changePercent = (change / prev_close * 100) if prev_close else 0
             volume = int(latest['Volume']) if 'Volume' in latest.index else 0
@@ -781,7 +781,7 @@ def get_market_indexes():
                 if len(hist) > 0:
                     latest = hist.iloc[-1]
                     price = float(latest['Close'])
-                    prev_close = float(hist.iloc[0]['Open']) if len(hist) > 1 else price
+                    prev_close = float(hist.iloc[-2]['Close']) if len(hist) > 1 else price  # One row: zero change; prior session unknown.
                     change = price - prev_close
                     changePercent = (change / prev_close * 100) if prev_close else 0
                     volume = int(latest['Volume']) if 'Volume' in latest.index else 0

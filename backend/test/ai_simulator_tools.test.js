@@ -10,6 +10,9 @@ process.env.DB_PATH_OVERRIDE = TEST_DB;
 const Module = require('module');
 const _originalLoad = Module._load;
 Module._load = function(request, parent, isMain) {
+    if (request.includes('hybrid_market_data')) {
+        return { getDefaultHybridQuote: async () => ({ price: 200, timestamp: new Date(Date.now() - 1000).toISOString(), market_state: 'REGULAR', data_source: 'alpaca_iex' }) };
+    }
     if (request.includes('pybridge')) {
         return { getStockInfo: async () => ({ data: { price: 200.00, name: 'Test' } }) };
     }
@@ -44,9 +47,16 @@ test('simulator_deposit records the deposit in the requested sleeve', async () =
     assert.strictEqual((await db.listSimTransactions(1)).length, 0);
 });
 
+test('AI buy cannot bypass required key, plan, or execution quote provenance', async () => {
+    await db.addSimTransaction({ account_id: 2, type: 'deposit', amount: 10000, txn_date: today });
+    const result = await tools.simulator_buy.execute({ symbol: 'AAPL', shares: 2, account_id: 2 });
+    assert.ok(result.error, 'unkeyed unplanned AI buy must be rejected');
+    assert.equal((await db.listSimTransactions(2)).filter(t => t.type === 'buy').length, 0);
+});
+
 test('simulator_buy trades against the requested sleeve cash', async () => {
     await db.addSimTransaction({ account_id: 2, type: 'deposit', amount: 10000, txn_date: today });
-    const result = await tools.simulator_buy.execute({ symbol: 'AAPL', shares: 10, account_id: 2 });
+    const result = await tools.simulator_buy.execute({ symbol: 'AAPL', shares: 10, account_id: 2, client_order_id: 'ai-buy', trade_plan: { setup: 'momentum', thesis: 'test', stop_price: 190, target_price: 220 } });
     assert.strictEqual(result.status, 'success', JSON.stringify(result));
     const buys = (await db.listSimTransactions(2)).filter((t) => t.type === 'buy');
     assert.strictEqual(buys.length, 1);
@@ -56,7 +66,7 @@ test('simulator_buy trades against the requested sleeve cash', async () => {
 test('simulator_sell sells from the requested sleeve position', async () => {
     await db.addSimTransaction({ account_id: 2, type: 'deposit', amount: 10000, txn_date: today });
     await db.addSimTransaction({ account_id: 2, type: 'buy', symbol: 'AAPL', shares: 10, price: 100, txn_date: today });
-    const result = await tools.simulator_sell.execute({ symbol: 'AAPL', shares: 5, account_id: 2 });
+    const result = await tools.simulator_sell.execute({ symbol: 'AAPL', shares: 5, account_id: 2, client_order_id: 'ai-sell' });
     assert.strictEqual(result.status, 'success', JSON.stringify(result));
     const sells = (await db.listSimTransactions(2)).filter((t) => t.type === 'sell');
     assert.strictEqual(sells.length, 1);

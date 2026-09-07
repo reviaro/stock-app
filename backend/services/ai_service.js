@@ -225,65 +225,43 @@ const tools = {
   }),
 
   simulator_buy: tool({
-    description: 'Places a simulated buy order in a paper trading simulator sleeve. Deducts cash and records the trade. Price is fetched live from the market.',
-    parameters: z.object({
-      symbol: z.string().describe('Ticker symbol (e.g. AAPL)'),
-      shares: z.number().describe('Number of shares to buy'),
-      account_id: simSleeveParam,
+    description: 'Submit an evaluated simulator buy intention. Requires explicit sleeve and stable client_order_id; server assigns a validated surrogate fill. Reuse the same key on retry.',
+    inputSchema: z.object({
+      symbol: z.string(),
+      shares: z.number().positive().finite(),
+      account_id: z.number().int().positive(),
+      client_order_id: z.string().min(1).max(200),
+      trade_plan: z.object({ setup: z.string(), thesis: z.string(), stop_price: z.number().positive(), target_price: z.number().positive(), catalyst: z.string().optional(), invalidation: z.string().optional() }).optional(),
+      journal: z.object({ exit_reason: z.enum(['stop', 'target', 'time_exit', 'thesis_break', 'discretionary']), thesis_valid: z.boolean().optional(), review_notes: z.string().optional() }).optional(),
     }),
-    execute: async ({ symbol, shares, account_id = 1 }) => {
+    execute: async (input) => {
       try {
-        await requireSimSleeve(account_id);
-        const info = await pybridge.getStockInfo(symbol);
-        const price = info?.data?.price;
-        if (typeof price !== 'number' || !isFinite(price)) {
-          return { error: 'price unavailable for ' + symbol };
-        }
-        const txns = await dbModule.listSimTransactions(account_id);
-        const cash = computeCashBalance(txns);
-        const cost = shares * price;
-        if (cash < cost) {
-          return { error: `insufficient cash: have $${Math.round(cash * 100) / 100}, need $${Math.round(cost * 100) / 100}` };
-        }
-        const result = await dbModule.addSimTransaction({
-          account_id, type: 'buy', symbol, shares, price,
-          txn_date: new Date().toISOString().slice(0, 10),
-        });
-        return { status: 'success', data: result };
+        const { executeSimulatorTrade } = require('./simulator_execution_service');
+        const { result, duplicate } = await executeSimulatorTrade({ ...input, type: 'buy' });
+        return { status: 'success', data: result, duplicate };
       } catch (err) {
-        return { error: err.message };
+        return { error: err.message, code: err.code };
       }
     },
   }),
 
   simulator_sell: tool({
-    description: 'Places a simulated sell order in a paper trading simulator sleeve. Credits cash and records the trade. Price is fetched live from the market.',
-    parameters: z.object({
-      symbol: z.string().describe('Ticker symbol (e.g. AAPL)'),
-      shares: z.number().describe('Number of shares to sell'),
-      account_id: simSleeveParam,
+    description: 'Submit an evaluated simulator sell intention. Requires explicit sleeve and stable client_order_id; server assigns a validated surrogate fill. Reuse the same key on retry.',
+    inputSchema: z.object({
+      symbol: z.string(),
+      shares: z.number().positive().finite(),
+      account_id: z.number().int().positive(),
+      client_order_id: z.string().min(1).max(200),
+      trade_plan: z.object({ setup: z.string(), thesis: z.string(), stop_price: z.number().positive(), target_price: z.number().positive(), catalyst: z.string().optional(), invalidation: z.string().optional() }).optional(),
+      journal: z.object({ exit_reason: z.enum(['stop', 'target', 'time_exit', 'thesis_break', 'discretionary']), thesis_valid: z.boolean().optional(), review_notes: z.string().optional() }).optional(),
     }),
-    execute: async ({ symbol, shares, account_id = 1 }) => {
+    execute: async (input) => {
       try {
-        await requireSimSleeve(account_id);
-        const info = await pybridge.getStockInfo(symbol);
-        const price = info?.data?.price;
-        if (typeof price !== 'number' || !isFinite(price)) {
-          return { error: 'price unavailable for ' + symbol };
-        }
-        const txns = await dbModule.listSimTransactions(account_id);
-        const holdings = computeHoldings(txns);
-        const owned = holdings[symbol.toUpperCase()]?.shares ?? 0;
-        if (shares > owned + 0.000001) {
-          return { error: `insufficient shares: own ${owned}, tried to sell ${shares}` };
-        }
-        const result = await dbModule.addSimTransaction({
-          account_id, type: 'sell', symbol, shares, price,
-          txn_date: new Date().toISOString().slice(0, 10),
-        });
-        return { status: 'success', data: result };
+        const { executeSimulatorTrade } = require('./simulator_execution_service');
+        const { result, duplicate } = await executeSimulatorTrade({ ...input, type: 'sell' });
+        return { status: 'success', data: result, duplicate };
       } catch (err) {
-        return { error: err.message };
+        return { error: err.message, code: err.code };
       }
     },
   }),

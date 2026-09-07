@@ -43,6 +43,24 @@ print(json.dumps(yf_wrapper.get_stock_info('XYZ')))
     assert.strictEqual(result.data.isDemo, false);
 });
 
+test('previousClose uses previous session close, not the oldest open', () => {
+    const result = runPython(`
+import json, sys
+import pandas as pd
+sys.path.insert(0, 'python')
+import yf_wrapper
+class FakeTicker:
+    info = {}
+    def history(self, **kwargs):
+        return pd.DataFrame([{'Open': 80, 'Close': c, 'High': 120, 'Low': 70, 'Volume': 100} for c in [90, 100, 110]])
+yf_wrapper.yf.Ticker = lambda _: FakeTicker()
+print(json.dumps(yf_wrapper.get_stock_info('XYZ')))
+`);
+    assert.strictEqual(result.data.previousClose, 100);
+    assert.strictEqual(result.data.change, 10);
+    assert.strictEqual(result.data.changePercent, 10);
+});
+
 test('demo quote fallback is explicitly labeled and has no trustworthy timestamp', () => {
     const result = runPython(`
 import json

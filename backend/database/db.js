@@ -1,6 +1,9 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
+const { normalizeSimTransaction } = require('../services/simulator_transaction_validation');
+const { normalizeTradePlan, closeStructuredTrade } = require('../services/trade_journal');
 
 const VALID_BUCKETS = ['compounders', 'buy_soon', 'expensive', 'speculative', 'owned', 'unsorted'];
 const VALID_TXN_TYPES = ['buy', 'sell', 'dividend', 'deposit', 'withdrawal'];
@@ -101,6 +104,8 @@ function initDb() {
             db.run('ALTER TABLE stock_snapshots ADD COLUMN gap_apr22_percent REAL', ignoreDuplicateColumnError);
             db.run('ALTER TABLE stock_snapshots ADD COLUMN dist_from_52wh_percent REAL', ignoreDuplicateColumnError);
             db.run('ALTER TABLE stock_snapshots ADD COLUMN dist_from_52wl_percent REAL', ignoreDuplicateColumnError);
+            db.run('ALTER TABLE stock_snapshots ADD COLUMN quote_timestamp_basis TEXT', ignoreDuplicateColumnError);
+            db.run('ALTER TABLE stock_snapshots ADD COLUMN retrieved_at TEXT', ignoreDuplicateColumnError);
 
             db.run(`
                 CREATE INDEX IF NOT EXISTS idx_stock_snapshots_symbol_captured
@@ -244,6 +249,28 @@ function initDb() {
             `);
 
             db.run('CREATE INDEX IF NOT EXISTS idx_sim_transactions_symbol ON sim_transactions(symbol, txn_date)');
+
+            // Evaluated simulator orders: idempotency ledger and quote provenance.
+            // Existing sim_transactions rows are untouched; manual helpers remain
+            // usable without an order record (legacy/seed paths keep working).
+            db.run(`
+                CREATE TABLE IF NOT EXISTS sim_orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL,
+                    client_order_id TEXT NOT NULL,
+                    intent_hash TEXT NOT NULL,
+                    transaction_id INTEGER NOT NULL,
+                    result_json TEXT NOT NULL,
+                    quote_json TEXT,
+                    fill_date TEXT NOT NULL,
+                    fill_time TEXT NOT NULL,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    UNIQUE(account_id, client_order_id),
+                    FOREIGN KEY(account_id) REFERENCES simulator_sleeves(id),
+                    FOREIGN KEY(transaction_id) REFERENCES sim_transactions(id)
+                )
+            `);
+            db.run('CREATE INDEX IF NOT EXISTS idx_sim_orders_intent ON sim_orders(account_id, intent_hash, transaction_id)');
 
             // Reinvestment preferences are sleeve-specific. Keeping them separate avoids
             // mutating the established sleeve schema and gives each strategy safe defaults.
@@ -554,16 +581,18 @@ function upsertStockSnapshot(snapshot) {
         const db = getDb();
         db.run(
             `INSERT INTO stock_snapshots (
-                symbol, slot, market_date, quote_timestamp, price, previous_close,
+                symbol, slot, market_date, quote_timestamp, quote_timestamp_basis, retrieved_at, price, previous_close,
                 change_amount, change_percent, currency, source,
                 is_market_closed, is_carry_forward, raw_payload,
                 open_price, day_high, fifty_two_week_high, fifty_two_week_low,
                 change_from_open_percent, gap_apr22_percent,
                 dist_from_52wh_percent, dist_from_52wl_percent
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol, market_date, slot)
             DO UPDATE SET
                 quote_timestamp=excluded.quote_timestamp,
+                quote_timestamp_basis=excluded.quote_timestamp_basis,
+                retrieved_at=excluded.retrieved_at,
                 price=excluded.price,
                 previous_close=excluded.previous_close,
                 change_amount=excluded.change_amount,
@@ -587,6 +616,8 @@ function upsertStockSnapshot(snapshot) {
                 snapshot.slot,
                 snapshot.marketDate,
                 snapshot.quoteTimestamp ?? null,
+                snapshot.quoteTimestampBasis ?? null,
+                snapshot.retrievedAt ?? null,
                 snapshot.price,
                 snapshot.previousClose ?? null,
                 snapshot.changeAmount ?? null,
@@ -1209,33 +1240,23 @@ function setSimTaxBracket(bracket, accountId = 1) {
 }
 
 function addSimTransaction(txn) {
-    if (!VALID_SIM_TXN_TYPES.includes(txn.type)) return Promise.reject(new Error(`invalid type: ${txn.type}`));
-    if (!txn.txn_date || !/^\d{4}-\d{2}-\d{2}$/.test(txn.txn_date)) {
-        return Promise.reject(new Error('txn_date required (YYYY-MM-DD)'));
+    if (txn && ['buy', 'sell'].includes(txn.type)) return recordSimTradeAtomic({ transaction: txn });
+    let normalized;
+    try {
+        normalized = normalizeSimTransaction(txn);
+    } catch (err) {
+        return Promise.reject(err);
     }
-    const isTrade = txn.type === 'buy' || txn.type === 'sell';
-    if (isTrade) {
-        const shareCount = Number(txn.shares);
-        const tradePrice = Number(txn.price);
-        if (!txn.symbol || typeof txn.symbol !== 'string') return Promise.reject(new Error('buy/sell require symbol'));
-        if (!Number.isFinite(shareCount) || shareCount <= 0) return Promise.reject(new Error('shares must be a positive number'));
-        if (!Number.isFinite(tradePrice) || tradePrice <= 0) return Promise.reject(new Error('price must be a positive number'));
-    } else {
-        const cashAmount = Number(txn.amount);
-        if (!Number.isFinite(cashAmount) || cashAmount <= 0) return Promise.reject(new Error('deposit/withdrawal amount must be a positive number'));
-    }
-    const amount = isTrade ? Number(txn.shares) * Number(txn.price) : Number(txn.amount);
-    const symbol = txn.symbol ? String(txn.symbol).toUpperCase() : null;
-    const accountId = Number(txn.account_id ?? 1);
+    const { account_id: accountId, symbol, type, amount } = normalized;
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
         sqlite.run(
             `INSERT INTO sim_transactions (account_id, symbol, type, shares, price, amount, fees, txn_date, notes)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [accountId, symbol, txn.type, txn.shares ?? null, txn.price ?? null, amount, Number(txn.fees ?? 0), txn.txn_date, txn.notes ?? null],
+            [accountId, symbol, type, normalized.shares, normalized.price, amount, normalized.fees, normalized.txn_date, normalized.notes],
             function(err) {
                 sqlite.close();
-                err ? reject(err) : resolve({ id: this.lastID, account_id: accountId, symbol, type: txn.type, amount });
+                err ? reject(err) : resolve({ id: this.lastID, account_id: accountId, symbol, type, amount });
             }
         );
     });
@@ -1268,95 +1289,12 @@ function getActiveSimTradePlan(accountId, symbol) {
 }
 
 function addSimTransactionWithPlan(txn, plan) {
-    const accountId = Number(txn.account_id ?? 1);
-    const symbol = String(txn.symbol).toUpperCase();
-    const amount = Number(txn.shares) * Number(txn.price);
-    return new Promise((resolve, reject) => {
-        const sqlite = getDb();
-        let finished = false;
-        const fail = (error) => {
-            if (finished) return;
-            finished = true;
-            sqlite.run('ROLLBACK', () => { sqlite.close(); reject(error); });
-        };
-        sqlite.serialize(() => {
-            sqlite.run('BEGIN IMMEDIATE');
-            sqlite.run(
-                `INSERT INTO sim_transactions (account_id, symbol, type, shares, price, amount, fees, txn_date, notes)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [accountId, symbol, txn.type, txn.shares, txn.price, amount, Number(txn.fees ?? 0), txn.txn_date, txn.notes ?? null],
-                function(err) {
-                    if (err) return fail(err);
-                    const transactionId = this.lastID;
-                    sqlite.run(
-                        `INSERT INTO sim_trade_plans
-                         (account_id, symbol, setup, catalyst, thesis, invalidation, entry_transaction_id,
-                          shares, planned_entry, stop_price, target_price, planned_risk)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                        [accountId, symbol, plan.setup, plan.catalyst, plan.thesis, plan.invalidation,
-                            transactionId, plan.shares, plan.planned_entry, plan.stop_price, plan.target_price, plan.planned_risk],
-                        function(planErr) {
-                            if (planErr) return fail(planErr);
-                            const planId = this.lastID;
-                            sqlite.run('COMMIT', (commitErr) => {
-                                if (commitErr) return fail(commitErr);
-                                finished = true;
-                                sqlite.close();
-                                resolve({ id: transactionId, account_id: accountId, symbol, type: txn.type, amount, trade_plan_id: planId });
-                            });
-                        },
-                    );
-                },
-            );
-        });
-    });
+    return recordSimTradeAtomic({ transaction: txn, trade_plan: plan });
 }
 
 function addSimTransactionAndCloseTradePlan(txn, planId, closure) {
-    const accountId = Number(txn.account_id ?? 1);
-    const symbol = String(txn.symbol).toUpperCase();
-    const amount = Number(txn.shares) * Number(txn.price);
-    return new Promise((resolve, reject) => {
-        const sqlite = getDb();
-        let finished = false;
-        const fail = (error) => {
-            if (finished) return;
-            finished = true;
-            sqlite.run('ROLLBACK', () => { sqlite.close(); reject(error); });
-        };
-        sqlite.serialize(() => {
-            sqlite.run('BEGIN IMMEDIATE');
-            sqlite.run(
-                `INSERT INTO sim_transactions (account_id, symbol, type, shares, price, amount, fees, txn_date, notes)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [accountId, symbol, txn.type, txn.shares, txn.price, amount, Number(txn.fees ?? 0), txn.txn_date, txn.notes ?? null],
-                function(err) {
-                    if (err) return fail(err);
-                    const transactionId = this.lastID;
-                    sqlite.run(
-                        `UPDATE sim_trade_plans
-                         SET status = 'closed', exit_transaction_id = ?, exit_reason = ?, thesis_valid = ?,
-                             exit_price = ?, exit_shares = ?, exit_cost_basis = ?, realized_pnl = ?, realized_r = ?, mfe = ?, mae = ?, review_notes = ?,
-                             closed_at = datetime('now')
-                         WHERE id = ? AND account_id = ? AND status = 'active'`,
-                        [transactionId, closure.exit_reason, closure.thesis_valid == null ? null : (closure.thesis_valid ? 1 : 0), closure.exit_price, closure.exit_shares, closure.exit_cost_basis,
-                            closure.realized_pnl, closure.realized_r, closure.mfe, closure.mae, closure.review_notes,
-                            Number(planId), accountId],
-                        function(updateErr) {
-                            if (updateErr) return fail(updateErr);
-                            if (this.changes !== 1) return fail(new Error('active trade plan was not found'));
-                            sqlite.run('COMMIT', (commitErr) => {
-                                if (commitErr) return fail(commitErr);
-                                finished = true;
-                                sqlite.close();
-                                resolve({ id: transactionId, account_id: accountId, symbol, type: txn.type, amount, trade_plan_id: Number(planId) });
-                            });
-                        },
-                    );
-                },
-            );
-        });
-    });
+    // Only journal annotations are accepted; economics are rebuilt under lock.
+    return recordSimTradeAtomic({ transaction: txn, close_plan_id: planId, closure });
 }
 
 function recordSimDividend(dividend) {
@@ -1478,6 +1416,381 @@ function listSimTransactions(accountId = 1) {
     });
 }
 
+// Canonical intention hash: stable JSON key ordering over the caller's intent
+// object, so semantically identical intents replay identically regardless of
+// property order, and any semantic difference conflicts.
+function canonicalIntentHash(intent) {
+    if (intent === null || typeof intent !== 'object' || Array.isArray(intent)) {
+        throw Object.assign(new Error('intent must be a plain object'), { code: 'SIM_INVALID_INTENT' });
+    }
+    const sorted = Object.keys(intent)
+        .sort()
+        .map((key) => {
+            const value = intent[key];
+            if (value !== null && typeof value === 'object') return JSON.stringify([key, canonicalIntentHash(value)]);
+            return JSON.stringify([key, value]);
+        });
+    return crypto.createHash('sha256').update(JSON.stringify(sorted)).digest('hex');
+}
+
+function simOrderError(code, message) {
+    return Object.assign(new Error(message), { code });
+}
+
+// Fractional-share tolerance the routes already use for "fully closed".
+const SIM_SHARE_TOLERANCE = 0.000001;
+
+function computeSimLedgerSnapshot(rows) {
+    let cash = 0;
+    const shares = {};
+    for (const row of rows) {
+        const amount = Number(row.amount ?? 0);
+        const fees = Number(row.fees ?? 0);
+        if (row.type === 'deposit') cash += amount - fees;
+        else if (row.type === 'withdrawal') cash -= amount - fees;
+        else if (row.type === 'buy') {
+            cash -= amount + fees;
+            shares[row.symbol] = (shares[row.symbol] || 0) + Number(row.shares ?? 0);
+        } else if (row.type === 'sell') {
+            cash += amount - fees;
+            shares[row.symbol] = (shares[row.symbol] || 0) - Number(row.shares ?? 0);
+        } else if (row.type === 'dividend') cash += amount - fees;
+    }
+    return { cash, shares };
+}
+
+function loadSimLedgerRows(sqlite, accountId) {
+    return new Promise((resolve, reject) => {
+        // Cash-mode dividends are spendable cash exactly like the displayed
+        // ledger: the locked snapshot must union them in or dividend-funded
+        // buys get rejected with cash the UI already shows.
+        sqlite.all(
+            `SELECT id, account_id, symbol, type, shares, price, amount, fees, txn_date FROM sim_transactions WHERE account_id = ?
+             UNION ALL
+             SELECT 1000000000000 + id AS id, account_id, symbol, 'dividend' AS type, NULL AS shares,
+                    reinvestment_price AS price, amount, 0 AS fees, txn_date
+             FROM sim_dividends WHERE account_id = ? AND reinvestment_mode = 'cash'
+             ORDER BY txn_date ASC, id ASC`,
+            [Number(accountId), Number(accountId)],
+            (err, rows) => (err ? reject(err) : resolve(rows || [])),
+        );
+    });
+}
+
+/**
+ * Atomically execute a simulator trade with idempotency.
+ *
+ * order = {
+ *   transaction,           // sim transaction payload (account_id, type buy/sell, symbol, shares, price, fees, txn_date, notes)
+ *   client_order_id,       // unique per account: idempotency key
+ *   intent,                // plain object describing the intended order; hashed canonically
+ *   quote,                 // optional quote provenance { symbol, price, source, quote_timestamp, ... }
+ *   trade_plan,            // optional normalized plan (buy on day sleeve): created in the same transaction
+ *   close_plan_id,         // optional plan id closed by this sell (full close)
+ *   closure,               // optional closure payload for close_plan_id
+ *   on_partial_close,      // optional callback(plan, txns, sqlite) invoked under lock for a partial sell
+ * }
+ *
+ * Returns the stored result (identical for replays of the same intent).
+ * Throws coded errors: SIM_INVALID_TRANSACTION, SIM_INVALID_INTENT, SIM_INVALID_ORDER,
+ * SIM_ORDER_CONFLICT, SIM_INSUFFICIENT_CASH, SIM_INSUFFICIENT_SHARES, SIM_PLAN_REQUIRED.
+ * Deposits/withdrawals are not supported here; use addSimTransaction.
+ */
+function executeSimTradeAtomic(order = {}) {
+    return persistSimTradeAtomic(order, false);
+}
+
+// Manual fills share the lock/resource/plan machinery, never the evaluated
+// order ledger. This is provenance separation, not operator authorization.
+function recordSimTradeAtomic(order = {}) {
+    return persistSimTradeAtomic(order, true);
+}
+
+function persistSimTradeAtomic(order = {}, manual = false) {
+    return Promise.resolve().then(() => {
+        const clientOrderId = manual ? null : (order.client_order_id == null ? null : String(order.client_order_id).trim());
+        if (!manual && (!clientOrderId || clientOrderId.length > 200)) {
+            throw simOrderError('SIM_INVALID_ORDER', 'client_order_id is required (1-200 chars)');
+        }
+        if (!order.transaction || !['buy', 'sell'].includes(order.transaction.type)) {
+            throw simOrderError('SIM_INVALID_ORDER', 'transaction must be a buy or sell');
+        }
+        const normalized = normalizeSimTransaction(order.transaction);
+        if (order.close_plan_id != null && normalized.type !== 'sell') {
+            throw simOrderError('SIM_INVALID_ORDER', 'close_plan_id requires a sell');
+        }
+        const intentHash = manual ? null : canonicalIntentHash(order.intent);
+        const accountId = normalized.account_id;
+        const fill_date = normalized.txn_date;
+        const fill_time = new Date().toISOString().slice(11, 19);
+
+        return new Promise((resolve, reject) => {
+            const sqlite = getDb();
+            let finished = false;
+            const fail = (error) => {
+                if (finished) return;
+                finished = true;
+                sqlite.run('ROLLBACK', () => { sqlite.close(); reject(error); });
+            };
+            sqlite.serialize(() => {
+                sqlite.run('BEGIN IMMEDIATE', (beginErr) => {
+                    if (beginErr) return fail(beginErr);
+                    // Idempotency: exact prior result returned before any validation,
+                    // resource check, or quote/plan mutation.
+                    sqlite.get(
+                        'SELECT * FROM sim_orders WHERE account_id = ? AND client_order_id = ?',
+                        [accountId, clientOrderId],
+                        (lookupErr, existing) => {
+                            if (lookupErr) return fail(lookupErr);
+                            if (existing) {
+                                if (existing.intent_hash !== intentHash) {
+                                    return fail(simOrderError('SIM_ORDER_CONFLICT',
+                                        `client_order_id ${clientOrderId} already used with a different intent`));
+                                }
+                                return sqlite.run('COMMIT', (commitErr) => {
+                                    if (commitErr) return fail(commitErr);
+                                    finished = true;
+                                    sqlite.close();
+                                    resolve(JSON.parse(existing.result_json));
+                                });
+                            }
+                            loadSimLedgerRows(sqlite, accountId).then((rows) => {
+                                const snapshot = computeSimLedgerSnapshot(rows);
+                                const cost = normalized.amount + normalized.fees;
+                                if (normalized.type === 'buy' && snapshot.cash + SIM_SHARE_TOLERANCE < cost) {
+                                    return fail(simOrderError('SIM_INSUFFICIENT_CASH',
+                                        `insufficient cash: have ${snapshot.cash.toFixed(2)}, need ${cost.toFixed(2)}`));
+                                }
+                                const owned = snapshot.shares[normalized.symbol] || 0;
+                                if (normalized.type === 'sell' && normalized.shares > owned + SIM_SHARE_TOLERANCE) {
+                                    return fail(simOrderError('SIM_INSUFFICIENT_SHARES',
+                                        `insufficient shares: own ${owned}, tried to sell ${normalized.shares}`));
+                                }
+
+                                const insertTxn = () => new Promise((res, rej) => {
+                                    sqlite.run(
+                                        `INSERT INTO sim_transactions (account_id, symbol, type, shares, price, amount, fees, txn_date, notes)
+                                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                        [accountId, normalized.symbol, normalized.type, normalized.shares, normalized.price,
+                                            normalized.amount, normalized.fees, normalized.txn_date, normalized.notes],
+                                        function(err) { err ? rej(err) : res(this.lastID); },
+                                    );
+                                });
+                                const insertPlan = (transactionId) => new Promise((res, rej) => {
+                                    const plan = normalizedPlan;
+                                    sqlite.run(
+                                        `INSERT INTO sim_trade_plans
+                                         (account_id, symbol, setup, catalyst, thesis, invalidation, entry_transaction_id,
+                                          shares, planned_entry, stop_price, target_price, planned_risk)
+                                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                        [accountId, normalized.symbol, plan.setup, plan.catalyst, plan.thesis, plan.invalidation,
+                                            transactionId, plan.shares, plan.planned_entry, plan.stop_price, plan.target_price, plan.planned_risk],
+                                        function(err) { err ? rej(err) : res(this.lastID); },
+                                    );
+                                });
+                                const closePlan = (transactionId, active) => new Promise((res, rej) => {
+                                    const journal = order.closure || (manual ? {
+                                        exit_reason: normalized.price <= Number(active.stop_price) ? 'stop'
+                                            : (normalized.price >= Number(active.target_price) ? 'target' : 'discretionary'),
+                                        review_notes: 'Auto-closed from a full simulator exit; thesis validity was not supplied.',
+                                    } : {});
+                                    const closure = closeStructuredTrade(active, {
+                                        exit_reason: journal.exit_reason ?? 'discretionary',
+                                        thesis_valid: journal.thesis_valid ?? null,
+                                        mfe: journal.mfe, mae: journal.mae, review_notes: journal.review_notes,
+                                        exit_transaction_id: transactionId, exit_price: normalized.price,
+                                        shares: normalized.shares, exit_shares: normalized.shares, fees: normalized.fees,
+                                    }, [...rows, { ...normalized, id: transactionId }]);
+                                    sqlite.run(
+                                        `UPDATE sim_trade_plans
+                                         SET status = 'closed', exit_transaction_id = ?, exit_reason = ?, thesis_valid = ?,
+                                             exit_price = ?, exit_shares = ?, exit_cost_basis = ?, realized_pnl = ?, realized_r = ?, mfe = ?, mae = ?, review_notes = ?,
+                                             closed_at = datetime('now')
+                                         WHERE id = ? AND account_id = ? AND status = 'active'`,
+                                        [transactionId, closure.exit_reason, closure.thesis_valid == null ? null : (closure.thesis_valid ? 1 : 0),
+                                            closure.exit_price, closure.exit_shares, closure.exit_cost_basis,
+                                            closure.realized_pnl, closure.realized_r, closure.mfe, closure.mae, closure.review_notes,
+                                            active.id, accountId],
+                                        function(err) {
+                                            if (err) return rej(err);
+                                            if (this.changes !== 1) return rej(simOrderError('SIM_PLAN_REQUIRED', 'active trade plan was not found'));
+                                            res(active.id);
+                                        },
+                                    );
+                                });
+                                const loadActivePlan = () => new Promise((res, rej) => {
+                                    sqlite.get(
+                                        "SELECT * FROM sim_trade_plans WHERE account_id = ? AND symbol = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
+                                        [accountId, normalized.symbol],
+                                        (err, row) => (err ? rej(err) : res(row || null)),
+                                    );
+                                });
+
+                                let transactionId;
+                                let normalizedPlan;
+                                const runPlanFlow = new Promise((res, rej) => sqlite.get(
+                                    'SELECT * FROM simulator_sleeves WHERE id = ?', [accountId],
+                                    (err, account) => err ? rej(err) : res(account),
+                                )).then(async (account) => {
+                                    if (!account) throw simOrderError('SIM_INVALID_ORDER', 'simulator account not found');
+                                    if (normalized.type === 'buy') {
+                                        if (!manual && account.slug === 'day-trading' && !order.trade_plan) {
+                                            throw simOrderError('SIM_PLAN_REQUIRED', 'day-trading buys require a structured trade plan');
+                                        }
+                                        const active = await loadActivePlan();
+                                        if (active) throw simOrderError('SIM_PLAN_REQUIRED', `${normalized.symbol} already has an active structured trade plan`);
+                                        if (order.trade_plan) normalizedPlan = normalizeTradePlan({
+                                            ...order.trade_plan, account_id: accountId, symbol: normalized.symbol,
+                                            shares: normalized.shares, planned_entry: normalized.price,
+                                        });
+                                    }
+                                    if (manual && order.closure != null) {
+                                        const active = await loadActivePlan();
+                                        if (normalized.type !== 'sell' || !active || owned - normalized.shares > SIM_SHARE_TOLERANCE) {
+                                            throw simOrderError('SIM_PLAN_REQUIRED', 'structured exit review requires a full exit of an active structured trade plan');
+                                        }
+                                    }
+                                    if (normalized.type === 'sell' && order.close_plan_id != null) {
+                                        const active = await loadActivePlan();
+                                        if (!active || active.id !== Number(order.close_plan_id)) {
+                                            throw simOrderError('SIM_PLAN_REQUIRED', 'close_plan_id must match the active plan for this account and symbol');
+                                        }
+                                        if (owned - normalized.shares > SIM_SHARE_TOLERANCE) {
+                                            throw simOrderError('SIM_PLAN_REQUIRED', 'cannot close an active plan with a partial exit');
+                                        }
+                                    }
+                                    return insertTxn();
+                                }).then((txnId) => {
+                                    transactionId = txnId;
+                                    if (normalized.type === 'buy' && order.trade_plan) return loadActivePlan().then((active) => {
+                                        if (active) throw simOrderError('SIM_PLAN_REQUIRED', `${normalized.symbol} already has an active structured trade plan`);
+                                        return insertPlan(txnId);
+                                    });
+                                    return loadActivePlan().then((active) => {
+                                        if (normalized.type === 'sell' && active && owned - normalized.shares <= SIM_SHARE_TOLERANCE) {
+                                            return closePlan(txnId, active);
+                                        }
+                                        return null;
+                                    });
+                                });
+                                runPlanFlow.then((resolvedPlanId) => {
+                                    const planIdFinal = resolvedPlanId;
+                                    const result = {
+                                        id: transactionId,
+                                        account_id: accountId,
+                                        symbol: normalized.symbol,
+                                        type: normalized.type,
+                                        amount: normalized.amount,
+                                        price: normalized.price,
+                                        shares: normalized.shares,
+                                        fees: normalized.fees,
+                                        client_order_id: clientOrderId,
+                                        intent_hash: intentHash,
+                                        fill_date,
+                                        fill_time,
+                                    };
+                                    if (planIdFinal != null) result.trade_plan_id = planIdFinal;
+                                    if (manual) {
+                                        delete result.client_order_id;
+                                        delete result.intent_hash;
+                                        result.source = 'operator-manual';
+                                        result.evaluated = false;
+                                        return sqlite.run('COMMIT', (commitErr) => {
+                                            if (commitErr) return fail(commitErr);
+                                            finished = true;
+                                            sqlite.close();
+                                            resolve(result);
+                                        });
+                                    }
+                                    sqlite.run(
+                                        `INSERT INTO sim_orders (account_id, client_order_id, intent_hash, transaction_id, result_json, quote_json, fill_date, fill_time)
+                                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                                        [accountId, clientOrderId, intentHash, transactionId, JSON.stringify(result),
+                                            order.quote == null ? null : JSON.stringify(order.quote), fill_date, fill_time],
+                                        (orderErr) => {
+                                            if (orderErr) return fail(orderErr);
+                                            sqlite.run('COMMIT', (commitErr) => {
+                                                if (commitErr) return fail(commitErr);
+                                                finished = true;
+                                                sqlite.close();
+                                                resolve(result);
+                                            });
+                                        },
+                                    );
+                                }, fail);
+                            }).catch(fail);
+                        },
+                    );
+                });
+            });
+        });
+    });
+}
+
+/**
+ * Look up a persisted simulator order by account + client_order_id.
+ * Returns null when absent, otherwise { id, account_id, client_order_id, intent_hash,
+ * transaction_id, result, quote, fill_date, fill_time, created_at }.
+ */
+function getSimOrder(accountId, clientOrderId) {
+    const key = String(clientOrderId == null ? '' : clientOrderId).trim();
+    if (!key) return Promise.resolve(null);
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.get(
+            'SELECT * FROM sim_orders WHERE account_id = ? AND client_order_id = ?',
+            [Number(accountId), key],
+            (err, row) => {
+                sqlite.close();
+                if (err) return reject(err);
+                if (!row) return resolve(null);
+                resolve({
+                    id: row.id,
+                    account_id: row.account_id,
+                    client_order_id: row.client_order_id,
+                    intent_hash: row.intent_hash,
+                    transaction_id: row.transaction_id,
+                    result: JSON.parse(row.result_json),
+                    quote: row.quote_json ? JSON.parse(row.quote_json) : null,
+                    fill_date: row.fill_date,
+                    fill_time: row.fill_time,
+                    created_at: row.created_at,
+                });
+            },
+        );
+    });
+}
+
+/** Find evaluated orders whose intent hash matches (retry-before-quote support). */
+function findSimOrdersByIntentHash(intent, accountId = null) {
+    let hash;
+    try {
+        hash = canonicalIntentHash(intent);
+    } catch (err) {
+        return Promise.reject(err);
+    }
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        const where = accountId == null ? 'WHERE intent_hash = ?' : 'WHERE intent_hash = ? AND account_id = ?';
+        const params = accountId == null ? [hash] : [hash, Number(accountId)];
+        sqlite.all(`SELECT * FROM sim_orders ${where} ORDER BY id DESC`, params, (err, rows) => {
+            sqlite.close();
+            if (err) return reject(err);
+            resolve((rows || []).map((row) => ({
+                id: row.id,
+                account_id: row.account_id,
+                client_order_id: row.client_order_id,
+                intent_hash: row.intent_hash,
+                transaction_id: row.transaction_id,
+                result: JSON.parse(row.result_json),
+                fill_date: row.fill_date,
+                fill_time: row.fill_time,
+            })));
+        });
+    });
+}
+
+
 function deleteAllSimTransactions(accountId = 1) {
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
@@ -1488,12 +1801,15 @@ function deleteAllSimTransactions(accountId = 1) {
                 if (dividendErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(dividendErr); });
                 sqlite.run('DELETE FROM sim_trade_plans WHERE account_id = ?', [id], function(planErr) {
                     if (planErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(planErr); });
-                    sqlite.run('DELETE FROM sim_transactions WHERE account_id = ?', [id], function(txnErr) {
-                        if (txnErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(txnErr); });
-                        const deleted = this.changes;
-                        sqlite.run('COMMIT', (commitErr) => {
-                            sqlite.close();
-                            commitErr ? reject(commitErr) : resolve({ deleted });
+                    sqlite.run('DELETE FROM sim_orders WHERE account_id = ?', [id], function(orderErr) {
+                        if (orderErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(orderErr); });
+                        sqlite.run('DELETE FROM sim_transactions WHERE account_id = ?', [id], function(txnErr) {
+                            if (txnErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(txnErr); });
+                            const deleted = this.changes;
+                            sqlite.run('COMMIT', (commitErr) => {
+                                sqlite.close();
+                                commitErr ? reject(commitErr) : resolve({ deleted });
+                            });
                         });
                     });
                 });
@@ -1738,6 +2054,11 @@ module.exports = {
     recordSimDividend,
     addSimTransactionWithPlan,
     addSimTransactionAndCloseTradePlan,
+    executeSimTradeAtomic,
+    recordSimTradeAtomic,
+    getSimOrder,
+    findSimOrdersByIntentHash,
+    canonicalIntentHash,
     listSimTradePlans,
     getActiveSimTradePlan,
     listSimTransactions,

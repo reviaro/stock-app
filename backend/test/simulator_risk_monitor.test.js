@@ -98,3 +98,55 @@ test('risk monitor reports active plans with no matching position', () => {
     });
     assert.strictEqual(result.alerts[0].type, 'orphan_plan');
 });
+
+test('risk monitor fails closed when quote age is unknown while market is open', () => {
+    const result = buildRiskMonitor({
+        holdings: { MSFT: { shares: 10, avg_cost: 210 } },
+        plans: [{ id: 1, symbol: 'MSFT', status: 'active', shares: 10, stop_price: 300, target_price: 230 }],
+        quotes: { MSFT: { price: 100, timestamp: null } },
+        checkedAt: '2026-08-11T15:00:00.000Z',
+        marketOpen: true,
+    });
+    assert.strictEqual(result.alerts[0].type, 'stale_price');
+    assert.strictEqual(result.alerts[0].severity, 'critical');
+    assert.strictEqual(result.alerts[0].price_age_seconds, null);
+    assert.ok(!result.alerts.some((a) => a.type === 'stop_breached' || a.type === 'target_hit'));
+});
+
+test('risk monitor fails closed when quote age is unparseable while market is open', () => {
+    const result = buildRiskMonitor({
+        holdings: { MSFT: { shares: 10, avg_cost: 210 } },
+        plans: [{ id: 1, symbol: 'MSFT', status: 'active', shares: 10, stop_price: 300, target_price: 230 }],
+        quotes: { MSFT: { price: 100, timestamp: 'not-a-timestamp' } },
+        checkedAt: '2026-08-11T15:00:00.000Z',
+        marketOpen: true,
+    });
+    assert.strictEqual(result.alerts[0].type, 'stale_price');
+    assert.ok(!result.alerts.some((a) => a.type === 'stop_breached' || a.type === 'target_hit'));
+});
+
+test('risk monitor fails closed on future-dated quotes instead of clamping age to zero', () => {
+    const result = buildRiskMonitor({
+        holdings: { MSFT: { shares: 10, avg_cost: 210 } },
+        plans: [{ id: 1, symbol: 'MSFT', status: 'active', shares: 10, stop_price: 300, target_price: 230 }],
+        quotes: { MSFT: { price: 100, timestamp: '2026-08-11T15:05:00.000Z' } },
+        checkedAt: '2026-08-11T15:00:00.000Z',
+        marketOpen: true,
+    });
+    assert.strictEqual(result.alerts[0].type, 'stale_price');
+    assert.strictEqual(result.alerts[0].severity, 'critical');
+    assert.strictEqual(result.alerts[0].price_age_seconds, null);
+    assert.ok(!result.alerts.some((a) => a.type === 'stop_breached' || a.type === 'target_hit'));
+});
+
+test('risk monitor still evaluates thresholds when market is closed and age is unknown', () => {
+    const result = buildRiskMonitor({
+        holdings: { MSFT: { shares: 10, avg_cost: 210 } },
+        plans: [{ id: 1, symbol: 'MSFT', status: 'active', shares: 10, stop_price: 300, target_price: 230 }],
+        quotes: { MSFT: { price: 100, timestamp: null } },
+        checkedAt: '2026-08-11T15:00:00.000Z',
+        marketOpen: false,
+    });
+    assert.ok(result.alerts.some((a) => a.type === 'stop_breached'));
+    assert.ok(!result.alerts.some((a) => a.type === 'stale_price'));
+});

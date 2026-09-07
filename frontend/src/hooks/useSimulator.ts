@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import type { SimAccount, SimHolding, SimTransaction, TaxPreview, TradePayload, SimReview, SimSleeve, SimRiskMonitor, SimJournal, SimReinvestmentSettings, SimDividendPayload } from '@/types/simulator'
 
@@ -138,17 +139,68 @@ export function useRecordSimDividend(accountId: number) {
   })
 }
 
+type PendingOrder = TradePayload & { account_id: number; client_order_id: string }
+const orderListeners = new Set<() => void>()
+const activeOrders = new Set<number>()
+const orderKey = (id: number) => `sim-pending-order:${id}`
+function readOrder(id: number) { return sessionStorage.getItem(orderKey(id)) }
+function storeOrder(id: number, body: string | null) {
+  if (body === null) sessionStorage.removeItem(orderKey(id))
+  else sessionStorage.setItem(orderKey(id), body)
+  orderListeners.forEach(listener => listener())
+}
+function subscribeOrders(listener: () => void) {
+  orderListeners.add(listener)
+  return () => { orderListeners.delete(listener) }
+}
+
 export function useSimTrade(accountId: number) {
   const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (payload: TradePayload) =>
-      apiFetch('/api/simulator/trade', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...payload, account_id: accountId }),
-      }),
+  const stored = useSyncExternalStore(subscribeOrders, () => readOrder(accountId))
+  const pendingOrder: PendingOrder | null = stored ? JSON.parse(stored) : null
+  const mutation = useMutation({
+    retry: false,
+    mutationFn: async (payload: TradePayload | undefined) => {
+      if (activeOrders.has(accountId)) throw new Error('An order is already in flight')
+      let body = readOrder(accountId)
+      if (payload && body) throw new Error('Resolve the unresolved order before a new trade')
+      if (!body && !payload) throw new Error('No unresolved order to retry')
+      if (payload) {
+        body = JSON.stringify({ type: payload.type, symbol: payload.symbol, shares: payload.shares,
+          account_id: accountId, client_order_id: crypto.randomUUID(),
+          ...(payload.trade_plan ? { trade_plan: payload.trade_plan } : {}),
+          ...(payload.journal ? { journal: payload.journal } : {}),
+        })
+        // Persist BEFORE sending; storage failure must prevent the mutation.
+        storeOrder(accountId, body)
+      }
+      activeOrders.add(accountId)
+      try {
+        const res = await fetch('/api/simulator/trade', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+        })
+        if (res.status === 400 || res.status === 409) storeOrder(accountId, null)
+        const json = await res.json()
+        if (!res.ok || json.status !== 'success') throw new Error(json.error || 'Order outcome unknown; reconcile before retrying')
+        storeOrder(accountId, null)
+        return json.data
+      } finally { activeOrders.delete(accountId) }
+    },
     onSuccess: () => invalidateSleeve(qc, accountId),
   })
+  const reconcileOrder = async (): Promise<unknown | null> => {
+    const stored = readOrder(accountId)
+    if (!stored) return null
+    const { client_order_id } = JSON.parse(stored) as PendingOrder
+    const res = await fetch(`/api/simulator/orders/${client_order_id}?account_id=${accountId}`)
+    if (res.status === 404) return null
+    const json = await res.json()
+    if (!res.ok || json.status !== 'success') throw new Error(json.error || 'Order lookup failed; try again')
+    storeOrder(accountId, null)
+    invalidateSleeve(qc, accountId)
+    return json.data?.result ?? json.data
+  }
+  return { ...mutation, pendingOrder, retryOrder: () => mutation.mutateAsync(undefined), reconcileOrder }
 }
 
 export function useSimReset(accountId: number) {

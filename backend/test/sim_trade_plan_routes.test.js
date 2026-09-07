@@ -54,6 +54,7 @@ before(async () => {
 
 beforeEach(async () => {
     quoteData = { price: 200, timestamp: new Date().toISOString(), marketState: 'REGULAR', isDemo: false, source: 'alpaca_iex' };
+    await db.deleteAllSimTransactions(1);
     await db.deleteAllSimTransactions(2);
     const sqlite = db.getDb();
     await new Promise((resolve, reject) => sqlite.run('DELETE FROM sim_trade_plans', [], (err) => {
@@ -89,7 +90,7 @@ const tradePlan = {
     setup: 'catalyst continuation',
     catalyst: 'earnings',
     thesis: 'Relative strength persists.',
-    stop_price: 205,
+    stop_price: 190,
     target_price: 220,
     invalidation: 'Loses opening range.',
 };
@@ -97,22 +98,27 @@ const tradePlan = {
 test('day-trading buy can persist a structured plan tied to the transaction', async () => {
     await fundDaySleeve();
     const buy = await request('POST', '/api/simulator/trade', {
-        account_id: 2, type: 'buy', symbol: 'MSFT', shares: 10, price: 210, txn_date: '2026-08-11', trade_plan: tradePlan,
+        account_id: 2, type: 'buy', symbol: 'MSFT', shares: 10, price: 210, txn_date: '2026-08-11',
+        client_order_id: 'plan-buy-1', trade_plan: tradePlan,
     });
     assert.strictEqual(buy.status, 200);
     assert.ok(buy.body.data.trade_plan_id);
+    assert.strictEqual(buy.body.data.price, 200, 'caller price must be ignored');
 
     const plans = await request('GET', '/api/simulator/trade-plans?account_id=2');
     assert.strictEqual(plans.status, 200);
     assert.strictEqual(plans.body.data[0].entry_transaction_id, buy.body.data.id);
-    assert.strictEqual(plans.body.data[0].planned_risk, 50);
+    assert.strictEqual(plans.body.data[0].planned_risk, 100);
 });
 
 test('risk monitor is read-only and reports a documented stop breach', async () => {
     await fundDaySleeve();
+    quoteData.price = 210;
     await request('POST', '/api/simulator/trade', {
-        account_id: 2, type: 'buy', symbol: 'MSFT', shares: 10, price: 210, txn_date: '2026-08-11', trade_plan: tradePlan,
+        account_id: 2, type: 'buy', symbol: 'MSFT', shares: 10, price: 210, txn_date: '2026-08-11',
+        client_order_id: 'plan-buy-2', trade_plan: { ...tradePlan, stop_price: 205 },
     });
+    quoteData.price = 200;
 
     const monitor = await request('GET', '/api/simulator/risk-monitor?account_id=2');
     assert.strictEqual(monitor.status, 200);
@@ -128,7 +134,8 @@ test('risk monitor is read-only and reports a documented stop breach', async () 
 test('risk monitor rejects demo fallback prices as unavailable market data', async () => {
     await fundDaySleeve();
     await request('POST', '/api/simulator/trade', {
-        account_id: 2, type: 'buy', symbol: 'MSFT', shares: 10, price: 210, txn_date: '2026-08-11', trade_plan: tradePlan,
+        account_id: 2, type: 'buy', symbol: 'MSFT', shares: 10, price: 210, txn_date: '2026-08-11',
+        client_order_id: 'plan-buy-3', trade_plan: tradePlan,
     });
     quoteData = { price: 200, timestamp: null, marketState: 'UNKNOWN', isDemo: true };
 
@@ -140,10 +147,13 @@ test('risk monitor rejects demo fallback prices as unavailable market data', asy
 test('selling the full position closes the active plan and feeds R analytics', async () => {
     await fundDaySleeve();
     await request('POST', '/api/simulator/trade', {
-        account_id: 2, type: 'buy', symbol: 'MSFT', shares: 10, price: 210, txn_date: '2026-08-11', trade_plan: tradePlan,
+        account_id: 2, type: 'buy', symbol: 'MSFT', shares: 10, price: 210, txn_date: '2026-08-11',
+        client_order_id: 'plan-buy-4', trade_plan: tradePlan,
     });
+    quoteData.price = 215;
     const sell = await request('POST', '/api/simulator/trade', {
         account_id: 2, type: 'sell', symbol: 'MSFT', shares: 10, price: 215, txn_date: '2026-08-11',
+        client_order_id: 'plan-sell-4',
         journal: { exit_reason: 'time_exit', thesis_valid: true, mfe: 1.5, mae: -0.5, review_notes: 'Good process.' },
     });
     assert.strictEqual(sell.status, 200);
@@ -151,36 +161,44 @@ test('selling the full position closes the active plan and feeds R analytics', a
     const journal = await request('GET', '/api/simulator/journal?account_id=2');
     assert.strictEqual(journal.status, 200);
     assert.strictEqual(journal.body.data.analytics.closed_trade_count, 1);
-    assert.strictEqual(journal.body.data.analytics.average_r, 1);
+    assert.strictEqual(journal.body.data.analytics.average_r, 1.5);
     assert.strictEqual(journal.body.data.trades[0].exit_reason, 'time_exit');
 });
 
-test('structured exit uses the full closed position size after an unplanned add-on', async () => {
+test('planless add-on is rejected; full exit closes with server-computed metrics', async () => {
     await fundDaySleeve();
     await request('POST', '/api/simulator/trade', {
-        account_id: 2, type: 'buy', symbol: 'MSFT', shares: 10, price: 210, txn_date: '2026-08-11', trade_plan: tradePlan,
+        account_id: 2, type: 'buy', symbol: 'MSFT', shares: 10, price: 210, txn_date: '2026-08-11',
+        client_order_id: 'plan-buy-5', trade_plan: tradePlan,
     });
-    await request('POST', '/api/simulator/trade', {
+    const addOn = await request('POST', '/api/simulator/trade', {
         account_id: 2, type: 'buy', symbol: 'MSFT', shares: 5, price: 212, txn_date: '2026-08-11',
+        client_order_id: 'plan-add-5',
     });
+    assert.strictEqual(addOn.status, 400);
+    assert.match(addOn.body.error, /trade plan/i);
+
+    quoteData.price = 215;
     const sell = await request('POST', '/api/simulator/trade', {
-        account_id: 2, type: 'sell', symbol: 'MSFT', shares: 15, price: 215, txn_date: '2026-08-11',
+        account_id: 2, type: 'sell', symbol: 'MSFT', shares: 10, price: 215, txn_date: '2026-08-11',
+        client_order_id: 'plan-sell-5',
         journal: { exit_reason: 'time_exit', thesis_valid: true },
     });
     assert.strictEqual(sell.status, 200);
 
     const journal = await request('GET', '/api/simulator/journal?account_id=2');
-    assert.strictEqual(journal.body.data.trades[0].realized_pnl, 65);
-    assert.strictEqual(journal.body.data.trades[0].realized_r, 1.3);
-    assert.strictEqual(journal.body.data.trades[0].exit_shares, 15);
-    assert.strictEqual(journal.body.data.trades[0].exit_cost_basis, 3160);
+    assert.strictEqual(journal.body.data.trades[0].realized_pnl, 150);
+    assert.strictEqual(journal.body.data.trades[0].realized_r, 1.5);
+    assert.strictEqual(journal.body.data.trades[0].exit_shares, 10);
+    assert.strictEqual(journal.body.data.trades[0].exit_cost_basis, 2000);
 });
 
 test('open position without a plan is visible as a missing-plan alert', async () => {
-    await fundDaySleeve();
+    await request('PATCH', '/api/simulator/account', { account_id: 1, deposit: 5000 });
     await request('POST', '/api/simulator/trade', {
-        account_id: 2, type: 'buy', symbol: 'AAPL', shares: 10, price: 100, txn_date: '2026-08-11',
+        account_id: 1, type: 'buy', symbol: 'AAPL', shares: 10, price: 100, txn_date: '2026-08-11',
+        client_order_id: 'lt-buy-1',
     });
-    const monitor = await request('GET', '/api/simulator/risk-monitor?account_id=2');
+    const monitor = await request('GET', '/api/simulator/risk-monitor?account_id=1');
     assert.strictEqual(monitor.body.data.alerts[0].type, 'missing_plan');
 });
