@@ -112,7 +112,7 @@ test('HTTP registry adds versions and evidence runs but never promotes or trades
     }
 
     const detail = await request('GET', `/api/strategy-lab/experiments/${experimentId}`);
-    assert.strictEqual(detail.body.data.promotion_readiness.live.ready, true);
+    assert.strictEqual(detail.body.data.promotion_readiness.live.ready, false);
     assert.strictEqual(detail.body.data.versions[0].runs.length, 3);
     assert.doesNotMatch(JSON.stringify(detail.body.data), /broker_order|order_id|promoted_at/i);
 });

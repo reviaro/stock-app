@@ -25,6 +25,7 @@ const portfolioLabRoutes = require('./routes/portfolio_lab');
 const { initUniverseScheduler } = require('./services/universeCache');
 const { initSnapshotScheduler } = require('./services/snapshotScheduler');
 const { createAuthFromEnv } = require('./services/auth');
+const { authorizeApiRequest } = require('./services/api_capabilities');
 
 const PORT = Number(process.env.PORT || 3002);
 const FRONTEND_DIST = path.join(__dirname, '..', 'frontend', 'dist');
@@ -76,6 +77,7 @@ function createApp({ auth = createAuthFromEnv(), env = process.env } = {}) {
 
     // Protect every data and mutation API. Loopback automation is allowed by auth policy.
     app.use('/api', auth.requireAuth);
+    app.use('/api', authorizeApiRequest);
     app.use('/api/watchlist', watchlistRoutes);
     app.use('/api/stock', stockRoutes);
     app.use('/api/stock/search', stockRoutes);
@@ -133,6 +135,7 @@ async function start() {
 
         initUniverseScheduler();
         initSnapshotScheduler();
+        require('./services/simulator_performance').initSimulatorPerformanceScheduler();
 
         const host = resolveListenHost();
         return app.listen(PORT, host, () => {

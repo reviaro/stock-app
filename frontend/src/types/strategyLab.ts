@@ -30,6 +30,7 @@ export interface StrategyRun {
 }
 
 export interface StrategyVersion {
+  evaluations?: Array<{ id: number; artifact_hash: string; assessment: { passed: boolean; blockers: string[] }; metrics: { twr_pct: number | null; max_drawdown_pct: number | null; closed_trade_count: number } }>
   id: number
   experiment_id: number
   version_number: number

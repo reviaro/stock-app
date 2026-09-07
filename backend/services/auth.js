@@ -50,6 +50,7 @@ function createAuth({
     passwordHash,
     sessionSecret,
     apiToken = '',
+    simulatorTokens = [],
     secureCookie = false,
     allowLoopback = true,
     sessionTtlSeconds = SESSION_TTL_SECONDS,
@@ -60,6 +61,16 @@ function createAuth({
 } = {}) {
     if (!username || !passwordHash || !sessionSecret || String(sessionSecret).length < 32) {
         throw new Error('Dashboard auth requires username, password hash, and a session secret of at least 32 characters');
+    }
+    if (!Array.isArray(simulatorTokens) || simulatorTokens.some((entry) =>
+        !entry || typeof entry.token !== 'string' || entry.token.length < 32
+        || !Number.isSafeInteger(entry.account_id) || entry.account_id <= 0
+        || (entry.manage_limits !== undefined && typeof entry.manage_limits !== 'boolean'))) {
+        throw new Error('Simulator credentials require a token of at least 32 characters, positive account_id, and optional boolean manage_limits');
+    }
+    const tokens = simulatorTokens.map((entry) => entry.token);
+    if (new Set(tokens).size !== tokens.length || tokens.includes(apiToken)) {
+        throw new Error('Simulator credentials must be unique and distinct from the general API token');
     }
 
     const attempts = new Map();
@@ -162,20 +173,33 @@ function createAuth({
     }
 
     function requireAuth(req, res, next) {
+        // An explicitly supplied credential wins over cookies; invalid bearer
+        // credentials must never fall through to the loopback bypass.
+        if (req.get('authorization')) {
+            const header = req.get('authorization');
+            const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+            const agent = simulatorTokens.find((entry) => safeEqualText(token, entry.token));
+            if (agent) {
+                req.auth = { type: 'bearer', role: 'simulator-agent', account_id: agent.account_id,
+                    manage_limits: agent.manage_limits === true, username: `simulator-${agent.account_id}` };
+                return next();
+            }
+            if (bearerIsValid(req)) {
+                req.auth = { type: 'bearer', role: 'reader', username };
+                return next();
+            }
+            return res.status(401).json({ status: 'error', error: 'Invalid API credential' });
+        }
         const session = sessionFromRequest(req);
         if (session) {
             if (UNSAFE_METHODS.has(req.method) && !sameOrigin(req)) {
                 return res.status(403).json({ status: 'error', error: 'Request origin is not allowed' });
             }
-            req.auth = { type: 'session', username: session.sub };
-            return next();
-        }
-        if (bearerIsValid(req)) {
-            req.auth = { type: 'bearer', username };
+            req.auth = { type: 'session', role: 'operator', username: session.sub };
             return next();
         }
         if (isTrustedLoopbackAutomation(req)) {
-            req.auth = { type: 'loopback', username };
+            req.auth = { type: 'loopback', role: 'reader', username };
             return next();
         }
         return res.status(401).json({ status: 'error', error: 'Authentication required' });
@@ -244,6 +268,7 @@ function createAuthFromEnv(env = process.env) {
         passwordHash: env.STOCK_DASHBOARD_PASSWORD_HASH,
         sessionSecret: env.STOCK_DASHBOARD_SESSION_SECRET,
         apiToken: env.STOCK_DASHBOARD_API_TOKEN || '',
+        simulatorTokens: JSON.parse(env.STOCK_DASHBOARD_SIMULATOR_TOKENS || '[]'),
         secureCookie: env.STOCK_DASHBOARD_SECURE_COOKIE === '1',
         allowLoopback: env.STOCK_DASHBOARD_ALLOW_LOOPBACK !== '0',
         publicOrigin: env.STOCK_DASHBOARD_PUBLIC_ORIGIN || '',

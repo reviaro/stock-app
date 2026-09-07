@@ -1,3 +1,4 @@
+const { seedRiskPolicies, executeTestOrder } = require('../test-support/simulator_risk_fixture');
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -6,7 +7,7 @@ const path = require('node:path');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sim-atomic-'));
 process.env.DB_PATH_OVERRIDE = path.join(dir, 'test.db');
 const db = require('../database/db');
-before(() => db.initDb());
+before(async () => { await db.initDb(); await seedRiskPolicies(); });
 after(() => fs.rmSync(dir, { recursive: true, force: true }));
 const buy = (extra = {}) => ({ account_id: 1, type: 'buy', symbol: 'AAPL', shares: 1, price: 10, txn_date: '2026-09-04', ...extra });
 test('normalization rejects malformed new writes without changing historical rows', async () => {
@@ -27,20 +28,20 @@ test('atomic trade: resource checks, idempotent replay, conflict, order metadata
         intent: { symbol: 'AAPL', shares: 10, price: 5, type: 'buy' },
         quote: { symbol: 'AAPL', price: 5, source: 'hybrid', quote_timestamp: '2026-09-04T15:00:00Z' },
     };
-    const r1 = await db.executeSimTradeAtomic(order);
+    const r1 = await executeTestOrder(db, order);
     assert.ok(Number.isInteger(r1.id));
     assert.equal(r1.symbol, 'AAPL');
     assert.equal(r1.price, 5);
     assert.equal(r1.shares, 10);
     assert.equal(r1.fees, 1);
 
-    const replay = await db.executeSimTradeAtomic(order);
+    const replay = await executeTestOrder(db, order);
     assert.deepEqual(replay, r1);
     const txns = await db.listSimTransactions(1);
     assert.equal(txns.filter((t) => t.symbol === 'AAPL' && t.type === 'buy').length, 1);
 
     await assert.rejects(
-        db.executeSimTradeAtomic({ ...order, intent: { symbol: 'AAPL', shares: 10, price: 6, type: 'buy' } }),
+        executeTestOrder(db, { ...order, intent: { symbol: 'AAPL', shares: 10, price: 6, type: 'buy' } }),
         (err) => err.code === 'SIM_ORDER_CONFLICT',
     );
     assert.equal((await db.listSimTransactions(1)).filter((t) => t.symbol === 'AAPL').length, 1);
@@ -49,16 +50,16 @@ test('atomic trade: resource checks, idempotent replay, conflict, order metadata
     assert.equal(saved.client_order_id, 'k1');
     assert.equal(saved.intent_hash, db.canonicalIntentHash(order.intent));
     assert.equal(saved.result.id, r1.id);
-    assert.equal(saved.quote.source, 'hybrid');
+    assert.equal(saved.quote.source, 'alpaca_iex');
     assert.equal(saved.fill_date, '2026-09-04');
     assert.ok(/^\d{2}:\d{2}:\d{2}$/.test(saved.fill_time));
 
     await assert.rejects(
-        db.executeSimTradeAtomic({ ...order, client_order_id: 'k2', transaction: buy({ shares: 100000 }) }),
+        executeTestOrder(db, { ...order, client_order_id: 'k2', transaction: buy({ shares: 100000 }) }),
         (err) => err.code === 'SIM_INSUFFICIENT_CASH',
     );
     await assert.rejects(
-        db.executeSimTradeAtomic({ ...order, client_order_id: 'k3', transaction: buy({ type: 'sell', shares: 999 }) }),
+        executeTestOrder(db, { ...order, client_order_id: 'k3', transaction: buy({ type: 'sell', shares: 999 }) }),
         (err) => err.code === 'SIM_INSUFFICIENT_SHARES',
     );
     assert.equal(await db.getSimOrder(1, 'k2'), null);
@@ -70,27 +71,27 @@ const orderFor = (key, txn, extra = {}) => ({ transaction: txn, client_order_id:
 test('day buys require a valid fill-bound plan under the write lock', async () => {
     await db.addSimTransaction({ account_id: 2, type: 'deposit', amount: 1000, txn_date: '2026-09-04' });
     const txn = buy({ account_id: 2, symbol: 'DAY', shares: 10, price: 10 });
-    await assert.rejects(db.executeSimTradeAtomic(orderFor('no-plan', txn)), { code: 'SIM_PLAN_REQUIRED' });
-    await assert.rejects(db.executeSimTradeAtomic(orderFor('bad-plan', txn, { trade_plan: planFor(txn, { stop_price: 11 }) })));
-    const result = await db.executeSimTradeAtomic(orderFor('day-entry', txn, { trade_plan: planFor(txn, { shares: 999, planned_entry: 999, planned_risk: 999 }) }));
+    await assert.rejects(executeTestOrder(db, orderFor('no-plan', txn)), { code: 'SIM_PLAN_REQUIRED' });
+    await assert.rejects(executeTestOrder(db, orderFor('bad-plan', txn, { trade_plan: planFor(txn, { stop_price: 11 }) })));
+    const result = await executeTestOrder(db, orderFor('day-entry', txn, { trade_plan: planFor(txn, { shares: 999, planned_entry: 999, planned_risk: 999 }) }));
     const active = await db.getActiveSimTradePlan(2, 'DAY');
     assert.equal(active.entry_transaction_id, result.id);
     assert.equal(active.shares, 10);
     assert.equal(active.planned_entry, 10);
     assert.equal(active.planned_risk, 10);
-    await assert.rejects(db.executeSimTradeAtomic(orderFor('day-add', txn, { trade_plan: planFor(txn) })), { code: 'SIM_PLAN_REQUIRED' });
+    await assert.rejects(executeTestOrder(db, orderFor('day-add', txn, { trade_plan: planFor(txn) })), { code: 'SIM_PLAN_REQUIRED' });
     assert.equal((await db.listSimTransactions(2)).filter(t => t.type === 'buy').length, 1);
 });
 
 test('final exit automatically closes from fill history; partial exits stay active', async () => {
     const entry = buy({ symbol: 'EXIT', shares: 10, price: 10, fees: 2 });
-    const opened = await db.executeSimTradeAtomic(orderFor('exit-entry', entry, { trade_plan: planFor(entry) }));
-    await db.executeSimTradeAtomic(orderFor('exit-part', { ...entry, type: 'sell', shares: 4, price: 12, fees: 1 }));
+    const opened = await executeTestOrder(db, orderFor('exit-entry', entry, { trade_plan: planFor(entry) }));
+    await executeTestOrder(db, orderFor('exit-part', { ...entry, type: 'sell', shares: 4, price: 12, fees: 1 }));
     assert.equal((await db.getActiveSimTradePlan(1, 'EXIT')).id, opened.trade_plan_id);
     const finalOrder = orderFor('exit-final', { ...entry, type: 'sell', shares: 6, price: 11, fees: 1 }, {
         closure: { exit_price: 999, realized_pnl: 999, realized_r: 999, exit_shares: 999, exit_cost_basis: 999, fees: 999 },
     });
-    const closed = await db.executeSimTradeAtomic(finalOrder);
+    const closed = await executeTestOrder(db, finalOrder);
     assert.equal(closed.trade_plan_id, opened.trade_plan_id);
     assert.equal(await db.getActiveSimTradePlan(1, 'EXIT'), null);
     const plan = (await db.listSimTradePlans(1)).find(p => p.id === opened.trade_plan_id);
@@ -101,12 +102,12 @@ test('final exit automatically closes from fill history; partial exits stay acti
     assert.equal(plan.realized_pnl, 10);
     assert.equal(plan.realized_r, 1);
     assert.equal(plan.exit_reason, 'discretionary');
-    assert.deepEqual(await db.executeSimTradeAtomic(finalOrder), closed);
+    assert.deepEqual(await executeTestOrder(db, finalOrder), closed);
 });
 
 test('explicit close rejects mismatched accounts/symbols and premature partial close atomically', async () => {
     const entry = buy({ symbol: 'SAFE', shares: 2 });
-    const opened = await db.executeSimTradeAtomic(orderFor('safe-entry', entry, { trade_plan: planFor(entry) }));
+    const opened = await executeTestOrder(db, orderFor('safe-entry', entry, { trade_plan: planFor(entry) }));
     const before = await db.listSimTransactions(1);
     const cases = [
         orderFor('wrong-symbol', buy({ symbol: 'AAPL', type: 'sell', shares: 1 }), { close_plan_id: opened.trade_plan_id }),
@@ -114,7 +115,7 @@ test('explicit close rejects mismatched accounts/symbols and premature partial c
         orderFor('premature', { ...entry, type: 'sell', shares: 1 }, { close_plan_id: opened.trade_plan_id }),
     ];
     for (const order of cases) {
-        await assert.rejects(db.executeSimTradeAtomic(order), { code: 'SIM_PLAN_REQUIRED' });
+        await assert.rejects(executeTestOrder(db, order), { code: 'SIM_PLAN_REQUIRED' });
         assert.equal(await db.getSimOrder(order.transaction.account_id, order.client_order_id), null);
     }
     assert.deepEqual(await db.listSimTransactions(1), before);
@@ -133,7 +134,7 @@ test('cash dividends fund atomic buys: locked snapshot matches displayed cash', 
     await db.recordSimDividend({ account_id: 1, symbol: 'AAPL', amount: 50, txn_date: '2026-09-02', reinvestment_mode: 'cash', idempotency_key: 'div-key-1' });
     const withDividend = computeCashBalance(await db.listSimTransactions(1));
     assert.ok(Math.abs(withDividend - before - 50) < 0.000001, `displayed cash should rise by 50, delta ${withDividend - before}`);
-    await db.executeSimTradeAtomic({
+    await executeTestOrder(db, {
         transaction: { account_id: 1, type: 'buy', symbol: 'F', shares: 1, price: 50, txn_date: '2026-09-03' },
         client_order_id: 'div-funded-1',
         intent: { type: 'buy', symbol: 'F', shares: 1 },
@@ -146,13 +147,16 @@ test('real concurrent conflicting buys: exactly one commits', async () => {
     // Isolated fresh account state: cash covers exactly ONE of the two buys,
     // so a resource re-check race would let both through.
     const iso = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'sim-atomic-race-'));
+    const originalModule = require.cache[require.resolve('../database/db')];
+    const originalPath = process.env.DB_PATH_OVERRIDE;
     process.env.DB_PATH_OVERRIDE = require('path').join(iso, 'race.db');
     delete require.cache[require.resolve('../database/db')];
     const dbIso = require('../database/db');
     try {
         await dbIso.initDb();
+        await seedRiskPolicies();
         await dbIso.addSimTransaction({ account_id: 1, type: 'deposit', amount: 100, txn_date: '2026-09-04' });
-        const mk = (key) => dbIso.executeSimTradeAtomic({
+        const mk = (key) => executeTestOrder(dbIso, {
             transaction: buy({ symbol: 'K1', shares: 60, price: 1 }),
             client_order_id: key,
             intent: { symbol: 'K1', shares: 60 },
@@ -167,14 +171,16 @@ test('real concurrent conflicting buys: exactly one commits', async () => {
         const rows = (await dbIso.listSimTransactions(1)).filter((t) => t.symbol === 'K1' && t.type === 'buy');
         assert.equal(rows.length, 1);
     } finally {
+        require.cache[require.resolve('../database/db')] = originalModule;
+        process.env.DB_PATH_OVERRIDE = originalPath;
         require('fs').rmSync(iso, { recursive: true, force: true });
     }
 });
 
 test('real concurrent buy and sell on different symbols both commit', async () => {
     const outcomes = await Promise.allSettled([
-        db.executeSimTradeAtomic({ transaction: buy({ symbol: 'K2', shares: 10, price: 5 }), client_order_id: 'm1', intent: { symbol: 'K2' }, quote: { symbol: 'K2', price: 5, source: 'test' } }),
-        db.executeSimTradeAtomic({ transaction: buy({ symbol: 'AAPL', type: 'sell', shares: 5, price: 6 }), client_order_id: 'm2', intent: { symbol: 'AAPL' }, quote: { symbol: 'AAPL', price: 6, source: 'test' } }),
+        executeTestOrder(db, { transaction: buy({ symbol: 'K2', shares: 10, price: 5 }), client_order_id: 'm1', intent: { symbol: 'K2' }, quote: { symbol: 'K2', price: 5, source: 'test' } }),
+        executeTestOrder(db, { transaction: buy({ symbol: 'AAPL', type: 'sell', shares: 5, price: 6 }), client_order_id: 'm2', intent: { symbol: 'AAPL' }, quote: { symbol: 'AAPL', price: 6, source: 'test' } }),
     ]);
     assert(outcomes.every((o) => o.status === 'fulfilled'), outcomes.map((o) => o.reason && o.reason.message).join('; '));
     const txns = await db.listSimTransactions(1);
@@ -190,4 +196,3 @@ test('real concurrent buy and sell on different symbols both commit', async () =
     assert.equal(Object.hasOwn(globalThis, 'transactionId'), false, 'order IDs must not leak into process globals');
     assert.equal(Object.hasOwn(globalThis, 'planIdFinal'), false);
 });
-

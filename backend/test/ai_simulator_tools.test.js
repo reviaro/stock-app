@@ -1,3 +1,4 @@
+const { seedRiskPolicies } = require('../test-support/simulator_risk_fixture');
 const { test, before, beforeEach, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -27,6 +28,7 @@ const today = new Date().toISOString().slice(0, 10);
 before(async () => {
     if (fs.existsSync(TEST_DB)) fs.unlinkSync(TEST_DB);
     await db.initDb();
+    await seedRiskPolicies();
 });
 
 beforeEach(async () => {

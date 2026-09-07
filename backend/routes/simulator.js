@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+const controls = require('../services/simulator_controls');
+const performance = require('../services/simulator_performance');
 const db = require('../database/db');
 const pybridge = require('../services/pybridge');
 const {
@@ -71,7 +73,7 @@ function reinvestmentMetrics(account, txns, cash, totalValue, dataComplete = tru
 router.get('/accounts', async (_req, res) => {
     try {
         const accounts = await db.listSimAccounts();
-        res.json({ status: 'success', data: accounts });
+        res.json({ status: 'success', data: reqAgentAccounts(_req, accounts) });
     } catch (err) {
         sendError(res, err);
     }
@@ -125,12 +127,12 @@ router.patch('/account', async (req, res) => {
         if (body.deposit != null) {
             const amount = Number(body.deposit);
             if (amount <= 0) return res.status(400).json({ status: 'error', error: 'deposit must be > 0' });
-            await db.addSimTransaction({ account_id: accountId, type: 'deposit', amount, txn_date: today });
+            await db.addSimTransaction({ account_id: accountId, type: 'deposit', amount, txn_date: today }, await performance.quotesFor(accountId));
         }
         if (body.withdrawal != null) {
             const amount = Number(body.withdrawal);
             if (amount <= 0) return res.status(400).json({ status: 'error', error: 'withdrawal must be > 0' });
-            await db.addSimTransaction({ account_id: accountId, type: 'withdrawal', amount, txn_date: today });
+            await db.addSimTransaction({ account_id: accountId, type: 'withdrawal', amount, txn_date: today }, await performance.quotesFor(accountId));
         }
 
         const [updatedAccount, txns] = await Promise.all([db.getSimAccount(accountId), db.listSimTransactions(accountId)]);
@@ -442,16 +444,20 @@ router.get('/tax-preview', async (req, res) => {
 // GET /api/simulator/review — performance summary and Buffett action log
 router.get('/review', async (req, res) => {
     try {
-        const { txns } = await accountAndTransactions(req);
+        const { accountId, txns } = await accountAndTransactions(req);
         const holdings = computeHoldings(txns);
         const prices = {};
         await Promise.all(Object.keys(holdings).map(async (symbol) => {
             try {
                 const info = await pybridge.getStockInfo(symbol);
-                if (typeof info?.data?.price === 'number') prices[symbol] = info.data.price;
+                if (typeof info?.data?.price === 'number' && info.data.price > 0 && Number.isFinite(info.data.price)
+                    && !info.data.isDemo && !info.data.is_demo && !info.meta?.stale) prices[symbol] = info.data.price;
             } catch { /* non-fatal */ }
         }));
-        res.json({ status: 'success', data: buildSimulatorReview(txns, prices) });
+        const measured = await performance.getPerformance(accountId);
+        res.json({ status: 'success', data: { ...buildSimulatorReview(txns, prices), twr_pct: measured.twr_pct,
+            observed_drawdown_pct: measured.max_drawdown_pct, performance_blockers: measured.blockers,
+            observation_count: measured.observation_count } });
     } catch (err) {
         sendError(res, err);
     }
@@ -478,6 +484,62 @@ router.post('/reset', async (req, res) => {
     } catch (err) {
         sendError(res, err);
     }
+});
+
+function reqAgentAccounts(req, accounts) {
+    return req.auth?.role === 'simulator-agent' ? accounts.filter((a) => a.id === req.auth.account_id) : accounts;
+}
+
+router.get('/risk-policy', async (req, res) => {
+    try {
+        const { accountId } = await requireSleeve(req);
+        const policy = await controls.connection((conn) => controls.latestPolicy(conn, accountId));
+        res.json({ status: 'success', data: { policy, entries_enabled: Boolean(policy) } });
+    } catch (err) { sendError(res, err); }
+});
+router.put('/risk-policy', async (req, res) => {
+    try {
+        const { accountId } = await requireSleeve(req);
+        const policy = await controls.setPolicy(accountId, req.body, req.auth?.username || 'operator');
+        res.json({ status: 'success', data: policy });
+    } catch (err) { sendError(res, err); }
+});
+router.get('/performance', async (req, res) => {
+    try {
+        const { accountId } = await requireSleeve(req);
+        res.json({ status: 'success', data: await performance.getPerformance(accountId, req.query.run_id || null) });
+    } catch (err) { sendError(res, err); }
+});
+router.post('/performance/capture', async (req, res) => {
+    try {
+        const { accountId } = await requireSleeve(req);
+        res.json({ status: 'success', data: await performance.captureCurrent(accountId) });
+    } catch (err) { sendError(res, err); }
+});
+router.get('/runs', async (req, res) => {
+    try {
+        const { accountId } = await requireSleeve(req);
+        const runs = await controls.connection((conn) => controls.all(conn, 'SELECT * FROM sim_evaluation_sessions WHERE account_id=? ORDER BY started_at DESC', [accountId]));
+        res.json({ status: 'success', data: runs.map((r) => ({ ...r, config: JSON.parse(r.config_json) })) });
+    } catch (err) { sendError(res, err); }
+});
+router.post('/runs', async (req, res) => {
+    try {
+        const { accountId } = await requireSleeve(req);
+        res.status(201).json({ status: 'success', data: await performance.startRun(accountId, req.body) });
+    } catch (err) { sendError(res, err); }
+});
+router.post('/runs/:id/archive', async (req, res) => {
+    try {
+        const { accountId } = await requireSleeve(req);
+        res.json({ status: 'success', data: await performance.archiveRun(accountId, req.params.id) });
+    } catch (err) { sendError(res, err); }
+});
+router.post('/decisions', async (req, res) => {
+    try {
+        const { accountId } = await requireSleeve(req);
+        res.status(201).json({ status: 'success', data: await performance.recordDecision(accountId, req.body) });
+    } catch (err) { sendError(res, err); }
 });
 
 module.exports = router;

@@ -364,8 +364,6 @@ const chatTools = {
   simulator_sell: tools.simulator_sell,
   simulator_tax_preview: tools.simulator_tax_preview,
   simulator_get_transactions: tools.simulator_get_transactions,
-  simulator_deposit: tools.simulator_deposit,
-  simulator_reset: tools.simulator_reset,
 };
 
 const memoPrompts = {

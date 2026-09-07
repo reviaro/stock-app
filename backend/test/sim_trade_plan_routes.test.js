@@ -1,3 +1,4 @@
+const { seedRiskPolicies } = require('../test-support/simulator_risk_fixture');
 const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -45,6 +46,7 @@ function cleanupTestDb() {
 before(async () => {
     cleanupTestDb();
     await db.initDb();
+    await seedRiskPolicies();
     const app = express();
     app.use(express.json());
     app.use('/api/simulator', simRouter);

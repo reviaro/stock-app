@@ -18,7 +18,7 @@ function Gate({ label, gate }: { label: string; gate: PromotionGate }) {
     <div className={`rounded-md border px-3 py-2 text-xs ${gate.ready ? 'border-green-500/40 bg-green-500/10' : 'border-amber-500/40 bg-amber-500/10'}`}>
       <div className="flex items-center justify-between gap-2">
         <strong>{label}</strong>
-        <span className="uppercase text-[10px] font-semibold">{gate.ready ? 'evidence complete' : 'blocked'}</span>
+        <span className="uppercase text-[10px] font-semibold">{gate.ready ? 'verified criteria met' : 'blocked'}</span>
       </div>
       {!gate.ready && <p className="mt-1 text-muted-foreground">{gate.blockers.map(blockerLabel).join(' · ')}</p>}
     </div>
@@ -105,7 +105,7 @@ export function StrategyLabPage() {
       <div className="mx-auto max-w-[1600px] space-y-4">
         <header>
           <h1 className="text-2xl font-bold">Strategy Research Lab</h1>
-          <p className="mt-1 text-xs text-muted-foreground">Evidence registry only. It records hypotheses and test results; it cannot promote a strategy or place an order.</p>
+          <p className="mt-1 text-xs text-muted-foreground">Manual evidence is a research record, not proof of readiness. Verified results are computed from archived simulator runs. This page cannot promote a strategy or place an order.</p>
         </header>
 
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-[340px_1fr]">
@@ -184,13 +184,19 @@ export function StrategyLabPage() {
                 </div>
 
                 <Card>
-                  <CardHeader className="pb-2"><CardTitle>Version history and independent results</CardTitle></CardHeader>
+                    <CardHeader className="pb-2"><CardTitle>Version history and evidence</CardTitle></CardHeader>
                   <CardContent className="space-y-3 px-3">
                     {detail.data.versions.length === 0 && <p className="text-xs text-muted-foreground">No rule versions yet.</p>}
                     {detail.data.versions.map((version) => (
                       <div key={version.id} className="rounded-md border border-border p-3 text-xs">
                         <div className="flex items-center justify-between"><strong>Version {version.version_number}</strong><span className="text-muted-foreground">{version.runs.length} evidence run(s)</span></div>
                         <pre className="mt-2 overflow-x-auto rounded bg-secondary/70 p-2 text-[11px]">{JSON.stringify(version.rules, null, 2)}</pre>
+                        {version.evaluations?.map((result) => <div key={result.id} className="mt-2 rounded border border-border p-2">
+                          <strong>Verified simulator evaluation #{result.id}: {result.assessment.passed ? 'criteria met' : 'criteria not met'}</strong>
+                          <p>Time-weighted return: {result.metrics.twr_pct == null ? 'Unavailable' : `${result.metrics.twr_pct.toFixed(2)}%`} · Closed trades: {result.metrics.closed_trade_count}</p>
+                          {!!result.assessment.blockers.length && <p className="text-muted-foreground">{result.assessment.blockers.map(blockerLabel).join(' · ')}</p>}
+                        </div>)}
+                        {version.runs.length > 0 && <p className="mt-2 text-muted-foreground">The manually recorded results below are unverified and do not satisfy promotion gates.</p>}
                         {version.runs.length > 0 && <div className="mt-2 overflow-x-auto"><table className="w-full min-w-[700px]"><thead className="text-muted-foreground"><tr><th className="text-left">Type</th><th>Period</th><th>Trades</th><th>Return</th><th>Benchmark</th><th>Max DD</th><th>Avg R</th></tr></thead><tbody>{version.runs.map((item) => <tr key={item.id} className="border-t border-border/60"><td>{blockerLabel(item.run_type)}</td><td className="text-center">{item.start_date}–{item.end_date}</td><td className="text-center">{item.trade_count}</td><td className="text-center">{item.total_return_pct}%</td><td className="text-center">{item.benchmark_return_pct}%</td><td className="text-center">{item.max_drawdown_pct}%</td><td className="text-center">{item.avg_r == null ? '—' : `${item.avg_r}R`}</td></tr>)}</tbody></table></div>}
                       </div>
                     ))}

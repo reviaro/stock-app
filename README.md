@@ -86,8 +86,9 @@ node server.js         # http://localhost:3002
 | `STOCK_DASHBOARD_USERNAME` | Required single-user login name |
 | `STOCK_DASHBOARD_PASSWORD_HASH` | Required scrypt password hash; never store the plaintext password |
 | `STOCK_DASHBOARD_SESSION_SECRET` | Required random session-signing secret of at least 32 characters |
-| `STOCK_DASHBOARD_API_TOKEN` | Optional bearer token for non-browser automation |
-| `STOCK_DASHBOARD_ALLOW_LOOPBACK` | Permit tightly validated `127.0.0.1` automation without a browser login; defaults to `1` |
+| `STOCK_DASHBOARD_API_TOKEN` | Optional read-only bearer token for non-browser automation |
+| `STOCK_DASHBOARD_ALLOW_LOOPBACK` | Permit tightly validated read-only `127.0.0.1` automation without a browser login; defaults to `1` |
+| `STOCK_DASHBOARD_SIMULATOR_TOKENS` | JSON array of distinct `{account_id, token, manage_limits?}` credentials; tokens must contain at least 32 characters. Simulator trades are scoped to one sleeve; optional limit management does not grant operator powers. |
 | `STOCK_DASHBOARD_HOST` | `127.0.0.1` by default; use `0.0.0.0` only in guarded LAN proxy mode |
 | `STOCK_DASHBOARD_TRUSTED_PROXY_IP` | Exact LAN IPv4 allowed to proxy requests when `HOST=0.0.0.0`; all other non-loopback clients are rejected |
 | `STOCK_DASHBOARD_PUBLIC_ORIGIN` | Exact HTTPS browser origin used for mutation Origin checks, such as `https://stocks.example.com` |
@@ -129,6 +130,10 @@ npm run build   # emits frontend/dist, served by the backend
 ```
 
 ## Tests
+
+See [simulator controls and evaluation](docs/simulator-controls.md) for the
+scoped automation contract, adjustable risk limits, immutable runs, and rollout
+requirements. New evaluated buys require an explicitly configured risk policy.
 
 ```bash
 cd backend && npm test        # node --test — routes, ledger, tax math, migration, AI simulator tools

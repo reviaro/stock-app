@@ -79,8 +79,8 @@ test('server mounts the advisory Portfolio Lab route behind loopback automation 
         const response = await request(server.address().port, '/api/portfolio-lab/analyze', {
             method: 'POST', body: {},
         });
-        assert.equal(response.status, 400);
-        assert.match(response.body.error, /symbols/i);
+        assert.equal(response.status, 403);
+        assert.equal(response.body.code, 'CAPABILITY_DENIED');
     } finally {
         await new Promise((resolve) => server.close(resolve));
     }
