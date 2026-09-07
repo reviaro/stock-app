@@ -28,9 +28,13 @@ function buildRiskMonitor({
         const quote = quotes[symbol] || {};
         const price = finiteNumber(quote.price);
         const quoteMs = quote.timestamp ? Date.parse(quote.timestamp) : NaN;
-        const ageSeconds = Number.isFinite(checkedMs) && Number.isFinite(quoteMs)
+        const hasKnownAge = Number.isFinite(checkedMs) && Number.isFinite(quoteMs);
+        // A future-dated quote is not "fresh": clock skew or bad data must fail closed.
+        const futureQuote = hasKnownAge && quoteMs > checkedMs;
+        const ageSeconds = hasKnownAge && !futureQuote
             ? Math.max(0, Math.round((checkedMs - quoteMs) / 1000))
             : null;
+        const ageUnknown = !hasKnownAge || futureQuote;
 
         positions.push({
             symbol,
@@ -56,6 +60,10 @@ function buildRiskMonitor({
         }
         if (price == null) {
             alerts.push(alert('price_unavailable', 'critical', symbol, `${symbol} cannot be monitored because its current price is unavailable.`));
+            continue;
+        }
+        if (marketOpen && ageUnknown) {
+            alerts.push(alert('stale_price', 'critical', symbol, `${symbol} quote age is unknown; risk thresholds were not evaluated.`, { price_age_seconds: null }));
             continue;
         }
         if (marketOpen && ageSeconds != null && ageSeconds > staleAfterSeconds) {

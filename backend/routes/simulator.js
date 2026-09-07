@@ -8,11 +8,13 @@ const {
     computeHoldings,
     computeCashBalance,
     computeRealizedPnl,
+    buildSimulatorAccount,
 } = require('../services/simulator_ledger');
 const { buildSimulatorReview, simulatorTransactionsToCsv } = require('../services/simulator_review');
-const { normalizeTradePlan, closeStructuredTrade, computeJournalAnalytics } = require('../services/trade_journal');
+const { computeJournalAnalytics } = require('../services/trade_journal');
 const { buildRiskMonitor } = require('../services/simulator_risk_monitor');
 const { getDefaultHybridQuote } = require('../services/hybrid_market_data');
+const { executeSimulatorTrade } = require('../services/simulator_execution_service');
 
 function accountIdFrom(req) {
     const raw = req.query?.account_id ?? req.body?.account_id ?? 1;
@@ -44,7 +46,7 @@ async function accountAndTransactions(req) {
 
 function sendError(res, err) {
     const status = err.status ?? (/invalid|required/.test(err.message) ? 400 : 500);
-    res.status(status).json({ status: 'error', error: err.message });
+    res.status(status).json({ status: 'error', error: err.message, ...(err.code ? { code: err.code } : {}) });
 }
 
 function reinvestmentMetrics(account, txns, cash, totalValue, dataComplete = true) {
@@ -83,35 +85,25 @@ router.get('/account', async (req, res) => {
         const cash = computeCashBalance(txns);
 
         const symbols = Object.keys(holdings);
-        let holdingsValue = 0;
         const prices = {};
         await Promise.all(symbols.map(async (symbol) => {
             try {
                 const info = await pybridge.getStockInfo(symbol);
-                if (typeof info?.data?.price === 'number') {
+                if (Number.isFinite(info?.data?.price) && info.data.price > 0
+                    && !info.data.isDemo && !info.data.is_demo && !info.meta?.stale) {
                     prices[symbol] = info.data.price;
-                    holdingsValue += info.data.price * holdings[symbol].shares;
                 }
-            } catch { /* non-fatal */ }
+            } catch { /* explicit incomplete valuation below */ }
         }));
-
-        const unrealizedPnl = Object.entries(holdings).reduce((sum, [sym, h]) => {
-            const price = prices[sym];
-            return price != null ? sum + (price * h.shares - h.total_cost) : sum;
-        }, 0);
-
-        const totalValue = cash + holdingsValue;
-
+        const valuation = buildSimulatorAccount(txns, prices);
         res.json({
             status: 'success',
             data: {
                 ...account,
-                cash,
-                total_value: Math.round(totalValue * 100) / 100,
-                unrealized_pnl: Math.round(unrealizedPnl * 100) / 100,
-                realized_pnl: Math.round(computeRealizedPnl(txns).total * 100) / 100,
-                ...reinvestmentMetrics(account, txns, cash, totalValue,
-                    symbols.every((symbol) => Number.isFinite(prices[symbol]))),
+                ...valuation,
+                realized_pnl: valuation.realized_pnl.net,
+                gross_realized_pnl: valuation.realized_pnl.gross,
+                ...reinvestmentMetrics(account, txns, cash, valuation.total_value, valuation.valuation_complete),
             },
         });
     } catch (err) {
@@ -273,20 +265,58 @@ router.get('/holdings', async (req, res) => {
     }
 });
 
-// POST /api/simulator/trade
-// Body: { type: 'buy'|'sell', symbol, shares, price, txn_date? }
+// GET scoped durable order status for timeout reconciliation.
+router.get('/orders/:client_order_id', async (req, res) => {
+    try {
+        if (req.query.account_id == null) return res.status(400).json({ status: 'error', error: 'explicit account_id is required' });
+        const { accountId } = await requireSleeve(req);
+        const order = await db.getSimOrder(accountId, req.params.client_order_id);
+        if (!order) return res.status(404).json({ status: 'error', code: 'SIM_ORDER_NOT_FOUND', error: 'order not found; an in-flight request may still be pending' });
+        res.json({ status: 'success', data: order });
+    } catch (err) { sendError(res, err); }
+});
+
+// POST /api/simulator/trade — EVALUATED execution.
+// Caller submits an intention: { type, symbol, shares, client_order_id,
+// fees?, notes?, trade_plan?, journal?, close_plan_id? }. The server obtains
+// the quote, assigns the fill price/date, and executes atomically with
+// idempotency. Caller-supplied prices are ignored.
 router.post('/trade', async (req, res) => {
     try {
         const body = req.body ?? {};
+        if (body.account_id == null && req.query.account_id == null) {
+            return res.status(400).json({ status: 'error', code: 'SIM_INVALID_ORDER', error: 'explicit account_id is required' });
+        }
+        if (body.account_id != null && req.query.account_id != null && Number(body.account_id) !== Number(req.query.account_id)) {
+            return res.status(400).json({ status: 'error', code: 'SIM_INVALID_ORDER', error: 'conflicting account_id values' });
+        }
+        const accountId = accountIdFrom(req);
+        const { result, duplicate } = await executeSimulatorTrade({ ...body, account_id: accountId });
+        if (duplicate) return res.status(200).json({ status: 'success', data: result, duplicate: true });
+        res.json({ status: 'success', data: result });
+    } catch (err) {
+        if (err && err.code && String(err.code).startsWith('SIM_')) err.status = err.status || 400;
+        sendError(res, err);
+    }
+});
+
+// POST /api/simulator/record — MANUAL, NON-EVALUATED ledger entry for the
+// caller. The source acknowledgement is NOT authorization; scoped operator
+// authorization is separate/deferred. Records an explicit caller-priced fill.
+// These rows are manual imports; they must not be treated
+// as evaluated agent execution. Subject to the same validation and atomic
+// resource checks as ordinary writes.
+router.post('/record', async (req, res) => {
+    try {
+        const body = req.body ?? {};
         const { accountId, account } = await requireSleeve(req);
-        const today = new Date().toISOString().slice(0, 10);
         const txn = {
             account_id: accountId,
             type: body.type,
             symbol: body.symbol,
             shares: Number(body.shares),
             price: Number(body.price),
-            txn_date: body.txn_date || today,
+            txn_date: body.txn_date === undefined ? new Date().toISOString().slice(0, 10) : body.txn_date,
             fees: Number(body.fees ?? 0),
             notes: body.notes ?? null,
         };
@@ -297,77 +327,22 @@ router.post('/trade', async (req, res) => {
         if (!txn.symbol || !(txn.shares > 0) || !(txn.price > 0)) {
             return res.status(400).json({ status: 'error', error: 'symbol, shares, and price are required and must be positive' });
         }
-
-        const txns = await db.listSimTransactions(accountId);
-        const cash = computeCashBalance(txns);
-        const holdings = computeHoldings(txns);
-        const cost = txn.shares * txn.price + txn.fees;
-
-        if (txn.type === 'buy' && cash < cost) {
-            return res.status(400).json({ status: 'error', error: `insufficient cash: have $${Math.round(cash * 100) / 100}, need $${Math.round(cost * 100) / 100}` });
+        if (body.source !== 'operator-manual') {
+            return res.status(400).json({ status: 'error', error: 'manual recording requires source: "operator-manual"' });
         }
 
-        const symbol = txn.symbol.toUpperCase();
-        const ownedShares = holdings[symbol]?.shares ?? 0;
-        if (txn.type === 'sell' && txn.shares > ownedShares + 0.000001) {
-            return res.status(400).json({ status: 'error', error: `insufficient shares: own ${ownedShares}, tried to sell ${txn.shares}` });
+        if (txn.type === 'buy' && body.trade_plan && account.slug !== 'day-trading') {
+            return res.status(400).json({ status: 'error', error: 'structured trade plans are limited to the day-trading sleeve' });
         }
-
-        let result;
-        if (txn.type === 'buy' && body.trade_plan) {
-            if (account.slug !== 'day-trading') {
-                return res.status(400).json({ status: 'error', error: 'structured trade plans are limited to the day-trading sleeve' });
-            }
-            const existingPlan = await db.getActiveSimTradePlan(accountId, symbol);
-            if (existingPlan) {
-                return res.status(400).json({ status: 'error', error: `${symbol} already has an active structured trade plan` });
-            }
-            const plan = normalizeTradePlan({
-                ...body.trade_plan,
-                account_id: accountId,
-                symbol,
-                planned_entry: txn.price,
-                shares: txn.shares,
-            });
-            result = await db.addSimTransactionWithPlan(txn, plan);
-        } else if (txn.type === 'sell') {
-            const activePlan = await db.getActiveSimTradePlan(accountId, symbol);
-            const closesPosition = Math.abs(txn.shares - ownedShares) <= 0.000001;
-            if (body.journal && !activePlan) {
-                return res.status(400).json({ status: 'error', error: `${symbol} has no active structured trade plan to review` });
-            }
-            if (body.journal && !closesPosition) {
-                return res.status(400).json({ status: 'error', error: 'structured exit review is recorded only when the full position is closed' });
-            }
-            if (activePlan && closesPosition) {
-                const inferredReason = txn.price <= Number(activePlan.stop_price)
-                    ? 'stop'
-                    : (txn.price >= Number(activePlan.target_price) ? 'target' : 'discretionary');
-                const review = body.journal || {
-                    exit_reason: inferredReason,
-                    thesis_valid: null,
-                    review_notes: 'Auto-closed from a full simulator exit; thesis validity was not supplied.',
-                };
-                const closure = closeStructuredTrade(activePlan, {
-                    exit_price: txn.price,
-                    shares: txn.shares,
-                    cost_basis: holdings[symbol].total_cost,
-                    fees: txn.fees,
-                    exit_reason: review.exit_reason,
-                    thesis_valid: review.thesis_valid,
-                    mfe: review.mfe,
-                    mae: review.mae,
-                    review_notes: review.review_notes,
-                });
-                result = await db.addSimTransactionAndCloseTradePlan(txn, activePlan.id, closure);
-            } else {
-                result = await db.addSimTransaction(txn);
-            }
-        } else {
-            result = await db.addSimTransaction(txn);
-        }
+        const result = await db.recordSimTradeAtomic({
+            transaction: txn,
+            trade_plan: body.trade_plan,
+            close_plan_id: body.close_plan_id,
+            closure: body.journal,
+        });
         res.json({ status: 'success', data: result });
     } catch (err) {
+        if (String(err.code || '').startsWith('SIM_')) err.status = err.status || 400;
         sendError(res, err);
     }
 });

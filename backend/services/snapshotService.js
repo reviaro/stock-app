@@ -46,9 +46,9 @@ function percentChange(numeratorValue, denominatorValue) {
     return roundMetric((numerator / denominator) * 100);
 }
 
-async function snapshotWatchlist(slot = getCurrentSlot()) {
-    const watchlist = await db.getWatchlist();
-    const marketDate = getMarketDate();
+async function snapshotWatchlist(slot = getCurrentSlot(), { now = new Date(), db: dbClient = db, pybridge: pybridgeClient = pybridge } = {}) {
+    const watchlist = await dbClient.getWatchlist();
+    const marketDate = getMarketDate(now);
     const results = [];
 
     for (const item of watchlist) {
@@ -56,13 +56,13 @@ async function snapshotWatchlist(slot = getCurrentSlot()) {
         let isCarryForward = false;
 
         try {
-            const result = await pybridge.getStockInfo(item.symbol);
+            const result = await pybridgeClient.getStockInfo(item.symbol);
             if (result.status !== 'success' || !result.data) {
                 throw new Error(result.error || 'No stock data returned');
             }
             quote = result.data;
         } catch (error) {
-            const history = await db.getStockHistory(item.symbol, 90);
+            const history = await dbClient.getStockHistory(item.symbol, 90);
             const latest = history[history.length - 1];
             if (!latest) {
                 throw error;
@@ -74,15 +74,21 @@ async function snapshotWatchlist(slot = getCurrentSlot()) {
                 change: latest.change_amount,
                 changePercent: latest.change_percent,
                 currency: latest.currency || 'USD',
+                timestamp: latest.quote_timestamp || null,
             };
             isCarryForward = true;
         }
+
+        const retrievedAt = new Date(now).toISOString();
+        const providerEventAt = quote.timestamp || null;
+        const quoteTimestamp = providerEventAt || retrievedAt;
+        const quoteTimestampBasis = providerEventAt ? 'provider_event' : 'retrieval';
 
         const openPrice = finiteNumber(quote.open);
         const dayHigh = finiteNumber(quote.dayHigh);
         const fiftyTwoWeekHigh = finiteNumber(quote.week52High);
         const fiftyTwoWeekLow = finiteNumber(quote.week52Low);
-        const firstSnapshot = await db.getFirstStockSnapshot(item.symbol);
+        const firstSnapshot = await dbClient.getFirstStockSnapshot(item.symbol);
         const baselinePrice = finiteNumber(firstSnapshot?.price);
 
         const changeFromOpenPercent =
@@ -94,11 +100,13 @@ async function snapshotWatchlist(slot = getCurrentSlot()) {
         const distFrom52wlPercent =
             dayHigh !== null && fiftyTwoWeekLow !== null ? percentChange(dayHigh - fiftyTwoWeekLow, fiftyTwoWeekLow) : null;
 
-        await db.upsertStockSnapshot({
+        await dbClient.upsertStockSnapshot({
             symbol: item.symbol,
             slot,
             marketDate,
-            quoteTimestamp: new Date().toISOString(),
+            quoteTimestamp,
+            quoteTimestampBasis,
+            retrievedAt,
             price: quote.price,
             previousClose: quote.previousClose ?? null,
             changeAmount: quote.change ?? null,
@@ -127,6 +135,9 @@ async function snapshotWatchlist(slot = getCurrentSlot()) {
             currency: quote.currency ?? 'USD',
             slot,
             marketDate,
+            quoteTimestamp,
+            quoteTimestampBasis,
+            retrievedAt,
             isCarryForward,
             open: openPrice,
             dayHigh,

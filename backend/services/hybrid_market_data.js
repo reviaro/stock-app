@@ -70,9 +70,14 @@ function normalizeUnavailable() {
     };
 }
 
+function validTimestamp(value) {
+    if (typeof value !== 'string' || !value.trim()) return false;
+    return Number.isFinite(Date.parse(value));
+}
+
 function normalizeQuote(quote, source) {
     const price = Number(quote?.price);
-    if (!Number.isFinite(price) || price <= 0 || !quote?.timestamp) return null;
+    if (!Number.isFinite(price) || price <= 0 || !validTimestamp(quote?.timestamp)) return null;
     return {
         price,
         timestamp: quote.timestamp,

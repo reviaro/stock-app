@@ -96,3 +96,41 @@ test('hybrid quote rejects demo yfinance fallback as unavailable', async () => {
         data_source: 'unavailable',
     });
 });
+
+test('hybrid quote rejects an unparseable Alpaca timestamp instead of passing it through', async () => {
+    const quote = await getHybridQuote('MSFT', {
+        alpacaSource: async () => ({
+            price: 415.25,
+            timestamp: 'definitely-not-a-timestamp',
+            marketState: 'REGULAR',
+            source: 'alpaca_iex',
+        }),
+        yfinanceSource: async () => { throw new Error('yfinance unavailable'); },
+    });
+
+    assert.deepStrictEqual(quote, {
+        price: null,
+        timestamp: null,
+        market_state: null,
+        data_source: 'unavailable',
+    });
+});
+
+test('hybrid quote rejects an unparseable yfinance timestamp instead of passing it through', async () => {
+    const quote = await getHybridQuote('MSFT', {
+        alpacaSource: async () => { throw new Error('Alpaca unavailable'); },
+        yfinanceSource: async () => ({
+            price: 414.75,
+            timestamp: 'garbage',
+            marketState: 'REGULAR',
+            isDemo: false,
+        }),
+    });
+
+    assert.deepStrictEqual(quote, {
+        price: null,
+        timestamp: null,
+        market_state: null,
+        data_source: 'unavailable',
+    });
+});

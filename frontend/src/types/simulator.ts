@@ -12,9 +12,13 @@ export interface SimAccount {
   tax_bracket: number
   created_at: string
   cash: number
-  total_value: number
-  unrealized_pnl: number
-  realized_pnl: number
+  /** null when valuation is incomplete (some holdings lack a quote) */
+  total_value: number | null
+  unrealized_pnl: number | null
+  realized_pnl: number | null
+  valuation_complete: boolean
+  missing_symbols: string[]
+  marked_value: number | null
   dividend_reinvestment_mode: 'cash' | 'drip'
   profit_reinvestment_mode: 'hold_cash' | 'redeploy_excess'
   target_cash_pct: number
@@ -76,19 +80,21 @@ export interface TaxPreview {
 export interface SimReview {
   starting_capital: number
   cash: number
-  holdings_value: number
-  total_value: number
-  total_return_pct: number
-  realized_pnl: number
-  unrealized_pnl: number
+  holdings_value: number | null
+  total_value: number | null
+  total_return_pct: number | null
+  realized_pnl: number | null
+  unrealized_pnl: number | null
   dividend_income: number
   reinvested_dividends: number
-  cash_pct: number
+  cash_pct: number | null
   position_count: number
   largest_position: { symbol: string; weight_pct: number; market_value: number } | null
   closed_trade_count: number
   hit_rate_pct: number | null
-  positions: Array<{ symbol: string; shares: number; cost: number; market_value: number; pnl: number; weight_pct: number }>
+  valuation_complete?: boolean
+  missing_symbols?: string[]
+  positions: Array<{ symbol: string; shares: number; cost: number; market_value: number | null; pnl: number | null; weight_pct: number | null }>
   recent_buffett_actions: Array<{ id: number; date: string; type: string; symbol: string | null; amount: number; notes: string }>
 }
 
@@ -128,7 +134,9 @@ export interface TradePayload {
   type: 'buy' | 'sell'
   symbol: string
   shares: number
-  price: number
+  /** @deprecated server validates its own quote; price is ignored on /api/simulator/trade */
+  price?: number
+  /** @deprecated server timestamps fills; txn_date is ignored on /api/simulator/trade */
   txn_date?: string
   fees?: number
   notes?: string
