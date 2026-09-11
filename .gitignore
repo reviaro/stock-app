@@ -64,6 +64,9 @@ ai_agent_status.md
 # Local tools
 .tools/
 
+# Git worktrees for isolated agent work
+.worktrees/
+
 # OS
 .DS_Store
 Thumbs.db
