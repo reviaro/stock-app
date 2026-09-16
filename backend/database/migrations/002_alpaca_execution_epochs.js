@@ -78,54 +78,62 @@ function runAlpacaExecutionEpochsMigration({ dbPath }) {
                 if (!cols || cols.length === 0) return skip();
                 if (cols.some((col) => col.name === 'execution_epoch')) return skip();
 
-                db.run('BEGIN TRANSACTION');
-                db.run('ALTER TABLE alpaca_paper_orders RENAME TO alpaca_paper_orders_pre_epoch_migration', (renameErr) => {
-                    if (renameErr) return rollbackAndFail(renameErr);
+                // The rename is nested inside BEGIN's own callback (rather than queued
+                // alongside it) because serialize() only orders statement dispatch — it
+                // does not stop a later statement just because an earlier one's callback
+                // reported an error. Nesting is what actually prevents the rename from
+                // running unguarded (outside any transaction) if BEGIN itself fails.
+                db.run('BEGIN TRANSACTION', (beginErr) => {
+                    if (beginErr) return finish(beginErr);
 
-                    db.run(`CREATE TABLE alpaca_paper_orders (${ALPACA_PAPER_ORDERS_COLUMNS_SQL})`, (createErr) => {
-                        if (createErr) return rollbackAndFail(createErr);
+                    db.run('ALTER TABLE alpaca_paper_orders RENAME TO alpaca_paper_orders_pre_epoch_migration', (renameErr) => {
+                        if (renameErr) return rollbackAndFail(renameErr);
 
-                        db.run(`
-                            INSERT INTO alpaca_paper_orders (
-                                id, idempotency_key, broker_order_id, execution_epoch, symbol, side, qty,
-                                order_type, time_in_force, limit_price, status, request_payload, broker_payload,
-                                created_at, updated_at
-                            )
-                            SELECT
-                                id, idempotency_key, broker_order_id,
-                                CASE WHEN idempotency_key LIKE '${LONG_TERM_KEY_PREFIX}%' THEN 'legacy_long_term' ELSE 'legacy_unattributed' END,
-                                symbol, side, qty, order_type, time_in_force, limit_price, status, request_payload,
-                                broker_payload, created_at, updated_at
-                            FROM alpaca_paper_orders_pre_epoch_migration
-                        `, (copyErr) => {
-                            if (copyErr) return rollbackAndFail(copyErr);
+                        db.run(`CREATE TABLE alpaca_paper_orders (${ALPACA_PAPER_ORDERS_COLUMNS_SQL})`, (createErr) => {
+                            if (createErr) return rollbackAndFail(createErr);
 
-                            // Keep the renamed original around as durable evidence (plan Section
-                            // 10 Stage 1 requires exporting existing audit rows before any are
-                            // classified as legacy, and Section 11 requires preserving all audit
-                            // evidence during rollback) rather than dropping it. SQLite carries
-                            // its index along with the rename, and an index name is unique
-                            // database-wide, so that old index must be dropped explicitly before
-                            // the replacement can be created on the new table.
-                            db.run('DROP INDEX idx_alpaca_paper_orders_status', (dropIdxErr) => {
-                                if (dropIdxErr) return rollbackAndFail(dropIdxErr);
+                            db.run(`
+                                INSERT INTO alpaca_paper_orders (
+                                    id, idempotency_key, broker_order_id, execution_epoch, symbol, side, qty,
+                                    order_type, time_in_force, limit_price, status, request_payload, broker_payload,
+                                    created_at, updated_at
+                                )
+                                SELECT
+                                    id, idempotency_key, broker_order_id,
+                                    CASE WHEN idempotency_key LIKE '${LONG_TERM_KEY_PREFIX}%' THEN 'legacy_long_term' ELSE 'legacy_unattributed' END,
+                                    symbol, side, qty, order_type, time_in_force, limit_price, status, request_payload,
+                                    broker_payload, created_at, updated_at
+                                FROM alpaca_paper_orders_pre_epoch_migration
+                            `, (copyErr) => {
+                                if (copyErr) return rollbackAndFail(copyErr);
 
-                                db.run('CREATE INDEX idx_alpaca_paper_orders_status ON alpaca_paper_orders(status, created_at DESC)', (idxErr) => {
-                                    if (idxErr) return rollbackAndFail(idxErr);
+                                // Keep the renamed original around as durable evidence (plan Section
+                                // 10 Stage 1 requires exporting existing audit rows before any are
+                                // classified as legacy, and Section 11 requires preserving all audit
+                                // evidence during rollback) rather than dropping it. SQLite carries
+                                // its index along with the rename, and an index name is unique
+                                // database-wide, so that old index must be dropped explicitly before
+                                // the replacement can be created on the new table.
+                                db.run('DROP INDEX idx_alpaca_paper_orders_status', (dropIdxErr) => {
+                                    if (dropIdxErr) return rollbackAndFail(dropIdxErr);
 
-                                    db.all('SELECT execution_epoch, COUNT(*) AS c FROM alpaca_paper_orders GROUP BY execution_epoch', (countErr, rows) => {
-                                        if (countErr) return rollbackAndFail(countErr);
-                                        const counts = Object.fromEntries((rows || []).map((r) => [r.execution_epoch, r.c]));
+                                    db.run('CREATE INDEX idx_alpaca_paper_orders_status ON alpaca_paper_orders(status, created_at DESC)', (idxErr) => {
+                                        if (idxErr) return rollbackAndFail(idxErr);
 
-                                        db.run('COMMIT', (commitErr) => {
-                                            if (commitErr) return finish(commitErr);
-                                            const legacyLongTerm = counts.legacy_long_term || 0;
-                                            const legacyUnattributed = counts.legacy_unattributed || 0;
-                                            finish(null, {
-                                                migrated: legacyLongTerm + legacyUnattributed,
-                                                legacyLongTerm,
-                                                legacyUnattributed,
-                                                skipped: false,
+                                        db.all('SELECT execution_epoch, COUNT(*) AS c FROM alpaca_paper_orders GROUP BY execution_epoch', (countErr, rows) => {
+                                            if (countErr) return rollbackAndFail(countErr);
+                                            const counts = Object.fromEntries((rows || []).map((r) => [r.execution_epoch, r.c]));
+
+                                            db.run('COMMIT', (commitErr) => {
+                                                if (commitErr) return finish(commitErr);
+                                                const legacyLongTerm = counts.legacy_long_term || 0;
+                                                const legacyUnattributed = counts.legacy_unattributed || 0;
+                                                finish(null, {
+                                                    migrated: legacyLongTerm + legacyUnattributed,
+                                                    legacyLongTerm,
+                                                    legacyUnattributed,
+                                                    skipped: false,
+                                                });
                                             });
                                         });
                                     });
