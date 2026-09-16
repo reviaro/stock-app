@@ -76,3 +76,106 @@ test('reconciliation status updates preserve the original broker order identifie
   assert.strictEqual(row.status, 'filled');
   assert.strictEqual(row.broker_order_id, 'private-broker-id');
 });
+
+test('defaults execution_epoch to legacy_unattributed when the caller does not classify the order', async () => {
+  await db.createAlpacaPaperOrderAudit({
+    idempotency_key: 'unclassified-order', symbol: 'AAPL', side: 'buy', qty: 2,
+    order_type: 'limit', time_in_force: 'day', limit_price: 230, status: 'pending_submission',
+  });
+  const [row] = await db.listAlpacaPaperOrderAudits();
+  assert.strictEqual(row.execution_epoch, 'legacy_unattributed');
+});
+
+test('records day-trading order-tree metadata and preserves it through a broker-id update', async () => {
+  await db.createAlpacaPaperOrderAudit({
+    idempotency_key: 'dt-tree-entry', client_order_id: 'dt-tree-entry', symbol: 'NVDA', side: 'buy', qty: 10,
+    order_type: 'limit', time_in_force: 'day', limit_price: 176.5, status: 'pending_submission',
+    execution_epoch: 'day_trading', order_class: 'bracket', leg_role: 'entry', plan_id: 42,
+  });
+  await db.updateAlpacaPaperOrderAudit('dt-tree-entry', { status: 'filled', broker_order_id: 'broker-tree-1' });
+
+  const [row] = await db.listAlpacaPaperOrderAudits();
+  assert.strictEqual(row.execution_epoch, 'day_trading');
+  assert.strictEqual(row.client_order_id, 'dt-tree-entry');
+  assert.strictEqual(row.order_class, 'bracket');
+  assert.strictEqual(row.leg_role, 'entry');
+  assert.strictEqual(row.plan_id, 42);
+  assert.strictEqual(row.broker_order_id, 'broker-tree-1');
+});
+
+test('rejects a duplicate client_order_id with a distinct error from an idempotency-key collision', async () => {
+  await db.createAlpacaPaperOrderAudit({
+    idempotency_key: 'dt-dup-key-a', client_order_id: 'dt-shared-client-id', symbol: 'MSFT', side: 'buy', qty: 1,
+    order_type: 'limit', time_in_force: 'day', limit_price: 400, status: 'pending_submission',
+  });
+  await assert.rejects(() => db.createAlpacaPaperOrderAudit({
+    idempotency_key: 'dt-dup-key-b', client_order_id: 'dt-shared-client-id', symbol: 'MSFT', side: 'buy', qty: 1,
+    order_type: 'limit', time_in_force: 'day', limit_price: 400, status: 'pending_submission',
+  }), /duplicate Alpaca paper-order client order id/);
+  assert.strictEqual((await db.listAlpacaPaperOrderAudits()).length, 1);
+});
+
+test('records partial then full fill progress without resetting the broker order identifier', async () => {
+  await db.createAlpacaPaperOrderAudit({
+    idempotency_key: 'dt-fill-progress', client_order_id: 'dt-fill-progress', symbol: 'NVDA', side: 'buy', qty: 10,
+    order_type: 'limit', time_in_force: 'day', limit_price: 176.5, status: 'pending_submission',
+    execution_epoch: 'day_trading', order_class: 'bracket', leg_role: 'entry',
+  });
+  await db.updateAlpacaPaperOrderAudit('dt-fill-progress', { status: 'pending_new', broker_order_id: 'broker-fill-1' });
+
+  await db.updateAlpacaPaperOrderAudit('dt-fill-progress', {
+    status: 'partially_filled', filled_qty: 4, avg_fill_price: 176.52,
+  });
+  let [row] = await db.listAlpacaPaperOrderAudits();
+  assert.strictEqual(row.filled_qty, 4);
+  assert.strictEqual(row.avg_fill_price, 176.52);
+  assert.strictEqual(row.broker_order_id, 'broker-fill-1');
+
+  await db.updateAlpacaPaperOrderAudit('dt-fill-progress', {
+    status: 'filled', filled_qty: 10, avg_fill_price: 176.6, filled_at: '2026-09-16T14:31:00Z',
+  });
+  [row] = await db.listAlpacaPaperOrderAudits();
+  assert.strictEqual(row.filled_qty, 10);
+  assert.strictEqual(row.avg_fill_price, 176.6);
+  assert.strictEqual(row.filled_at, '2026-09-16T14:31:00Z');
+  assert.strictEqual(row.broker_order_id, 'broker-fill-1');
+});
+
+test('marks an audit row unresolved on an ambiguous broker outcome and clears it once reconciled', async () => {
+  await db.createAlpacaPaperOrderAudit({
+    idempotency_key: 'dt-ambiguous-1', symbol: 'NVDA', side: 'buy', qty: 5,
+    order_type: 'limit', time_in_force: 'day', limit_price: 176.5, status: 'pending_submission',
+  });
+  await db.updateAlpacaPaperOrderAudit('dt-ambiguous-1', { status: 'submission_unknown', unresolved: true });
+  let [row] = await db.listAlpacaPaperOrderAudits();
+  assert.strictEqual(row.unresolved, 1);
+
+  await db.updateAlpacaPaperOrderAudit('dt-ambiguous-1', { status: 'filled', unresolved: false });
+  [row] = await db.listAlpacaPaperOrderAudits();
+  assert.strictEqual(row.unresolved, 0);
+});
+
+test('round-trips broker lifecycle timestamps without disturbing ones left unset', async () => {
+  await db.createAlpacaPaperOrderAudit({
+    idempotency_key: 'dt-timestamps-1', symbol: 'NVDA', side: 'buy', qty: 5,
+    order_type: 'limit', time_in_force: 'day', limit_price: 176.5, status: 'pending_submission',
+  });
+  await db.updateAlpacaPaperOrderAudit('dt-timestamps-1', {
+    status: 'pending_new',
+    broker_created_at: '2026-09-16T13:30:00Z',
+    submitted_at: '2026-09-16T13:30:01Z',
+  });
+  await db.updateAlpacaPaperOrderAudit('dt-timestamps-1', {
+    status: 'canceled',
+    broker_updated_at: '2026-09-16T13:35:00Z',
+    canceled_at: '2026-09-16T13:35:00Z',
+  });
+
+  const [row] = await db.listAlpacaPaperOrderAudits();
+  assert.strictEqual(row.broker_created_at, '2026-09-16T13:30:00Z');
+  assert.strictEqual(row.submitted_at, '2026-09-16T13:30:01Z');
+  assert.strictEqual(row.broker_updated_at, '2026-09-16T13:35:00Z');
+  assert.strictEqual(row.canceled_at, '2026-09-16T13:35:00Z');
+  assert.strictEqual(row.filled_at, null);
+  assert.strictEqual(row.expired_at, null);
+});

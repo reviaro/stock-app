@@ -4,6 +4,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { normalizeSimTransaction } = require('../services/simulator_transaction_validation');
 const { normalizeTradePlan, closeStructuredTrade } = require('../services/trade_journal');
+const { ALPACA_PAPER_ORDERS_COLUMNS_SQL } = require('./migrations/002_alpaca_execution_epochs');
 
 const VALID_BUCKETS = ['compounders', 'buy_soon', 'expensive', 'speculative', 'owned', 'unsorted'];
 const VALID_TXN_TYPES = ['buy', 'sell', 'dividend', 'deposit', 'withdrawal'];
@@ -358,24 +359,9 @@ function initDb() {
 
             // Separate, broker-facing paper-order audit mirror. It never feeds the local
             // simulator or real portfolio ledgers; idempotency prevents duplicate submits.
-            db.run(`
-                CREATE TABLE IF NOT EXISTS alpaca_paper_orders (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    idempotency_key TEXT NOT NULL UNIQUE,
-                    broker_order_id TEXT UNIQUE,
-                    symbol TEXT NOT NULL,
-                    side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
-                    qty INTEGER NOT NULL CHECK (qty > 0),
-                    order_type TEXT NOT NULL CHECK (order_type IN ('market', 'limit')),
-                    time_in_force TEXT NOT NULL CHECK (time_in_force = 'day'),
-                    limit_price REAL,
-                    status TEXT NOT NULL,
-                    request_payload TEXT NOT NULL,
-                    broker_payload TEXT,
-                    created_at TEXT DEFAULT (datetime('now')),
-                    updated_at TEXT DEFAULT (datetime('now'))
-                )
-            `);
+            // A pre-existing database with the narrower legacy shape (buy/sell day-limit
+            // only, no execution_epoch) is upgraded in place by migration 002 below.
+            db.run(`CREATE TABLE IF NOT EXISTS alpaca_paper_orders (${ALPACA_PAPER_ORDERS_COLUMNS_SQL})`);
             db.run('CREATE INDEX IF NOT EXISTS idx_alpaca_paper_orders_status ON alpaca_paper_orders(status, created_at DESC)');
 
             // Strategy Lab is an evidence registry only. These isolated tables contain
@@ -478,6 +464,18 @@ function initDb() {
                     }
                 } else {
                     console.log('[migration 001] skipped; set ENABLE_LEDGER_MIGRATION=1 to run the portfolio -> transactions migration');
+                }
+
+                try {
+                    const { runAlpacaExecutionEpochsMigration } = require('./migrations/002_alpaca_execution_epochs');
+                    const epochResult = await runAlpacaExecutionEpochsMigration({ dbPath: DB_PATH });
+                    if (!epochResult.skipped) {
+                        console.log(`[migration 002] classified ${epochResult.migrated} legacy Alpaca paper-order rows (${epochResult.legacyLongTerm} legacy_long_term, ${epochResult.legacyUnattributed} legacy_unattributed)`);
+                    }
+                } catch (migrationError) {
+                    console.error('[migration 002] FAILED:', migrationError.message);
+                    reject(migrationError);
+                    return;
                 }
 
                 // Verify the schema this build actually needs before declaring success:
@@ -1821,18 +1819,32 @@ function deleteAllSimTransactions(accountId = 1) {
 function createAlpacaPaperOrderAudit(order) {
     const normalized = {
         idempotency_key: String(order.idempotency_key || '').trim(),
+        client_order_id: order.client_order_id == null ? null : (String(order.client_order_id).trim() || null),
         symbol: String(order.symbol || '').trim().toUpperCase(),
         side: order.side,
         qty: Number(order.qty),
         order_type: order.order_type,
         time_in_force: order.time_in_force,
         limit_price: order.limit_price == null ? null : Number(order.limit_price),
+        stop_price: order.stop_price == null ? null : Number(order.stop_price),
+        take_profit_price: order.take_profit_price == null ? null : Number(order.take_profit_price),
         status: order.status,
+        execution_epoch: order.execution_epoch || 'legacy_unattributed',
+        order_class: order.order_class || 'simple',
+        leg_role: order.leg_role || null,
+        parent_broker_order_id: order.parent_broker_order_id == null ? null : String(order.parent_broker_order_id),
+        plan_id: order.plan_id == null ? null : Number(order.plan_id),
     };
+    const ORDER_TYPES = ['market', 'limit', 'stop', 'stop_limit', 'trailing_stop'];
+    const EXECUTION_EPOCHS = ['legacy_long_term', 'legacy_unattributed', 'day_trading'];
+    const ORDER_CLASSES = ['simple', 'bracket', 'oco', 'oto'];
+    const LEG_ROLES = ['entry', 'take_profit', 'stop_loss', 'time_exit', 'repair_exit', 'emergency_flatten'];
     if (!normalized.idempotency_key || !normalized.symbol || !['buy', 'sell'].includes(normalized.side)
         || !Number.isInteger(normalized.qty) || normalized.qty <= 0
-        || !['market', 'limit'].includes(normalized.order_type) || normalized.time_in_force !== 'day'
-        || !normalized.status) {
+        || !ORDER_TYPES.includes(normalized.order_type) || normalized.time_in_force !== 'day'
+        || !normalized.status || !EXECUTION_EPOCHS.includes(normalized.execution_epoch)
+        || !ORDER_CLASSES.includes(normalized.order_class)
+        || (normalized.leg_role !== null && !LEG_ROLES.includes(normalized.leg_role))) {
         return Promise.reject(new Error('invalid Alpaca paper order audit record'));
     }
     if (normalized.order_type === 'limit' && !(normalized.limit_price > 0)) {
@@ -1842,11 +1854,15 @@ function createAlpacaPaperOrderAudit(order) {
         const sqlite = getDb();
         sqlite.run(
             `INSERT INTO alpaca_paper_orders (
-                idempotency_key, symbol, side, qty, order_type, time_in_force, limit_price, status, request_payload
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                idempotency_key, client_order_id, symbol, side, qty, order_type, time_in_force, limit_price,
+                stop_price, take_profit_price, status, execution_epoch, order_class, leg_role,
+                parent_broker_order_id, plan_id, request_payload
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
-                normalized.idempotency_key, normalized.symbol, normalized.side, normalized.qty,
-                normalized.order_type, normalized.time_in_force, normalized.limit_price, normalized.status,
+                normalized.idempotency_key, normalized.client_order_id, normalized.symbol, normalized.side, normalized.qty,
+                normalized.order_type, normalized.time_in_force, normalized.limit_price, normalized.stop_price,
+                normalized.take_profit_price, normalized.status, normalized.execution_epoch, normalized.order_class,
+                normalized.leg_role, normalized.parent_broker_order_id, normalized.plan_id,
                 JSON.stringify(normalized),
             ],
             function(err) {
@@ -1854,6 +1870,9 @@ function createAlpacaPaperOrderAudit(order) {
                 if (err) {
                     if (/UNIQUE constraint failed: alpaca_paper_orders\.idempotency_key/i.test(err.message)) {
                         return reject(new Error('duplicate Alpaca paper-order idempotency key'));
+                    }
+                    if (/UNIQUE constraint failed: alpaca_paper_orders\.client_order_id/i.test(err.message)) {
+                        return reject(new Error('duplicate Alpaca paper-order client order id'));
                     }
                     return reject(err);
                 }
@@ -1863,16 +1882,38 @@ function createAlpacaPaperOrderAudit(order) {
     });
 }
 
-function updateAlpacaPaperOrderAudit(idempotencyKey, { status, broker_order_id = null, broker_payload = null }) {
+function updateAlpacaPaperOrderAudit(idempotencyKey, {
+    status, broker_order_id = null, broker_payload = null,
+    filled_qty = null, avg_fill_price = null, unresolved = null,
+    broker_created_at = null, submitted_at = null, broker_updated_at = null,
+    filled_at = null, canceled_at = null, expired_at = null,
+}) {
     const key = String(idempotencyKey || '').trim();
     if (!key || !status) return Promise.reject(new Error('invalid Alpaca paper order audit update'));
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
         sqlite.run(
             `UPDATE alpaca_paper_orders
-             SET status = ?, broker_order_id = COALESCE(?, broker_order_id), broker_payload = ?, updated_at = datetime('now')
+             SET status = ?,
+                 broker_order_id = COALESCE(?, broker_order_id),
+                 broker_payload = COALESCE(?, broker_payload),
+                 filled_qty = COALESCE(?, filled_qty),
+                 avg_fill_price = COALESCE(?, avg_fill_price),
+                 unresolved = COALESCE(?, unresolved),
+                 broker_created_at = COALESCE(?, broker_created_at),
+                 submitted_at = COALESCE(?, submitted_at),
+                 broker_updated_at = COALESCE(?, broker_updated_at),
+                 filled_at = COALESCE(?, filled_at),
+                 canceled_at = COALESCE(?, canceled_at),
+                 expired_at = COALESCE(?, expired_at),
+                 updated_at = datetime('now')
              WHERE idempotency_key = ?`,
-            [status, broker_order_id, broker_payload == null ? null : JSON.stringify(broker_payload), key],
+            [
+                status, broker_order_id, broker_payload == null ? null : JSON.stringify(broker_payload),
+                filled_qty, avg_fill_price, unresolved == null ? null : (unresolved ? 1 : 0),
+                broker_created_at, submitted_at, broker_updated_at, filled_at, canceled_at, expired_at,
+                key,
+            ],
             function(err) {
                 sqlite.close();
                 if (err) return reject(err);
