@@ -319,6 +319,7 @@ test('reconcileFills stops advancing the cursor at the first activity that fails
 
     const state = await store.getMonitorState();
     assert.strictEqual(state.activity_cursor, '2026-09-17T13:31:00Z', 'the cursor must not pass the malformed activity');
+    assert.strictEqual(state.health_code, 'RECONCILIATION_STALLED', 'an aborted pass must be observable, not just inferable from a stopped cursor');
 
     // A re-run (e.g. after an operator fixes/skips the bad record upstream) must still see
     // fill-good-2, which it would not if the cursor had advanced past it.
@@ -326,6 +327,9 @@ test('reconcileFills stops advancing the cursor at the first activity that fails
     await reconcileFills({ client, store });
     const secondSummary = await store.computeFilledSummaryForPlan(plan.id);
     assert.strictEqual(secondSummary.entry.qty, 10);
+
+    const healthyState = await store.getMonitorState();
+    assert.strictEqual(healthyState.health_code, null, 'a clean completed pass must clear a prior stalled health code');
 });
 
 test('an overfilled plan is moved to error and does not stall reconciliation for other plans', async () => {

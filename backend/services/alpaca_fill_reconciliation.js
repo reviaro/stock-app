@@ -118,12 +118,14 @@ async function reconcileFills({ client, store: injectedStore = store }) {
     });
 
     let cursor = monitorState?.activity_cursor || null;
+    let stallReason = null;
 
     for (const raw of activities) {
         let normalized;
         try {
             normalized = normalizeRestFillActivity(raw);
-        } catch (_error) {
+        } catch (error) {
+            stallReason = `failed to normalize a FILL activity: ${error.message}`;
             break; // malformed: stop before it, leave the cursor at the last good activity
         }
 
@@ -135,11 +137,21 @@ async function reconcileFills({ client, store: injectedStore = store }) {
         const owningPlan = findOwningPlan(normalized.broker_order_id, refreshedPlans);
         try {
             await injectedStore.recordFill({ ...normalized, plan_id: owningPlan ? owningPlan.id : null });
-        } catch (_error) {
+        } catch (error) {
+            stallReason = `failed to record fill ${normalized.activity_id}: ${error.message}`;
             break; // insert failure: stop before it too
         }
         cursor = normalized.executed_at;
     }
+
+    // A pass that aborted early is otherwise unobservable except by noticing the cursor stopped
+    // moving. health_code/health_error make it directly visible to the monitor-health route
+    // and to Task 11's "stale local state" check, and a clean pass explicitly clears a prior
+    // stall rather than leaving it to look permanent.
+    await injectedStore.updateMonitorState({
+        health_code: stallReason ? 'RECONCILIATION_STALLED' : null,
+        health_error: stallReason,
+    });
 
     if (cursor) {
         await injectedStore.updateMonitorState({ activity_cursor: cursor, last_rest_reconciliation_at: new Date().toISOString() });
