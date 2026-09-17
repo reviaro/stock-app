@@ -53,6 +53,10 @@ test('server leaves auth session public while protecting dashboard APIs', async 
         assert.equal(alpaca.status, 401);
         assert.equal(alpaca.body.error, 'Authentication required');
 
+        const dayTrading = await get(server.address().port, '/api/alpaca-paper/day-trading/entries');
+        assert.equal(dayTrading.status, 401);
+        assert.equal(dayTrading.body.error, 'Authentication required');
+
         const strategyLab = await get(server.address().port, '/api/strategy-lab/experiments');
         assert.equal(strategyLab.status, 401);
         assert.equal(strategyLab.body.error, 'Authentication required');

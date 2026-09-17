@@ -1,5 +1,6 @@
 const express = require('express');
 const { getPaperConfiguration, getPaperAccountSummary, getPaperReconciliationSnapshot, submitPaperOrder, reconcilePaperOrderAudits, resolveMissingPaperOrderAudit } = require('../services/alpaca_paper_service');
+const dayTradeStore = require('../services/alpaca_day_trade_store');
 
 const router = express.Router();
 
@@ -68,6 +69,18 @@ router.post('/resolve-missing', async (req, res) => {
 });
 
 router.post('/orders', async (req, res) => {
+    // Guards on the same alpaca_monitor_state.mode the Day Trading entries route reads, not on
+    // whether that route's own HTTP gate/token happens to be enabled — those are independent
+    // decisions (an operator testing DT auth wiring with mode still 'shadow' shouldn't disable
+    // this path for no reason, and 'paper_execute' with the DT route gate off must still close
+    // it). Once the account is Day-Trading-only, a raw simple order here would create broker
+    // exposure with no plan, no risk tracking, and no native bracket protection (Safety
+    // Invariant #2) — refused before any other check, including the token check below, and
+    // before any broker request.
+    const monitorState = await dayTradeStore.getMonitorState();
+    if (monitorState?.mode === 'paper_execute') {
+        return res.status(403).json({ status: 'error', error: 'raw Alpaca paper order entry is disabled while Day Trading owns this account' });
+    }
     const orderEntryToken = process.env.ALPACA_PAPER_ORDER_ENTRY_TOKEN;
     if (process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED !== 'true'
         || !orderEntryToken
