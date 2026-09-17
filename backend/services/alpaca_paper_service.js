@@ -1,4 +1,8 @@
 const PAPER_BASE_URL = 'https://paper-api.alpaca.markets';
+// Alpaca serves market data from a single fixed host for both paper and live trading
+// accounts (gated only by the account's data plan, not by the trading endpoint). It is
+// intentionally not read from any environment variable, unlike the trading base URL.
+const MARKET_DATA_BASE_URL = 'https://data.alpaca.markets';
 const db = require('../database/db');
 const { validatePaperOrder } = require('./alpaca_order_policy');
 
@@ -45,8 +49,8 @@ function createPaperClient({ env = process.env, fetchImpl = global.fetch, timeou
 
     const notFound = Symbol('alpaca-paper-not-found');
 
-    async function request(path, options = {}) {
-        const response = await fetchImpl(`${PAPER_BASE_URL}${path}`, {
+    async function doFetch(baseUrl, path, options = {}) {
+        const response = await fetchImpl(`${baseUrl}${path}`, {
             method: options.method || 'GET',
             headers: {
                 'APCA-API-KEY-ID': credentials.key,
@@ -65,14 +69,19 @@ function createPaperClient({ env = process.env, fetchImpl = global.fetch, timeou
                 : 'ALPACA_BROKER_UNAVAILABLE';
             throw error;
         }
+        // A cancel (DELETE) succeeds with 204 No Content; parsing a JSON body would throw.
+        if (response.status === 204) return null;
         return response.json();
     }
+
+    const request = (path, options) => doFetch(PAPER_BASE_URL, path, options);
+    const dataRequest = (path, options) => doFetch(MARKET_DATA_BASE_URL, path, options);
 
     return {
         getAccount: () => request('/v2/account'),
         getClock: () => request('/v2/clock'),
         getPositions: () => request('/v2/positions'),
-        getOrders: () => request('/v2/orders?status=open&direction=desc'),
+        getOrders: ({ status = 'open', nested = false } = {}) => request(`/v2/orders?status=${encodeURIComponent(status)}&direction=desc${nested ? '&nested=true' : ''}`),
         getAsset: (symbol) => request(`/v2/assets/${encodeURIComponent(symbol)}`),
         getPosition: async (symbol) => {
             const result = await request(`/v2/positions/${encodeURIComponent(symbol)}`, { allowNotFound: true });
@@ -84,6 +93,31 @@ function createPaperClient({ env = process.env, fetchImpl = global.fetch, timeou
             return result === notFound ? { found: false, order: null } : { found: true, order: result };
         },
         submitOrder: (order) => request('/v2/orders', { method: 'POST', body: order }),
+        // A cancel can legitimately race a fill or an operator having already removed the
+        // order; that is a normal outcome to report, not an error to throw.
+        cancelOrder: async (brokerOrderId) => {
+            const result = await request(`/v2/orders/${encodeURIComponent(brokerOrderId)}`, { method: 'DELETE', allowNotFound: true });
+            return result === notFound ? { canceled: false, reason: 'not_found' } : { canceled: true };
+        },
+        replaceOrder: async (brokerOrderId, patch) => {
+            const result = await request(`/v2/orders/${encodeURIComponent(brokerOrderId)}`, { method: 'PATCH', body: patch, allowNotFound: true });
+            return result === notFound ? null : result;
+        },
+        getLatestQuote: (symbol, { feed = 'iex' } = {}) => dataRequest(`/v2/stocks/${encodeURIComponent(symbol)}/quotes/latest?feed=${encodeURIComponent(feed)}`),
+        getLatestBar: (symbol, { feed = 'iex' } = {}) => dataRequest(`/v2/stocks/${encodeURIComponent(symbol)}/bars/latest?feed=${encodeURIComponent(feed)}`),
+        // page_token walks backward from the newest activity (Alpaca's default direction),
+        // which cannot express "everything since the last successful import" on its own —
+        // that requires after+direction=asc, which is what a restart/backfill cursor needs.
+        getAccountActivities: ({ activityType = 'FILL', pageToken, pageSize, after, until, direction } = {}) => {
+            const params = new URLSearchParams();
+            if (pageSize != null) params.set('page_size', String(pageSize));
+            if (pageToken) params.set('page_token', pageToken);
+            if (after) params.set('after', after);
+            if (until) params.set('until', until);
+            if (direction) params.set('direction', direction);
+            const qs = params.toString();
+            return request(`/v2/account/activities/${encodeURIComponent(activityType)}${qs ? `?${qs}` : ''}`);
+        },
     };
 }
 
@@ -105,7 +139,7 @@ async function getPaperReconciliationSnapshot(options = {}) {
     const [clock, positions, openOrders] = await Promise.all([
         client.getClock(),
         client.getPositions(),
-        client.getOrders(),
+        client.getOrders({ status: 'open' }),
     ]);
 
     return {
@@ -185,8 +219,12 @@ async function submitPaperOrderUnlocked({ order, idempotencyKey, client = create
     }
 
     const symbol = String(order?.symbol || '').trim().toUpperCase();
+    // committedBuyCash/committedSellQty assume an open-orders-only list (a terminal order's
+    // qty - filled_qty reads as zero remaining, which only holds for a genuinely open one);
+    // status is pinned explicitly here so a future default change can't silently feed them
+    // filled/canceled rows.
     const [account, asset, position, openOrders] = await Promise.all([
-        client.getAccount(), client.getAsset(symbol), client.getPosition(symbol), client.getOrders(),
+        client.getAccount(), client.getAsset(symbol), client.getPosition(symbol), client.getOrders({ status: 'open' }),
     ]);
     const positionQty = position?.side === 'long' ? Number(position.qty) : 0;
     const cashAfterCommitments = Number(account?.cash) - committedBuyCash(openOrders, existingAudits);
@@ -287,4 +325,4 @@ async function resolveMissingPaperOrderAudit({ idempotencyKey, confirmed = false
     return { status: 'submission_not_found' };
 }
 
-module.exports = { PAPER_BASE_URL, getPaperConfiguration, createPaperClient, getPaperAccountSummary, getPaperReconciliationSnapshot, submitPaperOrder, reconcilePaperOrderAudits, resolveMissingPaperOrderAudit };
+module.exports = { PAPER_BASE_URL, MARKET_DATA_BASE_URL, getPaperConfiguration, createPaperClient, getPaperAccountSummary, getPaperReconciliationSnapshot, submitPaperOrder, reconcilePaperOrderAudits, resolveMissingPaperOrderAudit };
