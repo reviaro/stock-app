@@ -227,6 +227,25 @@ test('requests the nested bracket-order tree only when explicitly asked, preserv
     assert.strictEqual(requests[2], 'https://paper-api.alpaca.markets/v2/orders?status=all&direction=desc&nested=true');
 });
 
+test('getOrder requests the nested leg tree only when explicitly asked, for discovering a bracket\'s protective legs', async () => {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const requests = [];
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+    const client = createPaperClient({
+        fetchImpl: async (url) => {
+            requests.push(url);
+            return { ok: true, json: async () => ({ id: 'parent-1', legs: null }) };
+        },
+    });
+
+    await client.getOrder('parent-1');
+    assert.strictEqual(requests[0], 'https://paper-api.alpaca.markets/v2/orders/parent-1');
+
+    await client.getOrder('parent-1', { nested: true });
+    assert.strictEqual(requests[1], 'https://paper-api.alpaca.markets/v2/orders/parent-1?nested=true');
+});
+
 test('cancelOrder returns a structured outcome for both a no-content success and a not-found order', async () => {
     process.env.ALPACA_API_KEY = 'paper-key';
     process.env.ALPACA_API_SECRET = 'paper-secret';

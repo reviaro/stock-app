@@ -87,7 +87,7 @@ function createPaperClient({ env = process.env, fetchImpl = global.fetch, timeou
             const result = await request(`/v2/positions/${encodeURIComponent(symbol)}`, { allowNotFound: true });
             return result === notFound ? null : result;
         },
-        getOrder: (brokerOrderId) => request(`/v2/orders/${encodeURIComponent(brokerOrderId)}`),
+        getOrder: (brokerOrderId, { nested = false } = {}) => request(`/v2/orders/${encodeURIComponent(brokerOrderId)}${nested ? '?nested=true' : ''}`),
         getOrderByClientOrderId: async (clientOrderId) => {
             const result = await request(`/v2/orders:by_client_order_id?client_order_id=${encodeURIComponent(clientOrderId)}`, { allowNotFound: true });
             return result === notFound ? { found: false, order: null } : { found: true, order: result };
