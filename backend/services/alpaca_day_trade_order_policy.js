@@ -6,6 +6,11 @@ const { assertRegularMarketHoursOpen, computeBoundedEntryPrice } = require('./al
 // only reading that stays internally consistent across all five checks.
 const DEFAULT_DAY_TRADE_POLICY = {
     entriesEnabled: false, // fail closed: Stage 3+ of the cutover (plan Section 10) turns this on
+    // Named here, not left to a client/module default, so the feed actually used for an entry
+    // is a recorded policy choice — the same one Task 14's UI discloses as Alpaca's IEX-coverage
+    // limitation (plan Section 2) — rather than something a caller silently inherited.
+    feed: 'iex',
+    maxQuoteAgeMs: 10_000,
     maxSlippagePct: 0.005,
     cutoffMinutesBeforeClose: 15,
     maxPositionPct: 0.25,

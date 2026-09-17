@@ -85,6 +85,26 @@ function updateMonitorState(patch) {
     return db.updateAlpacaMonitorState(patch);
 }
 
+function acquireSubmissionLease({ holderId, leaseDurationMs, now }) {
+    return db.acquireAlpacaMonitorSubmissionLease({ holderId, leaseDurationMs, now });
+}
+
+function releaseSubmissionLease({ holderId }) {
+    return db.releaseAlpacaMonitorSubmissionLease({ holderId });
+}
+
+function getOrderAuditByIdempotencyKey(idempotencyKey) {
+    return db.getAlpacaPaperOrderAuditByIdempotencyKey(idempotencyKey);
+}
+
+function updateOrderAudit(idempotencyKey, patch) {
+    return db.updateAlpacaPaperOrderAudit(idempotencyKey, patch);
+}
+
+function listOrderAudits() {
+    return db.listAlpacaPaperOrderAudits();
+}
+
 module.exports = {
     computeFilledSummary,
     createPlanWithEntry,
@@ -98,4 +118,9 @@ module.exports = {
     computeFilledSummaryForPlan,
     getMonitorState,
     updateMonitorState,
+    acquireSubmissionLease,
+    releaseSubmissionLease,
+    getOrderAuditByIdempotencyKey,
+    updateOrderAudit,
+    listOrderAudits,
 };

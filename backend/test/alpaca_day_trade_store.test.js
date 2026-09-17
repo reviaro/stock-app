@@ -54,10 +54,14 @@ beforeEach(async () => {
     await new Promise((resolve, reject) => sqlite.serialize(() => {
         sqlite.run('DELETE FROM alpaca_day_trade_plans');
         sqlite.run('DELETE FROM alpaca_paper_orders');
-        sqlite.run('DELETE FROM alpaca_paper_fills', (err) => {
-            sqlite.close();
-            err ? reject(err) : resolve();
-        });
+        sqlite.run('DELETE FROM alpaca_paper_fills');
+        sqlite.run(
+            "UPDATE alpaca_monitor_state SET submission_lease_holder = NULL, submission_lease_expires_at = NULL WHERE id = 1",
+            (err) => {
+                sqlite.close();
+                err ? reject(err) : resolve();
+            },
+        );
     }));
 });
 
@@ -253,4 +257,63 @@ test('rolls back the plan when the entry order insert fails at the SQL level', a
 
     const amdPlan = await store.getActivePlanForSymbol('AMD');
     assert.strictEqual(amdPlan, null);
+});
+
+test('acquires the durable submission lease when it is unheld, and reports failure to the loser of a race', async () => {
+    const first = await store.acquireSubmissionLease({ holderId: 'web-1', leaseDurationMs: 30_000, now: '2026-09-17T13:30:00.000Z' });
+    assert.strictEqual(first.acquired, true);
+
+    const second = await store.acquireSubmissionLease({ holderId: 'monitor-1', leaseDurationMs: 30_000, now: '2026-09-17T13:30:00.500Z' });
+    assert.strictEqual(second.acquired, false);
+
+    const state = await store.getMonitorState();
+    assert.strictEqual(state.submission_lease_holder, 'web-1');
+});
+
+test('reclaims an expired lease, but not one still within its expiry', async () => {
+    await store.acquireSubmissionLease({ holderId: 'web-1', leaseDurationMs: 1000, now: '2026-09-17T13:30:00.000Z' });
+
+    const tooSoon = await store.acquireSubmissionLease({ holderId: 'monitor-1', leaseDurationMs: 30_000, now: '2026-09-17T13:30:00.500Z' });
+    assert.strictEqual(tooSoon.acquired, false, 'a lease with 500ms left must not be reclaimed');
+
+    const afterExpiry = await store.acquireSubmissionLease({ holderId: 'monitor-1', leaseDurationMs: 30_000, now: '2026-09-17T13:30:01.500Z' });
+    assert.strictEqual(afterExpiry.acquired, true, 'a lease past its expiry must be reclaimable');
+});
+
+test('fails closed on a held lease with a missing or corrupted expiry, rather than treating it as free', async () => {
+    const sqlite = db.getDb();
+    await new Promise((resolve, reject) => {
+        sqlite.run(
+            "UPDATE alpaca_monitor_state SET submission_lease_holder = 'ghost', submission_lease_expires_at = NULL WHERE id = 1",
+            (err) => { sqlite.close(); err ? reject(err) : resolve(); },
+        );
+    });
+
+    const attempt = await store.acquireSubmissionLease({ holderId: 'monitor-1', leaseDurationMs: 30_000, now: '2026-09-17T13:30:00.000Z' });
+    assert.strictEqual(attempt.acquired, false, 'a NULL expiry on a held lease is ambiguous, not free');
+});
+
+test('only the current holder can release the submission lease', async () => {
+    await store.acquireSubmissionLease({ holderId: 'web-1', leaseDurationMs: 30_000, now: '2026-09-17T13:30:00.000Z' });
+
+    const wrongHolder = await store.releaseSubmissionLease({ holderId: 'monitor-1' });
+    assert.strictEqual(wrongHolder.released, false);
+    assert.strictEqual((await store.getMonitorState()).submission_lease_holder, 'web-1');
+
+    const rightHolder = await store.releaseSubmissionLease({ holderId: 'web-1' });
+    assert.strictEqual(rightHolder.released, true);
+    const state = await store.getMonitorState();
+    assert.strictEqual(state.submission_lease_holder, null);
+    assert.strictEqual(state.submission_lease_expires_at, null);
+});
+
+test('looks up an order audit row by its idempotency key, returning null when absent', async () => {
+    await store.createPlanWithEntry(basePlan, baseEntryOrder);
+
+    const found = await store.getOrderAuditByIdempotencyKey('dt-nvda-entry-1');
+    assert.strictEqual(found.symbol, 'NVDA');
+    assert.strictEqual(found.execution_epoch, 'day_trading');
+
+    const missing = await store.getOrderAuditByIdempotencyKey('dt-does-not-exist');
+    assert.strictEqual(missing, null);
 });

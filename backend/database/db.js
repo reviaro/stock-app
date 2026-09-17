@@ -2048,6 +2048,17 @@ function listAlpacaPaperOrderAudits() {
     });
 }
 
+function getAlpacaPaperOrderAuditByIdempotencyKey(idempotencyKey) {
+    const key = String(idempotencyKey || '').trim();
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.get('SELECT * FROM alpaca_paper_orders WHERE idempotency_key = ?', [key], (err, row) => {
+            sqlite.close();
+            err ? reject(err) : resolve(row || null);
+        });
+    });
+}
+
 function normalizeAlpacaDayTradePlan(plan) {
     const normalized = {
         symbol: String(plan.symbol || '').trim().toUpperCase(),
@@ -2327,6 +2338,59 @@ function updateAlpacaMonitorState(patch = {}) {
     });
 }
 
+// Safety Invariant #10: the web server and the standalone monitor worker are separate
+// processes, so the existing in-process Promise queue (alpaca_paper_service.js's
+// submissionQueue) cannot serialize submissions between them — only a lease stored in SQLite
+// can. This is a single conditional UPDATE, not a read-then-write: the free-to-acquire
+// condition is entirely inside the WHERE clause, so there is no window between checking and
+// claiming for a second caller to race into. A NULL submission_lease_expires_at on a held
+// lease (corrupted or never set) makes `submission_lease_expires_at < ?` evaluate to NULL in
+// SQLite, which is not true, so the row is correctly treated as still held rather than free.
+function acquireAlpacaMonitorSubmissionLease({ holderId, leaseDurationMs, now }) {
+    const holder = String(holderId || '').trim();
+    if (!holder) return Promise.reject(new Error('a holder id is required to acquire the submission lease'));
+    const nowDate = new Date(now);
+    if (!Number.isFinite(Number(leaseDurationMs)) || Number(leaseDurationMs) <= 0 || Number.isNaN(nowDate.getTime())) {
+        return Promise.reject(new Error('a valid lease duration and current time are required'));
+    }
+    const expiresAt = new Date(nowDate.getTime() + Number(leaseDurationMs)).toISOString();
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            `UPDATE alpaca_monitor_state
+             SET submission_lease_holder = ?, submission_lease_expires_at = ?, updated_at = datetime('now')
+             WHERE id = 1 AND (submission_lease_holder IS NULL OR submission_lease_expires_at < ?)`,
+            [holder, expiresAt, nowDate.toISOString()],
+            function(err) {
+                sqlite.close();
+                if (err) return reject(err);
+                resolve({ acquired: this.changes === 1, expiresAt });
+            },
+        );
+    });
+}
+
+// Only the current holder can release its own lease — a slow caller whose lease already
+// expired and was reclaimed by someone else must not be able to clear the new holder's claim.
+function releaseAlpacaMonitorSubmissionLease({ holderId }) {
+    const holder = String(holderId || '').trim();
+    if (!holder) return Promise.reject(new Error('a holder id is required to release the submission lease'));
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            `UPDATE alpaca_monitor_state
+             SET submission_lease_holder = NULL, submission_lease_expires_at = NULL, updated_at = datetime('now')
+             WHERE id = 1 AND submission_lease_holder = ?`,
+            [holder],
+            function(err) {
+                sqlite.close();
+                if (err) return reject(err);
+                resolve({ released: this.changes === 1 });
+            },
+        );
+    });
+}
+
 function settleAfterClose(sqlite, sqlError, value, resolve, reject) {
     sqlite.close((closeError) => {
         const error = sqlError || closeError;
@@ -2500,6 +2564,7 @@ module.exports = {
     createAlpacaPaperOrderAudit,
     updateAlpacaPaperOrderAudit,
     listAlpacaPaperOrderAudits,
+    getAlpacaPaperOrderAuditByIdempotencyKey,
     createAlpacaDayTradePlanWithEntry,
     getAlpacaDayTradePlan,
     getActiveAlpacaDayTradePlanForSymbol,
@@ -2509,6 +2574,8 @@ module.exports = {
     listAlpacaPaperFillsForPlan,
     getAlpacaMonitorState,
     updateAlpacaMonitorState,
+    acquireAlpacaMonitorSubmissionLease,
+    releaseAlpacaMonitorSubmissionLease,
     createStrategyExperiment,
     listStrategyExperiments,
     getStrategyExperimentById,
