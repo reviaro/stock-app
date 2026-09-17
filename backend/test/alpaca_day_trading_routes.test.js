@@ -30,6 +30,24 @@ function post(port, body, requestPath, headers = {}) {
     });
 }
 
+function get(port, requestPath, headers = {}) {
+    return new Promise((resolve, reject) => {
+        const request = http.request({
+            host: '127.0.0.1', port, path: requestPath, method: 'GET', headers,
+        }, (response) => {
+            let text = '';
+            response.on('data', (chunk) => { text += chunk; });
+            response.on('end', () => {
+                let parsed;
+                try { parsed = text ? JSON.parse(text) : null; } catch (_err) { parsed = text; }
+                resolve({ status: response.statusCode, body: parsed });
+            });
+        });
+        request.on('error', reject);
+        request.end();
+    });
+}
+
 function createApp() {
     delete require.cache[require.resolve('../services/alpaca_paper_service')];
     delete require.cache[require.resolve('../services/alpaca_day_trade_execution')];
@@ -706,4 +724,204 @@ test('POST /day-trading/kill-switch/clear fails closed (does not clear) when the
 
     assert.notStrictEqual(result.status, 200, 'a broker outage during verification must never be read as "safe to clear"');
     assert.strictEqual((await store.getMonitorState()).kill_switch, 1);
+});
+
+// --- Read routes: full dashboard visibility, no need to check Alpaca's own site ---
+
+test('GET /day-trading/monitor-health requires only dashboard auth, no Day Trading token', async () => {
+    delete process.env.ALPACA_DAY_TRADING_ENTRY_ENABLED;
+    delete process.env.ALPACA_DAY_TRADING_ENTRY_TOKEN;
+    await store.updateMonitorState({ mode: 'shadow', kill_switch: true, health_code: 'STALE_RECONCILIATION', health_error: 'too old' });
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, '/api/alpaca-paper/day-trading/monitor-health');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    assert.strictEqual(result.body.data.mode, 'shadow');
+    assert.strictEqual(result.body.data.killSwitch, true);
+    assert.strictEqual(result.body.data.healthCode, 'STALE_RECONCILIATION');
+});
+
+test('GET /day-trading/monitor-health never contacts the broker, so it stays answerable during an outage', async () => {
+    await store.updateMonitorState({ mode: 'shadow' });
+    global.fetch = async (url) => { throw new Error(`must never be called: ${url}`); };
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, '/api/alpaca-paper/day-trading/monitor-health');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+});
+
+function mockSnapshotBroker({
+    cash = '50000.00', equity = '100000.00', positions = [],
+} = {}) {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    global.fetch = async (url) => {
+        if (url.endsWith('/v2/account')) return { ok: true, json: async () => ({ status: 'ACTIVE', cash, equity, buying_power: '200000.00' }) };
+        if (url.endsWith('/v2/clock')) return { ok: true, json: async () => ({ is_open: true, timestamp: '2026-09-17T14:00:00Z', next_open: '2026-09-18T13:30:00Z', next_close: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString() }) };
+        if (url.endsWith('/v2/positions')) return { ok: true, json: async () => positions };
+        throw new Error(`unexpected broker request in this test: ${url}`);
+    };
+}
+
+test('GET /day-trading/snapshot requires only dashboard auth', async () => {
+    mockSnapshotBroker();
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, '/api/alpaca-paper/day-trading/snapshot');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    assert.strictEqual(result.body.data.account.cash, '50000.00');
+    assert.strictEqual(result.body.data.clock.isOpen, true);
+});
+
+test('GET /day-trading/snapshot flags a broker position with no matching plan as untracked', async () => {
+    mockSnapshotBroker({
+        positions: [{ symbol: 'AAPL', qty: '3', avg_entry_price: '200', current_price: '205', market_value: '615', unrealized_pl: '15', unrealized_plpc: '0.024', side: 'long' }],
+    });
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, '/api/alpaca-paper/day-trading/snapshot');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    assert.strictEqual(result.body.data.positions.length, 1);
+    assert.strictEqual(result.body.data.positions[0].tracked, false, 'a position with no matching nonterminal plan must be flagged untracked, not rendered as if managed');
+});
+
+test('GET /day-trading/snapshot flags a broker position matching an active plan as tracked, with its plan id', async () => {
+    const plan = await seedActivePlan();
+    mockSnapshotBroker({
+        positions: [{ symbol: 'NVDA', qty: '10', avg_entry_price: '100.50', current_price: '101', market_value: '1010', unrealized_pl: '5', unrealized_plpc: '0.005', side: 'long' }],
+    });
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, '/api/alpaca-paper/day-trading/snapshot');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    assert.strictEqual(result.body.data.positions[0].tracked, true);
+    assert.strictEqual(result.body.data.positions[0].planId, plan.id);
+});
+
+test('GET /day-trading/snapshot includes a risk block computed against equity, with the account-2 policy limits for reference', async () => {
+    await seedActivePlan();
+    mockSnapshotBroker();
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, '/api/alpaca-paper/day-trading/snapshot');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    const { risk } = result.body.data;
+    assert.strictEqual(risk.totalOpenRiskDollars, 25);
+    assert.strictEqual(risk.totalOpenRiskPct, 0.00025);
+    assert.deepStrictEqual(risk.limits, {
+        maxPositionPct: 0.25, minCashPct: 0.10, maxRiskPerTradePct: 0.01, maxTotalOpenRiskPct: 0.02, maxDailyLossPct: 0.02,
+    });
+});
+
+test('GET /day-trading/snapshot reports daily P&L as unavailable, honestly, when the session date has never been recorded', async () => {
+    await seedActivePlan();
+    mockSnapshotBroker();
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, '/api/alpaca-paper/day-trading/snapshot');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    assert.strictEqual(result.body.data.risk.dailyRealizedPnl, null);
+    assert.ok(result.body.data.risk.dailyPnlUnavailableReason);
+});
+
+test('GET /day-trading/snapshot never leaks broker order ids or credentials', async () => {
+    await seedActivePlan();
+    mockSnapshotBroker({
+        positions: [{ symbol: 'NVDA', qty: '10', avg_entry_price: '100.50', current_price: '101', market_value: '1010', unrealized_pl: '5', unrealized_plpc: '0.005', side: 'long' }],
+    });
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, '/api/alpaca-paper/day-trading/snapshot');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    assert.doesNotMatch(JSON.stringify(result.body), /broker-parent-1|paper-key|paper-secret/i);
+});
+
+test('GET /day-trading/plans lists plans with their cached fill summary and realized outcome', async () => {
+    const plan = await seedActivePlan();
+    await db.updateAlpacaDayTradePlan(plan.id, {
+        state: 'closed', exit_reason: 'stop_loss', realized_pnl: -25, realized_r: -1,
+        filled_entry_qty: 10, avg_entry_price: 100.50, filled_exit_qty: 10, avg_exit_price: 98.00,
+        closed_at: '2026-09-17T14:00:00Z',
+    });
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, '/api/alpaca-paper/day-trading/plans');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    assert.strictEqual(result.body.data.length, 1);
+    assert.strictEqual(result.body.data[0].symbol, 'NVDA');
+    assert.strictEqual(result.body.data[0].realizedPnl, -25);
+    assert.strictEqual(result.body.data[0].exitReason, 'stop_loss');
+});
+
+test('GET /day-trading/plans filters by state', async () => {
+    await seedActivePlan();
+    const app = createApp();
+    const server = app.listen(0);
+    const openResult = await get(server.address().port, '/api/alpaca-paper/day-trading/plans?state=entry_pending');
+    const closedResult = await get(server.address().port, '/api/alpaca-paper/day-trading/plans?state=closed');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(openResult.body.data.length, 1);
+    assert.strictEqual(closedResult.body.data.length, 0);
+});
+
+test('GET /day-trading/plans/:id returns full detail including the fill history', async () => {
+    const plan = await seedActivePlan();
+    await store.recordFill({
+        activity_id: 'fill-1', plan_id: plan.id, broker_order_id: 'broker-parent-1', symbol: 'NVDA',
+        side: 'buy', qty: 10, price: 100.50, executed_at: '2026-09-17T13:31:00Z', fill_type: 'fill', source: 'rest_reconciliation',
+    });
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, `/api/alpaca-paper/day-trading/plans/${plan.id}`);
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    assert.strictEqual(result.body.data.plan.symbol, 'NVDA');
+    assert.strictEqual(result.body.data.fills.length, 1);
+    assert.strictEqual(result.body.data.fills[0].price, 100.50);
+});
+
+test('GET /day-trading/plans/:id returns 404 for an unknown plan', async () => {
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, '/api/alpaca-paper/day-trading/plans/999999');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 404);
+});
+
+test('GET /day-trading/journal returns analytics computed from closed plans', async () => {
+    const plan = await seedActivePlan();
+    await db.updateAlpacaDayTradePlan(plan.id, {
+        state: 'closed', exit_reason: 'take_profit', realized_pnl: 35, realized_r: 1.4, closed_at: '2026-09-17T15:00:00Z',
+    });
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, '/api/alpaca-paper/day-trading/journal');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    assert.strictEqual(result.body.data.closed_trade_count, 1);
+    assert.strictEqual(result.body.data.total_pnl, 35);
 });

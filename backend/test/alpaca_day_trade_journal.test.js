@@ -6,6 +6,7 @@ const {
     computeRealizedOutcome,
     exitReasonForBrokerOrderId,
     computeDayTradeJournalAnalytics,
+    computeDailyRealizedPnl,
 } = require('../services/alpaca_day_trade_journal');
 
 test('assertNoOverfill rejects entry fills that exceed the planned quantity', () => {
@@ -65,4 +66,18 @@ test('computeDayTradeJournalAnalytics reuses trade_journal\'s generic analytics 
     assert.strictEqual(analytics.closed_trade_count, 2);
     assert.strictEqual(analytics.total_pnl, 50);
     assert.strictEqual(analytics.by_setup.breakout.trade_count, 2);
+});
+
+test('computeDailyRealizedPnl sums realized P&L for plans closed on the given session date only', () => {
+    const plans = [
+        { state: 'closed', closed_at: '2026-09-17T15:00:00Z', realized_pnl: 35 },
+        { state: 'closed', closed_at: '2026-09-17T20:00:00Z', realized_pnl: -25 },
+        { state: 'closed', closed_at: '2026-09-16T15:00:00Z', realized_pnl: 999 }, // a different day
+        { state: 'entry_pending', closed_at: null, realized_pnl: null }, // not yet closed
+    ];
+    assert.strictEqual(computeDailyRealizedPnl(plans, '2026-09-17'), 10);
+});
+
+test('computeDailyRealizedPnl returns zero, not NaN, when nothing closed on the given date', () => {
+    assert.strictEqual(computeDailyRealizedPnl([], '2026-09-17'), 0);
 });

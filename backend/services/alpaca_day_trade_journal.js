@@ -88,10 +88,24 @@ function computeDayTradeJournalAnalytics(plans) {
     return computeJournalAnalytics(plans.map((plan) => ({ ...plan, status: plan.state })));
 }
 
+// Extracted from alpaca_day_trade_execution.js's entry-time daily-loss-lockout computation so
+// both callers share one definition, without changing what date the entry path passes it
+// (its own UTC-slice-of-`now`, unchanged — see the matrix for why: switching it to
+// alpaca_monitor_state.session_date would make it null on every call today, since nothing
+// writes that column yet, and assertDailyLossLimitNotBreached's `|| 0` would silently read a
+// null P&L as "no loss," fail-open on a Safety Invariant #8 check). The snapshot route is the
+// only caller that passes session_date, and only when it is actually populated.
+function computeDailyRealizedPnl(plans, sessionDate) {
+    return plans
+        .filter((plan) => plan.state === 'closed' && String(plan.closed_at || '').slice(0, 10) === sessionDate)
+        .reduce((total, plan) => total + Number(plan.realized_pnl || 0), 0);
+}
+
 module.exports = {
     assertNoOverfill,
     computeRealizedOutcome,
     exitReasonForBrokerOrderId,
     attemptCloseFromFills,
     computeDayTradeJournalAnalytics,
+    computeDailyRealizedPnl,
 };

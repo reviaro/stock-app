@@ -1,6 +1,7 @@
 const store = require('./alpaca_day_trade_store');
 const { getProvenQuote } = require('./alpaca_market_data');
 const { buildDayTradeBracketOrder, DEFAULT_DAY_TRADE_POLICY } = require('./alpaca_day_trade_order_policy');
+const { computeDailyRealizedPnl } = require('./alpaca_day_trade_journal');
 
 const UNRESOLVED_ORDER_STATUSES = ['pending_submission', 'submission_unknown', 'submission_failed'];
 const TERMINAL_ORDER_STATUSES = ['filled', 'canceled', 'rejected', 'expired', 'suspended', 'stopped', 'submission_rejected', 'submission_not_found'];
@@ -133,9 +134,7 @@ async function executeDayTradeEntry({
         const allPlans = await store.listPlans(null);
         const nonterminalPlans = allPlans.filter((plan) => !TERMINAL_PLAN_STATES.includes(plan.state));
         const sessionDate = String(now instanceof Date ? now.toISOString() : now).slice(0, 10);
-        const dailyRealizedPnl = allPlans
-            .filter((plan) => plan.state === 'closed' && String(plan.closed_at || '').slice(0, 10) === sessionDate)
-            .reduce((total, plan) => total + Number(plan.realized_pnl || 0), 0);
+        const dailyRealizedPnl = computeDailyRealizedPnl(allPlans, sessionDate);
         const riskContext = {
             hasActivePlanForSymbol: nonterminalPlans.some((plan) => plan.symbol === symbol),
             currentOpenRiskDollars: nonterminalPlans.reduce((total, plan) => total + Number(plan.planned_risk_dollars || 0), 0),
