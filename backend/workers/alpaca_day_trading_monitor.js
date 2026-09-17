@@ -1,0 +1,222 @@
+const fs = require('fs');
+const path = require('path');
+
+const store = require('../services/alpaca_day_trade_store');
+const { reconcileFills } = require('../services/alpaca_fill_reconciliation');
+const { decidePlanAction, DEFAULT_MONITOR_POLICY } = require('../services/alpaca_day_trade_monitor');
+const { executeManagementAction } = require('../services/alpaca_day_trade_repair_execution');
+
+const DEFAULT_LOCK_PATH = path.join(__dirname, '..', '..', 'run', 'alpaca-day-trading-monitor.lock');
+const DEFAULT_POLL_INTERVAL_MS = 60_000; // Section 8: every 60s while any plan/order/position is open
+const DEFAULT_IDLE_POLL_INTERVAL_MS = 300_000; // Section 8: a slower cadence while flat/closed -- tunable, Stage 4 material
+const TERMINAL_PLAN_STATES = ['closed', 'cancelled', 'error'];
+
+function workerError(code, message) {
+    return Object.assign(new Error(message), { code });
+}
+
+function isPidAlive(pid) {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (_error) {
+        return false;
+    }
+}
+
+// A PID file with exclusive creation, not a distributed lock: this is defense in depth behind
+// systemd itself being the primary single-instance guard (a unit with no concurrent instances
+// configured). process.kill(pid, 0) succeeds for a PID owned by another user, and a recycled
+// PID after a reboot can be alive but be an unrelated process -- acceptable for this purpose,
+// not something to rely on outside a systemd-managed deployment.
+function acquireInstanceLock(lockPath) {
+    try {
+        const fd = fs.openSync(lockPath, 'wx');
+        fs.writeSync(fd, String(process.pid));
+        fs.closeSync(fd);
+        return { acquired: true, release: () => { try { fs.unlinkSync(lockPath); } catch (_e) { /* already gone */ } } };
+    } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        let existingPid = null;
+        try { existingPid = Number(fs.readFileSync(lockPath, 'utf8').trim()); } catch (_e) { /* unreadable: treat as stale below */ }
+        if (existingPid && isPidAlive(existingPid)) {
+            return { acquired: false, release: () => {} };
+        }
+        fs.unlinkSync(lockPath); // stale: reclaim
+        return acquireInstanceLock(lockPath);
+    }
+}
+
+function legFromOrder(order, type) {
+    if (!Array.isArray(order?.legs)) return null;
+    return order.legs.find((leg) => leg.type === type) || null;
+}
+
+async function buildObservation(plan, {
+    client, policy, now, log = () => {},
+}) {
+    try {
+        const [clock, position, parentOrder] = await Promise.all([
+            client.getClock(),
+            client.getPosition(plan.symbol),
+            plan.entry_parent_broker_order_id
+                ? client.getOrder(plan.entry_parent_broker_order_id, { nested: true })
+                : Promise.resolve(null),
+        ]);
+        return {
+            plan,
+            position,
+            brokerUnavailable: false,
+            entryOrder: parentOrder ? {
+                status: parentOrder.status, qty: Number(parentOrder.qty), filled_qty: Number(parentOrder.filled_qty || 0),
+                submitted_at: parentOrder.submitted_at ?? null,
+            } : null,
+            stopLeg: legFromOrder(parentOrder, 'stop'),
+            targetLeg: legFromOrder(parentOrder, 'limit'),
+            clock,
+            monitorState: await store.getMonitorState(),
+            now: now(),
+            policy,
+        };
+    } catch (error) {
+        // Deliberately broad: any failure fetching this plan's broker state, network or
+        // programming error alike, must fail the observation closed rather than crash the
+        // tick for every other plan. But an unqualified catch that swallows the error entirely
+        // makes a genuine bug indistinguishable from a real outage in the logs -- log it, so
+        // "BROKER_UNAVAILABLE" for every tick is recoverable evidence of a bug, not a dead end.
+        log({ planId: plan.id, symbol: plan.symbol, observationError: error.message });
+        return {
+            plan, position: null, brokerUnavailable: true, entryOrder: null, stopLeg: null, targetLeg: null,
+            clock: null, monitorState: await store.getMonitorState(), now: now(), policy,
+        };
+    }
+}
+
+function createWorker({
+    client: providedClient,
+    createClient,
+    lockPath = DEFAULT_LOCK_PATH,
+    holderId = `monitor-${process.pid}`,
+    pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
+    idlePollIntervalMs = DEFAULT_IDLE_POLL_INTERVAL_MS,
+    policy = DEFAULT_MONITOR_POLICY,
+    now = () => new Date(),
+    log = () => {},
+} = {}) {
+    let ready = false;
+    let stopped = false;
+    let timer = null;
+    let lock = null;
+    let client = providedClient || null;
+
+    async function runTick() {
+        const monitorState = await store.getMonitorState();
+        if (monitorState?.mode === 'disabled') return;
+
+        // Evidence recording (importing fills, closing plans with complete broker evidence) is
+        // safe even with the kill switch tripped -- it never creates new exposure -- so it
+        // keeps running. The decide/execute loop below does not.
+        await reconcileFills({ client, store });
+
+        if (monitorState.kill_switch) {
+            log({ skipped: 'kill_switch_active' });
+            return; // an operator must clear the switch before the monitor resumes managing plans
+        }
+
+        const plans = (await store.listPlans(null)).filter((plan) => !TERMINAL_PLAN_STATES.includes(plan.state));
+        let lastHealthCode = null;
+        let lastHealthReason = null;
+
+        for (const plan of plans) {
+            const observation = await buildObservation(plan, {
+                client, policy, now, log,
+            });
+            const decision = decidePlanAction(observation);
+            log({ planId: plan.id, symbol: plan.symbol, decision });
+
+            if (decision.healthCode) { lastHealthCode = decision.healthCode; lastHealthReason = decision.reason; }
+
+            if (monitorState.mode === 'paper_execute' && decision.action !== 'none') {
+                try {
+                    await executeManagementAction(decision, plan, { client, holderId, now: now() });
+                } catch (error) {
+                    log({ planId: plan.id, symbol: plan.symbol, executionError: error.message });
+                }
+            }
+            // mode 'shadow': decided and logged, never executed -- Section 10 Stage 2 requires
+            // zero submit/cancel/replace/flatten writes.
+
+            if (decision.activateKillSwitch) {
+                await store.updateMonitorState({ kill_switch: true });
+                log({ planId: plan.id, killSwitchActivated: true });
+                // Stop processing further plans in *this* tick immediately: the switch exists
+                // to stop subsequent writes, not to be recorded after the fact while the rest
+                // of the batch still executes against a system already known to be unsafe.
+                break;
+            }
+        }
+
+        if (lastHealthCode) await store.updateMonitorState({ health_code: lastHealthCode, health_error: lastHealthReason });
+    }
+
+    function scheduleNext() {
+        if (stopped) return;
+        timer = setTimeout(async () => {
+            try { await runTick(); } catch (error) { log({ tickError: error.message }); }
+            scheduleNext();
+        }, pollIntervalMs);
+    }
+
+    async function start() {
+        lock = acquireInstanceLock(lockPath);
+        if (!lock.acquired) {
+            throw workerError('ALPACA_MONITOR_ALREADY_RUNNING', `another Day Trading monitor instance already holds ${lockPath}`);
+        }
+        try {
+            if (!client) client = createClient();
+        } catch (error) {
+            lock.release();
+            throw error; // fatal configuration: reject and let systemd's Restart=always retry at the process level
+        }
+
+        try {
+            const monitorState = await store.getMonitorState();
+            if (monitorState?.mode !== 'disabled') {
+                // Startup reconciliation before reporting ready (Section 8 Startup step 4),
+                // regardless of shadow vs. paper_execute -- read-only truth-establishing runs
+                // in every non-disabled mode.
+                await reconcileFills({ client, store });
+            }
+            ready = true;
+            scheduleNext();
+        } catch (error) {
+            lock.release();
+            throw error;
+        }
+    }
+
+    async function stop() {
+        stopped = true;
+        if (timer) clearTimeout(timer);
+        // Graceful shutdown leaves broker-native protective orders intact (systemd hardening,
+        // Section 8): this never cancels or flattens anything on the way out.
+        if (lock) lock.release();
+    }
+
+    return { start, stop, isReady: () => ready };
+}
+
+module.exports = { createWorker, acquireInstanceLock, DEFAULT_LOCK_PATH };
+
+if (require.main === module) {
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+    const worker = createWorker({ createClient: createPaperClient });
+    worker.start().catch((error) => {
+        // eslint-disable-next-line no-console
+        console.error('Alpaca Day Trading monitor failed to start:', error.message);
+        process.exit(1);
+    });
+    const shutdown = () => { worker.stop().then(() => process.exit(0)); };
+    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', shutdown);
+}

@@ -93,6 +93,10 @@ function releaseSubmissionLease({ holderId }) {
     return db.releaseAlpacaMonitorSubmissionLease({ holderId });
 }
 
+function createOrderAudit(order) {
+    return db.createAlpacaPaperOrderAudit(order);
+}
+
 function getOrderAuditByIdempotencyKey(idempotencyKey) {
     return db.getAlpacaPaperOrderAuditByIdempotencyKey(idempotencyKey);
 }
@@ -120,6 +124,7 @@ module.exports = {
     updateMonitorState,
     acquireSubmissionLease,
     releaseSubmissionLease,
+    createOrderAudit,
     getOrderAuditByIdempotencyKey,
     updateOrderAudit,
     listOrderAudits,
