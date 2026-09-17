@@ -22,7 +22,7 @@ beforeEach(async () => {
         sqlite.run('DELETE FROM alpaca_paper_orders');
         sqlite.run('DELETE FROM alpaca_paper_fills');
         sqlite.run(
-            "UPDATE alpaca_monitor_state SET submission_lease_holder = NULL, submission_lease_expires_at = NULL, activity_cursor = NULL, mode = 'disabled', kill_switch = 0, health_code = NULL WHERE id = 1",
+            "UPDATE alpaca_monitor_state SET submission_lease_holder = NULL, submission_lease_expires_at = NULL, activity_cursor = NULL, mode = 'disabled', kill_switch = 0, health_code = NULL, last_rest_reconciliation_at = NULL WHERE id = 1",
             (err) => { sqlite.close(); err ? reject(err) : resolve(); },
         );
     }));

@@ -12,6 +12,7 @@ const {
     normalizeWebSocketFillEvent,
     discoverProtectiveLegs,
     reconcileFills,
+    buildObservation,
 } = require('../services/alpaca_fill_reconciliation');
 
 before(async () => {
@@ -26,7 +27,7 @@ beforeEach(async () => {
         sqlite.run('DELETE FROM alpaca_paper_orders');
         sqlite.run('DELETE FROM alpaca_paper_fills');
         sqlite.run(
-            "UPDATE alpaca_monitor_state SET submission_lease_holder = NULL, submission_lease_expires_at = NULL, activity_cursor = NULL WHERE id = 1",
+            "UPDATE alpaca_monitor_state SET submission_lease_holder = NULL, submission_lease_expires_at = NULL, activity_cursor = NULL, last_rest_reconciliation_at = NULL, health_code = NULL, health_error = NULL WHERE id = 1",
             (err) => { sqlite.close(); err ? reject(err) : resolve(); },
         );
     }));
@@ -320,6 +321,7 @@ test('reconcileFills stops advancing the cursor at the first activity that fails
     const state = await store.getMonitorState();
     assert.strictEqual(state.activity_cursor, '2026-09-17T13:31:00Z', 'the cursor must not pass the malformed activity');
     assert.strictEqual(state.health_code, 'RECONCILIATION_STALLED', 'an aborted pass must be observable, not just inferable from a stopped cursor');
+    assert.strictEqual(state.last_rest_reconciliation_at, null, 'a stalled pass must not be recorded as a successful reconciliation');
 
     // A re-run (e.g. after an operator fixes/skips the bad record upstream) must still see
     // fill-good-2, which it would not if the cursor had advanced past it.
@@ -330,6 +332,25 @@ test('reconcileFills stops advancing the cursor at the first activity that fails
 
     const healthyState = await store.getMonitorState();
     assert.strictEqual(healthyState.health_code, null, 'a clean completed pass must clear a prior stalled health code');
+    assert.ok(healthyState.last_rest_reconciliation_at, 'a clean completed pass must refresh the reconciliation timestamp');
+});
+
+test('reconcileFills refreshes last_rest_reconciliation_at even when there are zero new activities to import', async () => {
+    await seedPlanWithEntry();
+    const client = {
+        getOrder: async () => ({ id: 'broker-parent-1', legs: [] }),
+        getAccountActivities: async () => [], // a quiet period: nothing new since the last check
+        getPosition: async () => null,
+    };
+
+    const before = await store.getMonitorState();
+    assert.strictEqual(before.last_rest_reconciliation_at, null);
+
+    await reconcileFills({ client, store });
+
+    const after = await store.getMonitorState();
+    assert.ok(after.last_rest_reconciliation_at, 'checking and finding nothing new is still a successful reconciliation');
+    assert.strictEqual(after.health_code, null);
 });
 
 test('an overfilled plan is moved to error and does not stall reconciliation for other plans', async () => {
@@ -434,4 +455,55 @@ test('reconcileFills never processes a legacy (non-Day-Trading) order\'s activit
         (err, r) => { sqlite.close(); err ? reject(err) : resolve(r); },
     ));
     assert.strictEqual(row, undefined, 'a legacy execution-epoch order\'s activity must never be imported');
+});
+
+test('buildObservation assembles a fresh per-tick observation from the broker, splitting legs by type', async () => {
+    const { plan } = await seedPlanWithEntry();
+    const client = {
+        getClock: async () => ({ is_open: true, next_close: '2026-09-17T20:00:00.000Z' }),
+        getPosition: async () => ({ qty: 10, side: 'long' }),
+        getOrder: async (id, opts) => {
+            assert.strictEqual(id, 'broker-parent-1');
+            assert.deepStrictEqual(opts, { nested: true });
+            return {
+                id, status: 'filled', qty: 10, filled_qty: 10, submitted_at: '2026-09-17T13:30:00.000Z',
+                legs: [
+                    { id: 'broker-stop-1', type: 'stop', side: 'sell', qty: 10, filled_qty: 0, status: 'held' },
+                    { id: 'broker-target-1', type: 'limit', side: 'sell', qty: 10, filled_qty: 0, status: 'held' },
+                ],
+            };
+        },
+    };
+    const now = () => new Date('2026-09-17T14:00:00.000Z');
+
+    const observation = await buildObservation(plan, { client, policy: { some: 'policy' }, now });
+
+    assert.strictEqual(observation.brokerUnavailable, false);
+    assert.strictEqual(observation.position.qty, 10);
+    assert.strictEqual(observation.entryOrder.status, 'filled');
+    assert.strictEqual(observation.entryOrder.filled_qty, 10);
+    assert.strictEqual(observation.stopLeg.id, 'broker-stop-1');
+    assert.strictEqual(observation.targetLeg.id, 'broker-target-1');
+    assert.strictEqual(observation.clock.is_open, true);
+    assert.deepStrictEqual(observation.now, now());
+    assert.deepStrictEqual(observation.policy, { some: 'policy' });
+});
+
+test('buildObservation fails closed (brokerUnavailable: true) when any broker call throws, without crashing', async () => {
+    const { plan } = await seedPlanWithEntry();
+    const client = {
+        getClock: async () => ({ is_open: true, next_close: '2026-09-17T20:00:00.000Z' }),
+        getPosition: async () => { throw new Error('network blip'); },
+        getOrder: async () => ({ id: 'broker-parent-1', legs: [] }),
+    };
+    const logs = [];
+
+    const observation = await buildObservation(plan, {
+        client, policy: {}, now: () => new Date('2026-09-17T14:00:00.000Z'), log: (entry) => logs.push(entry),
+    });
+
+    assert.strictEqual(observation.brokerUnavailable, true);
+    assert.strictEqual(observation.position, null);
+    assert.strictEqual(logs.length, 1, 'the caught error must be logged, not silently swallowed');
+    assert.match(logs[0].observationError, /network blip/);
 });

@@ -3,8 +3,11 @@ const { executeDayTradeEntry } = require('../services/alpaca_day_trade_execution
 const { createPaperClient, resolveMissingPaperOrderAudit } = require('../services/alpaca_paper_service');
 const store = require('../services/alpaca_day_trade_store');
 const { DEFAULT_DAY_TRADE_POLICY } = require('../services/alpaca_day_trade_order_policy');
+const { reconcileFills, buildObservation } = require('../services/alpaca_fill_reconciliation');
+const { decidePlanAction, DEFAULT_MONITOR_POLICY } = require('../services/alpaca_day_trade_monitor');
 
 const VALID_MODES = ['disabled', 'shadow', 'paper_execute'];
+const TERMINAL_PLAN_STATES = ['closed', 'cancelled', 'error'];
 
 const router = express.Router();
 
@@ -177,6 +180,44 @@ router.post('/resolve-missing', async (req, res) => {
         // not be reached -- both are correctly generic-but-distinct from the input-shape errors
         // already handled above.
         return res.status(502).json({ status: 'error', code: 'ALPACA_ORDER_STILL_LIVE_OR_UNREACHABLE', error: 'Alpaca still reports this order, or the broker could not be reached; resolution refused' });
+    }
+});
+
+// Clearing requires proof, not just an operator's say-so (explicit user decision): a fresh
+// reconciliation followed by the exact same per-plan decision Task 13's worker uses every
+// tick. If any nonterminal plan would need anything other than 'none' -- a repair, a flatten,
+// even a stale partial-entry cancel -- the account is not settled, and the switch stays set.
+// brokerUnavailable is checked explicitly and separately: decidePlanAction already fails that
+// observation closed to 'none', which this loop would otherwise misread as "safe" -- the exact
+// inversion of what a broker outage during a safety check must mean.
+router.post('/kill-switch/clear', async (req, res) => {
+    if (!dayTradingGateOpen(req)) {
+        return res.status(403).json({ status: 'error', code: 'ALPACA_DAY_TRADING_ENTRY_DISABLED', error: 'Day Trading entry submission is disabled' });
+    }
+    if (req.body?.confirm !== true) {
+        return res.status(400).json({ status: 'error', code: 'ALPACA_CONFIRMATION_REQUIRED', error: 'explicit confirmation is required to clear the kill switch' });
+    }
+
+    try {
+        const client = createPaperClient();
+        await reconcileFills({ client, store });
+
+        const plans = (await store.listPlans(null)).filter((plan) => !TERMINAL_PLAN_STATES.includes(plan.state));
+        for (const plan of plans) {
+            const observation = await buildObservation(plan, { client, policy: DEFAULT_MONITOR_POLICY, now: () => new Date() });
+            if (observation.brokerUnavailable) {
+                return res.status(503).json({ status: 'error', code: 'ALPACA_ACCOUNT_STATE_UNVERIFIABLE', error: 'the broker could not be reached to verify the account is safe; the kill switch was not cleared' });
+            }
+            const decision = decidePlanAction(observation);
+            if (decision.action !== 'none') {
+                return res.status(409).json({ status: 'error', code: 'ALPACA_ACCOUNT_NOT_CONFIRMED_SAFE', error: 'the account is not confirmed flat or fully covered; the kill switch was not cleared' });
+            }
+        }
+
+        await store.updateMonitorState({ kill_switch: false });
+        return res.json({ status: 'success', data: { killSwitch: false } });
+    } catch (err) {
+        return respondWithError(res, err);
     }
 });
 

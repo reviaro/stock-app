@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const store = require('../services/alpaca_day_trade_store');
-const { reconcileFills } = require('../services/alpaca_fill_reconciliation');
+const { reconcileFills, buildObservation } = require('../services/alpaca_fill_reconciliation');
 const { decidePlanAction, DEFAULT_MONITOR_POLICY } = require('../services/alpaca_day_trade_monitor');
 const { executeManagementAction } = require('../services/alpaca_day_trade_repair_execution');
 
@@ -44,51 +44,6 @@ function acquireInstanceLock(lockPath) {
         }
         fs.unlinkSync(lockPath); // stale: reclaim
         return acquireInstanceLock(lockPath);
-    }
-}
-
-function legFromOrder(order, type) {
-    if (!Array.isArray(order?.legs)) return null;
-    return order.legs.find((leg) => leg.type === type) || null;
-}
-
-async function buildObservation(plan, {
-    client, policy, now, log = () => {},
-}) {
-    try {
-        const [clock, position, parentOrder] = await Promise.all([
-            client.getClock(),
-            client.getPosition(plan.symbol),
-            plan.entry_parent_broker_order_id
-                ? client.getOrder(plan.entry_parent_broker_order_id, { nested: true })
-                : Promise.resolve(null),
-        ]);
-        return {
-            plan,
-            position,
-            brokerUnavailable: false,
-            entryOrder: parentOrder ? {
-                status: parentOrder.status, qty: Number(parentOrder.qty), filled_qty: Number(parentOrder.filled_qty || 0),
-                submitted_at: parentOrder.submitted_at ?? null,
-            } : null,
-            stopLeg: legFromOrder(parentOrder, 'stop'),
-            targetLeg: legFromOrder(parentOrder, 'limit'),
-            clock,
-            monitorState: await store.getMonitorState(),
-            now: now(),
-            policy,
-        };
-    } catch (error) {
-        // Deliberately broad: any failure fetching this plan's broker state, network or
-        // programming error alike, must fail the observation closed rather than crash the
-        // tick for every other plan. But an unqualified catch that swallows the error entirely
-        // makes a genuine bug indistinguishable from a real outage in the logs -- log it, so
-        // "BROKER_UNAVAILABLE" for every tick is recoverable evidence of a bug, not a dead end.
-        log({ planId: plan.id, symbol: plan.symbol, observationError: error.message });
-        return {
-            plan, position: null, brokerUnavailable: true, entryOrder: null, stopLeg: null, targetLeg: null,
-            clock: null, monitorState: await store.getMonitorState(), now: now(), policy,
-        };
     }
 }
 

@@ -148,14 +148,22 @@ async function reconcileFills({ client, store: injectedStore = store }) {
     // moving. health_code/health_error make it directly visible to the monitor-health route
     // and to Task 11's "stale local state" check, and a clean pass explicitly clears a prior
     // stall rather than leaving it to look permanent.
+    //
+    // last_rest_reconciliation_at refreshes on every *complete* pass, independent of whether
+    // activity_cursor advances: a quiet period with zero new fills is still a successful
+    // reconciliation and must not be indistinguishable from one that never ran, or Task 11's
+    // staleness check would eventually (and wrongly) treat "nothing happened" the same as
+    // "reconciliation is broken." A stalled pass (stallReason set) deliberately does *not*
+    // refresh it — that failure should be allowed to age into staleness downstream, not be
+    // masked by a timestamp claiming the check just succeeded. activity_cursor itself only
+    // ever advances when there is a genuine new value, preserving the "never advance past an
+    // unprocessed activity" guarantee regardless of whether the pass otherwise stalled.
     await injectedStore.updateMonitorState({
+        ...(cursor ? { activity_cursor: cursor } : {}),
+        ...(stallReason ? {} : { last_rest_reconciliation_at: new Date().toISOString() }),
         health_code: stallReason ? 'RECONCILIATION_STALLED' : null,
         health_error: stallReason,
     });
-
-    if (cursor) {
-        await injectedStore.updateMonitorState({ activity_cursor: cursor, last_rest_reconciliation_at: new Date().toISOString() });
-    }
 
     // Every nonterminal plan is re-checked, not only ones touched by an activity imported in
     // this specific pass: exit fills recorded by an earlier pass that crashed or was
@@ -174,9 +182,60 @@ async function reconcileFills({ client, store: injectedStore = store }) {
     }
 }
 
+function legFromOrder(order, type) {
+    if (!Array.isArray(order?.legs)) return null;
+    return order.legs.find((leg) => leg.type === type) || null;
+}
+
+// Assembles one plan's fresh, per-tick observation for Task 11's decidePlanAction -- the only
+// place this fetch shape is built, shared by Task 13's worker and the kill-switch-clear route,
+// so there is exactly one definition of what "fresh broker state" means for a plan. Lives here,
+// not in alpaca_day_trade_monitor.js: that file's zero-I/O contract (Safety Invariant #17) is
+// load-bearing and documented, and this function does network I/O by design.
+async function buildObservation(plan, {
+    client, policy, now, log = () => {},
+}) {
+    try {
+        const [clock, position, parentOrder] = await Promise.all([
+            client.getClock(),
+            client.getPosition(plan.symbol),
+            plan.entry_parent_broker_order_id
+                ? client.getOrder(plan.entry_parent_broker_order_id, { nested: true })
+                : Promise.resolve(null),
+        ]);
+        return {
+            plan,
+            position,
+            brokerUnavailable: false,
+            entryOrder: parentOrder ? {
+                status: parentOrder.status, qty: Number(parentOrder.qty), filled_qty: Number(parentOrder.filled_qty || 0),
+                submitted_at: parentOrder.submitted_at ?? null,
+            } : null,
+            stopLeg: legFromOrder(parentOrder, 'stop'),
+            targetLeg: legFromOrder(parentOrder, 'limit'),
+            clock,
+            monitorState: await store.getMonitorState(),
+            now: now(),
+            policy,
+        };
+    } catch (error) {
+        // Deliberately broad: any failure fetching this plan's broker state, network or
+        // programming error alike, must fail the observation closed rather than crash the
+        // tick for every other plan. But an unqualified catch that swallows the error entirely
+        // makes a genuine bug indistinguishable from a real outage in the logs -- log it, so
+        // "BROKER_UNAVAILABLE" for every tick is recoverable evidence of a bug, not a dead end.
+        log({ planId: plan.id, symbol: plan.symbol, observationError: error.message });
+        return {
+            plan, position: null, brokerUnavailable: true, entryOrder: null, stopLeg: null, targetLeg: null,
+            clock: null, monitorState: await store.getMonitorState(), now: now(), policy,
+        };
+    }
+}
+
 module.exports = {
     normalizeRestFillActivity,
     normalizeWebSocketFillEvent,
     discoverProtectiveLegs,
     reconcileFills,
+    buildObservation,
 };

@@ -512,3 +512,198 @@ test('POST /day-trading/resolve-missing clears a stuck audit and unblocks the fa
     const audits = await store.listOrderAudits();
     assert.strictEqual(audits[0].status, 'submission_not_found');
 });
+
+function mockKillSwitchClearBroker({ positionQty = 0, legsCovered = true, activities = [] } = {}) {
+    global.fetch = async (url) => {
+        if (url.endsWith('/v2/clock')) {
+            return { ok: true, json: async () => ({ is_open: true, next_close: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString() }) };
+        }
+        if (url.includes('/v2/positions/')) {
+            if (positionQty === 0) return { ok: false, status: 404, json: async () => ({}) };
+            return { ok: true, json: async () => ({ symbol: 'NVDA', qty: String(positionQty), side: positionQty < 0 ? 'short' : 'long' }) };
+        }
+        if (url.includes('/v2/orders/broker-parent-1')) {
+            return {
+                ok: true,
+                json: async () => ({
+                    id: 'broker-parent-1', status: 'filled', qty: 10, filled_qty: 10, submitted_at: '2026-09-17T13:30:00.000Z',
+                    legs: legsCovered ? [
+                        { id: 'stop-1', type: 'stop', side: 'sell', qty: Math.abs(positionQty) || 10, filled_qty: 0, status: 'held' },
+                        { id: 'target-1', type: 'limit', side: 'sell', qty: Math.abs(positionQty) || 10, filled_qty: 0, status: 'held' },
+                    ] : null,
+                }),
+            };
+        }
+        if (url.includes('/v2/account/activities/FILL')) return { ok: true, json: async () => activities };
+        throw new Error(`unexpected broker request in this test: ${url}`);
+    };
+}
+
+async function seedActivePlan() {
+    const { plan } = await store.createPlanWithEntry(
+        {
+            symbol: 'NVDA', setup: 's', catalyst: 'c', thesis: 't', invalidation: 'i',
+            planned_entry_low: 100.50, planned_entry_high: 100.50, planned_stop: 98.00, planned_target: 104.00,
+            planned_qty: 10, planned_risk_dollars: 25, planned_reward_risk: 1.4, planned_account_risk_pct: 0.00025,
+            exit_deadline: '2026-09-17T19:45:00.000Z',
+        },
+        {
+            idempotency_key: 'dt-nvda-entry-1', client_order_id: 'dt-nvda-entry-1', symbol: 'NVDA', side: 'buy',
+            qty: 10, order_type: 'limit', time_in_force: 'day', limit_price: 100.50,
+            status: 'filled', execution_epoch: 'day_trading', order_class: 'bracket', leg_role: 'entry',
+        },
+    );
+    await db.updateAlpacaDayTradePlan(plan.id, { entry_parent_broker_order_id: 'broker-parent-1' });
+    return plan;
+}
+
+test('POST /day-trading/kill-switch/clear requires the Day Trading gate', async () => {
+    delete process.env.ALPACA_DAY_TRADING_ENTRY_ENABLED;
+    delete process.env.ALPACA_DAY_TRADING_ENTRY_TOKEN;
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(server.address().port, { confirm: true }, '/api/alpaca-paper/day-trading/kill-switch/clear');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 403);
+});
+
+test('POST /day-trading/kill-switch/clear requires explicit confirmation', async () => {
+    const gate = enableDayTradingGate();
+    await store.updateMonitorState({ kill_switch: true });
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port, {}, '/api/alpaca-paper/day-trading/kill-switch/clear',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 400);
+    assert.strictEqual((await store.getMonitorState()).kill_switch, 1);
+});
+
+test('POST /day-trading/kill-switch/clear succeeds with zero nonterminal plans (nothing open to verify)', async () => {
+    const gate = enableDayTradingGate();
+    await store.updateMonitorState({ kill_switch: true });
+    mockKillSwitchClearBroker();
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port, { confirm: true }, '/api/alpaca-paper/day-trading/kill-switch/clear',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    const state = await store.getMonitorState();
+    assert.strictEqual(state.kill_switch, 0);
+    assert.ok(state.last_rest_reconciliation_at, 'reconciliation must have actually run, not been skipped');
+});
+
+test('POST /day-trading/kill-switch/clear succeeds when every open plan is flat', async () => {
+    const gate = enableDayTradingGate();
+    await store.updateMonitorState({ kill_switch: true });
+    await seedActivePlan();
+    mockKillSwitchClearBroker({ positionQty: 0 });
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port, { confirm: true }, '/api/alpaca-paper/day-trading/kill-switch/clear',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    const state = await store.getMonitorState();
+    assert.strictEqual(state.kill_switch, 0);
+    // Proves this succeeded because decidePlanAction genuinely evaluated a fresh, non-stale
+    // observation as flat -- not because a stale-reconciliation short-circuit coincidentally
+    // also returns 'none' for every plan, which would make this test pass for the wrong reason
+    // (exactly how the two "refuse" tests failed with 200 before last_rest_reconciliation_at
+    // was fixed to refresh on a quiet pass).
+    assert.strictEqual(state.health_code, null);
+    assert.ok(state.last_rest_reconciliation_at);
+});
+
+test('POST /day-trading/kill-switch/clear succeeds when an open position is fully covered by native protection', async () => {
+    const gate = enableDayTradingGate();
+    await store.updateMonitorState({ kill_switch: true });
+    await seedActivePlan();
+    mockKillSwitchClearBroker({ positionQty: 10, legsCovered: true });
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port, { confirm: true }, '/api/alpaca-paper/day-trading/kill-switch/clear',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    const state = await store.getMonitorState();
+    assert.strictEqual(state.health_code, null, 'must succeed via a genuine coverage check, not a stale-reconciliation short-circuit');
+    assert.ok(state.last_rest_reconciliation_at);
+});
+
+test('POST /day-trading/kill-switch/clear refuses when a plan is uncovered, and does not clear the switch', async () => {
+    const gate = enableDayTradingGate();
+    await store.updateMonitorState({ kill_switch: true });
+    await seedActivePlan();
+    mockKillSwitchClearBroker({ positionQty: 10, legsCovered: false });
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port, { confirm: true }, '/api/alpaca-paper/day-trading/kill-switch/clear',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 409);
+    assert.strictEqual((await store.getMonitorState()).kill_switch, 1);
+});
+
+test('POST /day-trading/kill-switch/clear refuses when a plan shows an unexpected short position', async () => {
+    const gate = enableDayTradingGate();
+    await store.updateMonitorState({ kill_switch: true });
+    await seedActivePlan();
+    mockKillSwitchClearBroker({ positionQty: -10 });
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port, { confirm: true }, '/api/alpaca-paper/day-trading/kill-switch/clear',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 409);
+    assert.strictEqual((await store.getMonitorState()).kill_switch, 1);
+});
+
+test('POST /day-trading/kill-switch/clear fails closed (does not clear) when the broker is unreachable for a plan', async () => {
+    const gate = enableDayTradingGate();
+    await store.updateMonitorState({ kill_switch: true });
+    await seedActivePlan();
+    global.fetch = async (url) => {
+        if (url.endsWith('/v2/clock')) return { ok: true, json: async () => ({ is_open: true, next_close: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString() }) };
+        if (url.includes('/v2/account/activities/FILL')) return { ok: true, json: async () => [] };
+        if (url.includes('/v2/positions/')) throw new Error('simulated broker outage');
+        throw new Error(`unexpected broker request in this test: ${url}`);
+    };
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port, { confirm: true }, '/api/alpaca-paper/day-trading/kill-switch/clear',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.notStrictEqual(result.status, 200, 'a broker outage during verification must never be read as "safe to clear"');
+    assert.strictEqual((await store.getMonitorState()).kill_switch, 1);
+});
