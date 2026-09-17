@@ -8,6 +8,7 @@ const express = require('express');
 const TEST_DB = path.join(__dirname, 'test_alpaca_day_trading_routes.db');
 process.env.DB_PATH_OVERRIDE = TEST_DB;
 const db = require('../database/db');
+const store = require('../services/alpaca_day_trade_store');
 
 function post(port, body, requestPath, headers = {}) {
     return new Promise((resolve, reject) => {
@@ -108,7 +109,15 @@ function mockAlpacaBroker({
             return { ok: true, json: async () => ({ status: 'ACTIVE', trading_blocked: false, account_blocked: false, cash, equity }) };
         }
         if (url.endsWith('/v2/assets/NVDA')) return { ok: true, json: async () => ({ class: 'us_equity', status: 'active', tradable: true }) };
-        if (url.endsWith('/v2/clock')) return { ok: true, json: async () => ({ is_open: true, next_close: '2026-09-17T20:00:00.000Z' }) };
+        if (url.endsWith('/v2/clock')) {
+            // The real /entries route never accepts a `now` override (correctly -- a live
+            // request should always use real wall-clock time), so this can't be pinned to a
+            // fixed calendar date the way other test files pin `now` itself: a hardcoded
+            // "today" next_close silently goes stale and starts tripping the entry cutoff once
+            // real time crosses it, exactly as happened mid-session in the worker tests.
+            // Always 6 hours out from whenever the test actually runs instead.
+            return { ok: true, json: async () => ({ is_open: true, next_close: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString() }) };
+        }
         if (url.includes('/v2/orders?status=open')) return { ok: true, json: async () => currentOpenOrders };
         if (url.includes('/v2/stocks/NVDA/quotes/latest')) {
             return {
@@ -290,4 +299,216 @@ test('POST /orders stays available while Day Trading has not taken over the acco
     delete process.env.ALPACA_PAPER_ORDER_ENTRY_TOKEN;
 
     assert.notStrictEqual(result.status, 403, 'the DT route\'s own access gate must not, by itself, disable the unrelated generic order route');
+});
+
+test('POST /day-trading/mode is disabled without the Day Trading gate token', async () => {
+    delete process.env.ALPACA_DAY_TRADING_ENTRY_ENABLED;
+    delete process.env.ALPACA_DAY_TRADING_ENTRY_TOKEN;
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(server.address().port, { mode: 'shadow', confirm: true }, '/api/alpaca-paper/day-trading/mode');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 403);
+});
+
+test('POST /day-trading/mode rejects an unknown mode value without writing anything', async () => {
+    const gate = enableDayTradingGate();
+    const before = await store.getMonitorState();
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port,
+        { mode: 'execute_now_please', confirm: true },
+        '/api/alpaca-paper/day-trading/mode',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 400);
+    const after = await store.getMonitorState();
+    assert.strictEqual(after.mode, before.mode);
+});
+
+test('POST /day-trading/mode requires explicit confirmation before changing anything this consequential', async () => {
+    const gate = enableDayTradingGate();
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port,
+        { mode: 'paper_execute' },
+        '/api/alpaca-paper/day-trading/mode',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 400);
+    const state = await store.getMonitorState();
+    assert.notStrictEqual(state.mode, 'paper_execute');
+});
+
+test('POST /day-trading/mode sets the mode and returns a sanitized state', async () => {
+    const gate = enableDayTradingGate();
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port,
+        { mode: 'shadow', confirm: true },
+        '/api/alpaca-paper/day-trading/mode',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.body.data.mode, 'shadow');
+    const state = await store.getMonitorState();
+    assert.strictEqual(state.mode, 'shadow');
+});
+
+test('POST /day-trading/mode to paper_execute is allowed even while the kill switch is set (the worker itself still refuses to act)', async () => {
+    const gate = enableDayTradingGate();
+    await store.updateMonitorState({ kill_switch: true });
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port,
+        { mode: 'paper_execute', confirm: true },
+        '/api/alpaca-paper/day-trading/mode',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 200, 'the route does not gate on kill_switch; Task 13\'s worker is what actually stays inert');
+});
+
+test('POST /day-trading/resolve-missing requires the Day Trading gate', async () => {
+    delete process.env.ALPACA_DAY_TRADING_ENTRY_ENABLED;
+    delete process.env.ALPACA_DAY_TRADING_ENTRY_TOKEN;
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port,
+        { idempotency_key: 'dt-nvda-entry-1', confirm_not_found: true },
+        '/api/alpaca-paper/day-trading/resolve-missing',
+    );
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 403);
+});
+
+test('POST /day-trading/resolve-missing refuses to resolve a key belonging to a different execution epoch', async () => {
+    const gate = enableDayTradingGate();
+    await db.createAlpacaPaperOrderAudit({
+        idempotency_key: 'ltr-legacy-1', symbol: 'AAPL', side: 'buy', qty: 5, order_type: 'limit',
+        time_in_force: 'day', limit_price: 200, status: 'submission_unknown', execution_epoch: 'legacy_long_term',
+    });
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port,
+        { idempotency_key: 'ltr-legacy-1', confirm_not_found: true },
+        '/api/alpaca-paper/day-trading/resolve-missing',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 400);
+});
+
+test('POST /day-trading/resolve-missing returns a distinct 404 for a key with no audit at all', async () => {
+    const gate = enableDayTradingGate();
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port,
+        { idempotency_key: 'dt-does-not-exist', confirm_not_found: true },
+        '/api/alpaca-paper/day-trading/resolve-missing',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 404);
+});
+
+test('POST /day-trading/resolve-missing returns a distinct 409 for a key that is already resolved, not the generic refusal', async () => {
+    const gate = enableDayTradingGate();
+    await db.createAlpacaPaperOrderAudit({
+        idempotency_key: 'dt-nvda-already-filled', symbol: 'NVDA', side: 'buy', qty: 10, order_type: 'limit',
+        time_in_force: 'day', limit_price: 100.50, status: 'filled', execution_epoch: 'day_trading',
+        order_class: 'bracket', leg_role: 'entry',
+    });
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port,
+        { idempotency_key: 'dt-nvda-already-filled', confirm_not_found: true },
+        '/api/alpaca-paper/day-trading/resolve-missing',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 409);
+});
+
+test('POST /day-trading/resolve-missing returns a distinct status when Alpaca still reports the order as live, refusing the resolution', async () => {
+    const gate = enableDayTradingGate();
+    await db.createAlpacaPaperOrderAudit({
+        idempotency_key: 'dt-nvda-still-live', symbol: 'NVDA', side: 'buy', qty: 10, order_type: 'limit',
+        time_in_force: 'day', limit_price: 100.50, status: 'submission_unknown', execution_epoch: 'day_trading',
+        order_class: 'bracket', leg_role: 'entry',
+    });
+    global.fetch = async (url) => {
+        if (url.includes('/v2/orders:by_client_order_id')) return { ok: true, json: async () => ({ id: 'broker-order-x', status: 'accepted' }) };
+        throw new Error(`unexpected broker request in this test: ${url}`);
+    };
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port,
+        { idempotency_key: 'dt-nvda-still-live', confirm_not_found: true },
+        '/api/alpaca-paper/day-trading/resolve-missing',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 502);
+    assert.notStrictEqual(result.body.code, 'ALPACA_ORDER_NOT_FOUND');
+    assert.notStrictEqual(result.body.code, 'ALPACA_ORDER_ALREADY_RESOLVED');
+});
+
+test('POST /day-trading/resolve-missing clears a stuck audit and unblocks the fail-closed gate it was blocking', async () => {
+    const gate = enableDayTradingGate();
+    await db.createAlpacaPaperOrderAudit({
+        idempotency_key: 'dt-nvda-entry-1', symbol: 'NVDA', side: 'buy', qty: 10, order_type: 'limit',
+        time_in_force: 'day', limit_price: 100.50, status: 'submission_unknown', execution_epoch: 'day_trading',
+        order_class: 'bracket', leg_role: 'entry',
+    });
+    global.fetch = async (url) => {
+        if (url.includes('/v2/orders:by_client_order_id')) return { ok: false, status: 404, json: async () => ({}) };
+        throw new Error(`unexpected broker request in this test: ${url}`);
+    };
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port,
+        { idempotency_key: 'dt-nvda-entry-1', confirm_not_found: true },
+        '/api/alpaca-paper/day-trading/resolve-missing',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    assert.strictEqual(result.body.data.status, 'submission_not_found');
+
+    const audits = await store.listOrderAudits();
+    assert.strictEqual(audits[0].status, 'submission_not_found');
 });

@@ -32,6 +32,12 @@ function tempLockPath() {
     return path.join(os.tmpdir(), `dt-monitor-test-${Date.now()}-${Math.random().toString(36).slice(2)}.lock`);
 }
 
+// Fixed well inside the trading day, safely before fakeClient's 20:00 next_close cutoffs.
+// createWorker's own default `now` is the real wall clock, which makes any test using the
+// default spuriously fail for real on this exact hardcoded calendar date after ~19:45 UTC (the
+// time-exit window) -- caught when the suite actually ran into that window during this session.
+const TEST_NOW = () => new Date('2026-09-17T14:00:00.000Z');
+
 function fakeClient(overrides = {}) {
     return {
         getClock: async () => ({ is_open: true, next_close: '2026-09-17T20:00:00.000Z' }),
@@ -72,8 +78,8 @@ test('acquireInstanceLock: a stale lock (owning pid no longer alive) is reclaime
 test('a second worker instance cannot start while the first holds the lock', async () => {
     const lockPath = tempLockPath();
     await store.updateMonitorState({ mode: 'disabled' });
-    const workerA = createWorker({ client: fakeClient(), lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20 });
-    const workerB = createWorker({ client: fakeClient(), lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20 });
+    const workerA = createWorker({ client: fakeClient(), lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
+    const workerB = createWorker({ client: fakeClient(), lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
     try {
         await workerA.start();
         await assert.rejects(() => workerB.start(), (err) => err.code === 'ALPACA_MONITOR_ALREADY_RUNNING');
@@ -90,7 +96,7 @@ test('reports ready only after startup reconciliation has completed', async () =
     const client = fakeClient({
         getAccountActivities: async () => { reconciled = true; return []; },
     });
-    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20 });
+    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
     try {
         assert.strictEqual(worker.isReady(), false);
         await worker.start();
@@ -107,7 +113,7 @@ test('disabled mode does not run the reconcile/decide loop at all', async () => 
     await store.updateMonitorState({ mode: 'disabled' });
     let activityCalls = 0;
     const client = fakeClient({ getAccountActivities: async () => { activityCalls += 1; return []; } });
-    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20 });
+    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
     try {
         await worker.start();
         await new Promise((resolve) => { setTimeout(resolve, 100); });
@@ -142,7 +148,7 @@ test('shadow mode decides actions but never submits or cancels a broker order', 
         getOrder: async () => ({ id: 'broker-parent-1', status: 'filled', qty: 10, filled_qty: 10, legs: null }),
         submitOrder: async () => { submitCalls += 1; return { id: 'x', status: 'accepted' }; },
     });
-    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20 });
+    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
     try {
         await worker.start();
         await new Promise((resolve) => { setTimeout(resolve, 100); });
@@ -155,7 +161,7 @@ test('shadow mode decides actions but never submits or cancels a broker order', 
 
 test('paper_execute mode actually submits the decided repair order', async () => {
     const lockPath = tempLockPath();
-    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: new Date().toISOString() });
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: TEST_NOW().toISOString() });
     const { plan } = await store.createPlanWithEntry(
         {
             symbol: 'NVDA', setup: 's', catalyst: 'c', thesis: 't', invalidation: 'i',
@@ -177,7 +183,7 @@ test('paper_execute mode actually submits the decided repair order', async () =>
         getOrder: async () => ({ id: 'broker-parent-1', status: 'filled', qty: 10, filled_qty: 10, legs: null }),
         submitOrder: async (order) => { submitted.push(order); return { id: 'x', status: 'accepted' }; },
     });
-    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20 });
+    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
     try {
         await worker.start();
         await new Promise((resolve, reject) => {
@@ -215,7 +221,7 @@ async function seedPlan(symbol, entryKey) {
 
 test('an already-tripped kill switch suppresses the entire decide/execute loop for the whole tick', async () => {
     const lockPath = tempLockPath();
-    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: new Date().toISOString(), kill_switch: true });
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: TEST_NOW().toISOString(), kill_switch: true });
     await seedPlan('NVDA', 'dt-nvda-entry-1');
 
     let submitCalls = 0;
@@ -224,7 +230,7 @@ test('an already-tripped kill switch suppresses the entire decide/execute loop f
         getOrder: async () => ({ id: 'broker-parent-NVDA', status: 'filled', qty: 10, filled_qty: 10, legs: null }),
         submitOrder: async () => { submitCalls += 1; return { id: 'x', status: 'accepted' }; },
     });
-    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20 });
+    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
     try {
         await worker.start();
         await new Promise((resolve) => { setTimeout(resolve, 100); });
@@ -237,7 +243,7 @@ test('an already-tripped kill switch suppresses the entire decide/execute loop f
 
 test('once one plan trips the kill switch mid-tick, a later plan in the same tick is not executed', async () => {
     const lockPath = tempLockPath();
-    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: new Date().toISOString() });
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: TEST_NOW().toISOString() });
     // listPlans orders by id DESC (most recently created first), so the plan created *second*
     // is the one the loop reaches first -- create the kill-switch-triggering plan last so it is
     // processed before the plan that must end up skipped.
@@ -250,7 +256,7 @@ test('once one plan trips the kill switch mid-tick, a later plan in the same tic
         getOrder: async (id) => ({ id, status: 'filled', qty: 10, filled_qty: 10, legs: null }),
         submitOrder: async (order) => { submitted.push(order); return { id: 'x', status: 'accepted' }; },
     });
-    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20 });
+    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
     try {
         await worker.start();
         await new Promise((resolve, reject) => {
@@ -275,11 +281,11 @@ test('once one plan trips the kill switch mid-tick, a later plan in the same tic
 test('stop() shuts down cleanly and releases the instance lock for the next start', async () => {
     const lockPath = tempLockPath();
     await store.updateMonitorState({ mode: 'disabled' });
-    const worker = createWorker({ client: fakeClient(), lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20 });
+    const worker = createWorker({ client: fakeClient(), lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
     await worker.start();
     await worker.stop();
 
-    const second = createWorker({ client: fakeClient(), lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20 });
+    const second = createWorker({ client: fakeClient(), lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
     await second.start();
     await second.stop();
     if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
@@ -288,7 +294,7 @@ test('stop() shuts down cleanly and releases the instance lock for the next star
 test('a fatal configuration error (client construction fails) rejects start() without an internal retry loop', async () => {
     const lockPath = tempLockPath();
     const failingClientFactory = () => { const e = new Error('not configured'); e.code = 'ALPACA_NOT_CONFIGURED'; throw e; };
-    const worker = createWorker({ createClient: failingClientFactory, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20 });
+    const worker = createWorker({ createClient: failingClientFactory, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
     await assert.rejects(() => worker.start(), (err) => err.code === 'ALPACA_NOT_CONFIGURED');
     if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
 });

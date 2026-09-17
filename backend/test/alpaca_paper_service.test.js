@@ -201,6 +201,44 @@ test('explicit operator resolution can close a broker-confirmed missing submissi
     }]);
 });
 
+test('explicit operator resolution rejects a key whose audit belongs to a different execution epoch', async () => {
+    const { resolveMissingPaperOrderAudit } = require('../services/alpaca_paper_service');
+    const updates = [];
+    await assert.rejects(
+        () => resolveMissingPaperOrderAudit({
+            idempotencyKey: 'ltr-legacy-1',
+            confirmed: true,
+            expectedEpoch: 'day_trading',
+            client: { getOrderByClientOrderId: async () => ({ found: false, order: null }) },
+            auditStore: {
+                listAlpacaPaperOrderAudits: async () => [{
+                    idempotency_key: 'ltr-legacy-1', status: 'submission_unknown', execution_epoch: 'legacy_long_term',
+                }],
+                updateAlpacaPaperOrderAudit: async (key, update) => updates.push({ key, update }),
+            },
+        }),
+        /does not belong to the day_trading execution epoch/,
+    );
+    assert.deepStrictEqual(updates, [], 'a cross-epoch resolution attempt must never write anything');
+});
+
+test('explicit operator resolution succeeds for a matching execution epoch', async () => {
+    const { resolveMissingPaperOrderAudit } = require('../services/alpaca_paper_service');
+    const result = await resolveMissingPaperOrderAudit({
+        idempotencyKey: 'dt-nvda-entry-1',
+        confirmed: true,
+        expectedEpoch: 'day_trading',
+        client: { getOrderByClientOrderId: async () => ({ found: false, order: null }) },
+        auditStore: {
+            listAlpacaPaperOrderAudits: async () => [{
+                idempotency_key: 'dt-nvda-entry-1', status: 'submission_unknown', execution_epoch: 'day_trading',
+            }],
+            updateAlpacaPaperOrderAudit: async () => {},
+        },
+    });
+    assert.deepStrictEqual(result, { status: 'submission_not_found' });
+});
+
 test('requests the nested bracket-order tree only when explicitly asked, preserving the default query', async () => {
     process.env.ALPACA_API_KEY = 'paper-key';
     process.env.ALPACA_API_SECRET = 'paper-secret';

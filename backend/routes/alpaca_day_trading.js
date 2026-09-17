@@ -1,8 +1,10 @@
 const express = require('express');
 const { executeDayTradeEntry } = require('../services/alpaca_day_trade_execution');
-const { createPaperClient } = require('../services/alpaca_paper_service');
+const { createPaperClient, resolveMissingPaperOrderAudit } = require('../services/alpaca_paper_service');
 const store = require('../services/alpaca_day_trade_store');
 const { DEFAULT_DAY_TRADE_POLICY } = require('../services/alpaca_day_trade_order_policy');
+
+const VALID_MODES = ['disabled', 'shadow', 'paper_execute'];
 
 const router = express.Router();
 
@@ -107,6 +109,74 @@ router.post('/entries', async (req, res) => {
         });
     } catch (err) {
         return respondWithError(res, err);
+    }
+});
+
+// Deliberately independent of kill_switch: gating mode here on the switch would deadlock the
+// system (no clear mechanism exists yet, so mode could never return to paper_execute after a
+// trip). Task 13's worker already checks kill_switch at the top of every tick and refuses to
+// act while it's set, so mode=paper_execute with kill_switch=true is inert, not unsafe.
+router.post('/mode', async (req, res) => {
+    if (!dayTradingGateOpen(req)) {
+        return res.status(403).json({ status: 'error', code: 'ALPACA_DAY_TRADING_ENTRY_DISABLED', error: 'Day Trading entry submission is disabled' });
+    }
+    const mode = String(req.body?.mode || '').trim();
+    if (!VALID_MODES.includes(mode)) {
+        return res.status(400).json({ status: 'error', code: 'ALPACA_MODE_INVALID', error: `mode must be one of: ${VALID_MODES.join(', ')}` });
+    }
+    if (req.body?.confirm !== true) {
+        return res.status(400).json({ status: 'error', code: 'ALPACA_CONFIRMATION_REQUIRED', error: 'explicit confirmation is required to change the Day Trading monitor mode' });
+    }
+    try {
+        await store.updateMonitorState({ mode });
+        const state = await store.getMonitorState();
+        return res.json({ status: 'success', data: { mode: state.mode, killSwitch: Boolean(state.kill_switch) } });
+    } catch (err) {
+        return respondWithError(res, err);
+    }
+});
+
+// Alpaca's own order status strings the rest of this codebase already treats as "not yet
+// resolved" (Task 8's UNRESOLVED_ORDER_STATUSES) -- duplicated here rather than imported so the
+// route can distinguish "not found" / "wrong epoch" / "already resolved" from resolveMissing-
+// PaperOrderAudit's own plain, uncoded errors, which would otherwise all collapse into one
+// generic refusal. Same defense-in-depth shape as Task 7's duplicate-symbol check sitting in
+// front of Task 4's unique index: this duplicates a check the service also performs.
+const UNRESOLVED_STATUSES = ['pending_submission', 'submission_unknown', 'submission_failed'];
+
+router.post('/resolve-missing', async (req, res) => {
+    if (!dayTradingGateOpen(req)) {
+        return res.status(403).json({ status: 'error', code: 'ALPACA_DAY_TRADING_ENTRY_DISABLED', error: 'Day Trading entry submission is disabled' });
+    }
+    const key = String(req.body?.idempotency_key || '').trim();
+    if (!key || req.body?.confirm_not_found !== true) {
+        return res.status(400).json({ status: 'error', code: 'ALPACA_CONFIRMATION_REQUIRED', error: 'an idempotency key and explicit confirmation are required' });
+    }
+
+    const audit = await store.getOrderAuditByIdempotencyKey(key);
+    if (!audit) {
+        return res.status(404).json({ status: 'error', code: 'ALPACA_ORDER_NOT_FOUND', error: 'no Day Trading order audit exists for this key' });
+    }
+    if (audit.execution_epoch !== 'day_trading') {
+        return res.status(400).json({ status: 'error', code: 'ALPACA_ACCOUNT_SCOPE_REQUIRED', error: 'this key does not belong to a Day Trading order' });
+    }
+    if (!UNRESOLVED_STATUSES.includes(audit.status)) {
+        return res.status(409).json({ status: 'error', code: 'ALPACA_ORDER_ALREADY_RESOLVED', error: 'this order is not in an unresolved state' });
+    }
+
+    try {
+        const result = await resolveMissingPaperOrderAudit({
+            idempotencyKey: key,
+            confirmed: true,
+            expectedEpoch: 'day_trading',
+        });
+        return res.json({ status: 'success', data: result });
+    } catch (_err) {
+        // The remaining failure modes here are exactly two: Alpaca still reports the order as
+        // live (the one case where resolving would be genuinely dangerous) or the broker could
+        // not be reached -- both are correctly generic-but-distinct from the input-shape errors
+        // already handled above.
+        return res.status(502).json({ status: 'error', code: 'ALPACA_ORDER_STILL_LIVE_OR_UNREACHABLE', error: 'Alpaca still reports this order, or the broker could not be reached; resolution refused' });
     }
 });
 

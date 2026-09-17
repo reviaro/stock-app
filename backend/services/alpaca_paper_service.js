@@ -308,13 +308,21 @@ async function reconcilePaperOrderAudits({ client = createPaperClient(), auditSt
     return result;
 }
 
-async function resolveMissingPaperOrderAudit({ idempotencyKey, confirmed = false, client = createPaperClient(), auditStore = db } = {}) {
+async function resolveMissingPaperOrderAudit({
+    idempotencyKey, confirmed = false, client = createPaperClient(), auditStore = db, expectedEpoch = null,
+} = {}) {
     const key = String(idempotencyKey || '').trim();
     if (!key || confirmed !== true) throw new Error('explicit missing-order confirmation is required');
     const audits = await auditStore.listAlpacaPaperOrderAudits();
     const audit = audits.find((row) => row.idempotency_key === key);
     if (!audit || !['pending_submission', 'submission_unknown', 'submission_failed'].includes(audit.status)) {
         throw new Error('an unresolved Alpaca paper-order audit is required');
+    }
+    // Isolation (Safety Invariant #3): a Day Trading-scoped resolution must never touch a
+    // legacy order, and vice versa. expectedEpoch defaults to null (no filter), so the generic
+    // /resolve-missing route's existing behavior is untouched.
+    if (expectedEpoch && audit.execution_epoch !== expectedEpoch) {
+        throw new Error(`this order does not belong to the ${expectedEpoch} execution epoch`);
     }
     const lookup = await client.getOrderByClientOrderId(key);
     if (!lookup || lookup.found !== false) throw new Error('Alpaca still reports this paper order or returned an invalid response');
