@@ -291,6 +291,49 @@ test('stop() shuts down cleanly and releases the instance lock for the next star
     if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
 });
 
+// A SIGTERM arriving mid-tick is the realistic systemd shutdown scenario (Task 16 will
+// configure exactly this). stop() releasing the instance lock before the in-flight tick's own
+// broker calls/decisions finish would let a systemd-restarted second instance start decide/
+// execute work while the first is still mid-flight -- deterministic overlap, same technique as
+// Task 8's concurrency test: block one call on a manually-released gate, observe the tick is
+// genuinely still running, then call stop() and prove it doesn't resolve (or release the lock)
+// until the gate opens.
+test('stop() waits for an in-flight tick to finish before releasing the instance lock', async () => {
+    const lockPath = tempLockPath();
+    await store.updateMonitorState({ mode: 'shadow' });
+    let releaseGate;
+    const gate = new Promise((resolve) => { releaseGate = resolve; });
+    let insideTick = false;
+    let call = 0;
+    const client = fakeClient({
+        // Let start()'s own startup reconciliation (Section 8 Startup step 4) pass through
+        // immediately; only the first *tick-loop* call blocks, so start() itself can resolve
+        // and the test can observe a genuinely in-flight scheduled tick.
+        getAccountActivities: async () => {
+            call += 1;
+            if (call === 1) return [];
+            insideTick = true;
+            await gate;
+            return [];
+        },
+    });
+    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
+    await worker.start();
+
+    while (!insideTick) { await new Promise((resolve) => setTimeout(resolve, 5)); }
+    assert.strictEqual(fs.existsSync(lockPath), true, 'the tick is genuinely in flight before stop() is called');
+
+    let stopped = false;
+    const stopPromise = worker.stop().then(() => { stopped = true; });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.strictEqual(stopped, false, 'stop() must not resolve while a tick is still in flight');
+    assert.strictEqual(fs.existsSync(lockPath), true, 'the instance lock must not be released while a tick is still in flight');
+
+    releaseGate();
+    await stopPromise;
+    assert.strictEqual(fs.existsSync(lockPath), false, 'the instance lock is released once the in-flight tick finishes');
+});
+
 test('a fatal configuration error (client construction fails) rejects start() without an internal retry loop', async () => {
     const lockPath = tempLockPath();
     const failingClientFactory = () => { const e = new Error('not configured'); e.code = 'ALPACA_NOT_CONFIGURED'; throw e; };

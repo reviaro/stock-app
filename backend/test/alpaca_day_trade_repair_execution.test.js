@@ -45,12 +45,15 @@ async function seedPlan(overrides = {}, orderOverrides = {}) {
     return { ...plan, entry_parent_broker_order_id: 'broker-parent-1' };
 }
 
-function fakeClient({ submitResult = { id: 'broker-mgmt-order-1', status: 'accepted' }, submitError = null, cancelResult = { canceled: true } } = {}) {
+function fakeClient({
+    submitResult = { id: 'broker-mgmt-order-1', status: 'accepted' }, submitError = null,
+    cancelResult = { canceled: true }, cancelError = null,
+} = {}) {
     const calls = { submitOrder: [], cancelOrder: [] };
     return {
         calls,
         submitOrder: async (order) => { calls.submitOrder.push(order); if (submitError) throw submitError; return submitResult; },
-        cancelOrder: async (brokerOrderId) => { calls.cancelOrder.push(brokerOrderId); return cancelResult; },
+        cancelOrder: async (brokerOrderId) => { calls.cancelOrder.push(brokerOrderId); if (cancelError) throw cancelError; return cancelResult; },
     };
 }
 
@@ -69,6 +72,51 @@ test('cancel_unfilled_remainder cancels the entry parent order directly, idempot
     const result = await executeManagementAction({ action: 'cancel_unfilled_remainder' }, plan, { client, holderId: 'test' });
     assert.deepStrictEqual(client.calls.cancelOrder, ['broker-parent-1']);
     assert.strictEqual(result.result.canceled, true);
+});
+
+// Per Alpaca's documented behavior, a cancel racing an order into a terminal state (most
+// commonly: it just filled) returns 422, not 404 -- alpaca_paper_service.js's cancelOrder
+// throws ALPACA_BROKER_REJECTED for exactly this status, since the generic legacy path treats
+// any non-404 cancel failure as worth surfacing. The Day Trading repair action must not inherit
+// that: this exact race is the routine case its own poll-based design expects every tick.
+test('cancel_unfilled_remainder treats a 422 (order already reached a terminal state) as a benign non-cancelable outcome, not a thrown error', async () => {
+    const plan = await seedPlan();
+    const client = fakeClient({ cancelError: Object.assign(new Error('Alpaca paper request failed (422)'), { status: 422, code: 'ALPACA_BROKER_REJECTED' }) });
+    const result = await executeManagementAction({ action: 'cancel_unfilled_remainder' }, plan, { client, holderId: 'test' });
+    assert.deepStrictEqual(result, { action: 'cancel_unfilled_remainder', result: { canceled: false, reason: 'not_cancelable' } });
+});
+
+test('cancel_unfilled_remainder still surfaces a genuinely ambiguous broker failure during cancel, rather than swallowing it', async () => {
+    const plan = await seedPlan();
+    const client = fakeClient({ cancelError: Object.assign(new Error('Alpaca paper request failed (503)'), { status: 503, code: 'ALPACA_BROKER_UNAVAILABLE' }) });
+    await assert.rejects(
+        executeManagementAction({ action: 'cancel_unfilled_remainder' }, plan, { client, holderId: 'test' }),
+        (err) => err.code === 'ALPACA_BROKER_UNAVAILABLE',
+    );
+});
+
+// ALPACA_BROKER_REJECTED is doFetch's code for *every* 4xx except 408 -- 401 (revoked
+// credentials), 403 (restricted account), and 429 (rate limited) all share it with 422. Keying
+// the benign-race conversion on that code alone would silently swallow those as "already
+// filled, nothing to do" forever, which is the same shape of fail-open this codebase has hit
+// three times before (a coercion or a too-broad match turning an error into a valid-looking
+// outcome). Only the specific 422 status may be treated as benign.
+test('cancel_unfilled_remainder still surfaces a 403 (a restricted account, not a fill race) even though it shares ALPACA_BROKER_REJECTED with 422', async () => {
+    const plan = await seedPlan();
+    const client = fakeClient({ cancelError: Object.assign(new Error('Alpaca paper request failed (403)'), { status: 403, code: 'ALPACA_BROKER_REJECTED' }) });
+    await assert.rejects(
+        executeManagementAction({ action: 'cancel_unfilled_remainder' }, plan, { client, holderId: 'test' }),
+        (err) => err.code === 'ALPACA_BROKER_REJECTED',
+    );
+});
+
+test('cancel_unfilled_remainder releases the lease even when the cancel call throws', async () => {
+    const plan = await seedPlan();
+    const client = fakeClient({ cancelError: Object.assign(new Error('Alpaca paper request failed (503)'), { status: 503, code: 'ALPACA_BROKER_UNAVAILABLE' }) });
+    await assert.rejects(executeManagementAction({ action: 'cancel_unfilled_remainder' }, plan, { client, holderId: 'test' }));
+    const secondClient = fakeClient();
+    const second = await executeManagementAction({ action: 'cancel_unfilled_remainder' }, plan, { client: secondClient, holderId: 'a-different-holder' });
+    assert.strictEqual(second.result.canceled, true, 'a leaked lease from the first throw would have blocked this second acquire');
 });
 
 test('attach_protective_oco submits a stop-market/limit-target OCO for the exact remaining quantity with a deterministic id', async () => {

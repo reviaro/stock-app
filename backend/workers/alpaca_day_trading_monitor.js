@@ -63,6 +63,11 @@ function createWorker({
     let timer = null;
     let lock = null;
     let client = providedClient || null;
+    // Tracks whatever tick is currently executing (or the last one that ran) so stop() can wait
+    // for it -- a SIGTERM arriving mid-tick (the realistic systemd shutdown, Task 16) must not
+    // release the instance lock while broker calls/decisions from this process are still in
+    // flight, or a systemd-restarted second instance could start deciding/executing concurrently.
+    let currentTick = Promise.resolve();
 
     async function runTick() {
         const monitorState = await store.getMonitorState();
@@ -116,9 +121,10 @@ function createWorker({
 
     function scheduleNext() {
         if (stopped) return;
-        timer = setTimeout(async () => {
-            try { await runTick(); } catch (error) { log({ tickError: error.message }); }
-            scheduleNext();
+        timer = setTimeout(() => {
+            currentTick = runTick()
+                .catch((error) => { log({ tickError: error.message }); })
+                .then(() => { scheduleNext(); });
         }, pollIntervalMs);
     }
 
@@ -153,6 +159,11 @@ function createWorker({
     async function stop() {
         stopped = true;
         if (timer) clearTimeout(timer);
+        // Wait for whatever tick is currently mid-flight (already-fired timers aren't affected
+        // by clearTimeout) before releasing the lock -- otherwise a systemd-restarted second
+        // instance could acquire it and start deciding/executing while this process's own
+        // broker calls for the same plans are still outstanding.
+        await currentTick;
         // Graceful shutdown leaves broker-native protective orders intact (systemd hardening,
         // Section 8): this never cancels or flattens anything on the way out.
         if (lock) lock.release();

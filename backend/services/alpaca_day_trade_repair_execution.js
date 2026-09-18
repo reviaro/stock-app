@@ -130,10 +130,26 @@ async function submitManagementOrder({
 }
 
 // cancel_unfilled_remainder targets an *existing* order by its own broker id; Alpaca's cancel
-// endpoint takes no client_order_id and is already naturally idempotent (alpaca_paper_service's
-// cancelOrder reports {canceled:false, reason:'not_found'} rather than throwing when a cancel
-// races a fill or an earlier cancel) -- it does not need a new audit row of its own, but it
-// still goes through the same lease to serialize with other management actions on this account.
+// endpoint takes no client_order_id and is already naturally idempotent -- it does not need a
+// new audit row of its own, but it still goes through the same lease to serialize with other
+// management actions on this account.
+//
+// alpaca_paper_service.js's cancelOrder reports {canceled:false, reason:'not_found'} rather
+// than throwing on a 404 (order id genuinely unknown), but per Alpaca's documented behavior a
+// cancel racing an order into a terminal state -- the common case, since this action is decided
+// precisely when a stale entry order needs clearing -- returns 422, which the shared client
+// deliberately still throws (correct for the generic legacy path, where an unexpected cancel
+// failure is worth surfacing loudly). That specific 422 is caught here and converted to the
+// same benign shape as a 404: this action is designed to be retried every tick against a fresh
+// observation regardless of whether this attempt's cancel had anything left to do, so treating
+// "it already reached a terminal state" as an error would only add log noise, not change what
+// happens next.
+//
+// Checked by error.status, not error.code: doFetch's ALPACA_BROKER_REJECTED code covers every
+// 4xx except 408 (401 revoked credentials, 403 a restricted account, 429 rate limiting all
+// share it with 422). Matching on the code alone would silently treat those as a benign fill
+// race forever -- the same coercion-shaped fail-open this codebase has caught three times
+// before. Only the exact 422 status may be swallowed; everything else must still propagate.
 async function executeManagementAction(decision, plan, { client, holderId, leaseDurationMs = 30_000, now = new Date() }) {
     if (decision.action === 'none') {
         return { skipped: true };
@@ -144,8 +160,15 @@ async function executeManagementAction(decision, plan, { client, holderId, lease
             throw executionError('ALPACA_LEASE_UNAVAILABLE', 'the durable Day Trading submission lease is held by another process');
         }
         try {
-            const result = await client.cancelOrder(plan.entry_parent_broker_order_id);
-            return { action: decision.action, result };
+            try {
+                const result = await client.cancelOrder(plan.entry_parent_broker_order_id);
+                return { action: decision.action, result };
+            } catch (error) {
+                if (error.status === 422) {
+                    return { action: decision.action, result: { canceled: false, reason: 'not_cancelable' } };
+                }
+                throw error;
+            }
         } finally {
             await store.releaseSubmissionLease({ holderId });
         }
