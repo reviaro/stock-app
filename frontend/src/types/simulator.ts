@@ -78,6 +78,10 @@ export interface TaxPreview {
 }
 
 export interface SimReview {
+  twr_pct?: number | null
+  observed_drawdown_pct?: number | null
+  performance_blockers?: string[]
+  observation_count?: number
   starting_capital: number
   cash: number
   holdings_value: number | null

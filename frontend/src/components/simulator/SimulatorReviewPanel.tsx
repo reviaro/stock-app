@@ -30,7 +30,7 @@ export function SimulatorReviewPanel({ accountId }: Props) {
         {data && (
           <>
             <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-9 gap-2 text-xs">
-              <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Return</p><p className={`font-mono font-semibold ${data.total_return_pct == null ? '' : data.total_return_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>{data.total_return_pct == null ? '—' : `${data.total_return_pct >= 0 ? '+' : ''}${fmt(data.total_return_pct)}%`}</p></div>
+              <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Capital-relative P&amp;L</p><p className={`font-mono font-semibold ${data.total_return_pct == null ? '' : data.total_return_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>{data.total_return_pct == null ? '—' : `${data.total_return_pct >= 0 ? '+' : ''}${fmt(data.total_return_pct)}%`}</p></div>
               <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Cash</p><p className="font-mono font-semibold">{fmt(data.cash_pct)}%</p></div>
               <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Total value</p><p className="font-mono font-semibold">${fmt(data.total_value)}</p></div>
               <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Unrealized</p><p className={`font-mono font-semibold ${data.unrealized_pnl == null ? '' : data.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>{data.unrealized_pnl == null ? '—' : `${data.unrealized_pnl >= 0 ? '+' : ''}$${fmt(data.unrealized_pnl)}`}</p></div>
@@ -39,6 +39,13 @@ export function SimulatorReviewPanel({ accountId }: Props) {
               <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Realized exits</p><p className="font-mono font-semibold">{data.closed_trade_count}</p></div>
               <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Win rate</p><p className="font-mono font-semibold">{data.hit_rate_pct == null ? '—' : `${fmt(data.hit_rate_pct, 0)}%`}</p></div>
               <div className="rounded-md border border-border/70 bg-background/60 p-2"><p className="text-muted-foreground">Largest</p><p className="font-mono font-semibold">{data.largest_position ? `${data.largest_position.symbol} ${fmt(data.largest_position.weight_pct, 1)}%` : '—'}</p></div>
+            </div>
+
+            <div className="rounded-md border border-border p-3 text-xs space-y-1">
+              <p>Time-weighted return: <strong>{data.twr_pct == null ? 'Unavailable' : `${fmt(data.twr_pct)}%`}</strong></p>
+              <p>Observed drawdown: {data.observed_drawdown_pct == null ? 'Unavailable' : `${fmt(data.observed_drawdown_pct)}%`} · {data.observation_count ?? 0} observations</p>
+              <p className="text-muted-foreground">Measured from stored valuations with deposits and withdrawals separated from returns. Drawdown covers observed points, not every intraday price.</p>
+              {!!data.performance_blockers?.length && <p className="text-muted-foreground">Measurement unavailable: {data.performance_blockers.map((reason) => reason.replaceAll('_', ' ')).join(' · ')}.</p>}
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

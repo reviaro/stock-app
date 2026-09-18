@@ -1,4 +1,5 @@
 const db = require('../database/db');
+const evaluation = require('./strategy_evaluation');
 
 const RUN_TYPES = ['backtest', 'out_of_sample', 'paper'];
 const REQUIRED_METRICS = ['total_return_pct', 'benchmark_return_pct', 'max_drawdown_pct'];
@@ -73,18 +74,7 @@ function finiteMetric(input, field, optional = false) {
 }
 
 function assessPromotionReadiness(runs) {
-    const evidence = new Set(runs
-        .filter((run) => run.evidence_domain !== 'allocation')
-        .map((run) => run.run_type));
-    const paperBlockers = [];
-    if (!evidence.has('backtest')) paperBlockers.push('missing_backtest_evidence');
-    if (!evidence.has('out_of_sample')) paperBlockers.push('missing_out_of_sample_evidence');
-    const liveBlockers = [...paperBlockers];
-    if (!evidence.has('paper')) liveBlockers.push('missing_paper_evidence');
-    return {
-        paper: { ready: paperBlockers.length === 0, blockers: paperBlockers },
-        live: { ready: liveBlockers.length === 0, blockers: liveBlockers },
-    };
+    return evaluation.readiness(runs);
 }
 
 async function createExperiment(input = {}) {
@@ -104,15 +94,17 @@ async function getExperiment(id) {
         db.listStrategyVersions(id),
         db.listStrategyRunsForExperiment(id),
     ]);
-    const versions = versionRows.map((version) => {
+    const versions = await Promise.all(versionRows.map(async (version) => {
         const versionRuns = runs.filter((run) => run.version_id === version.id);
+        const artifacts = await evaluation.listArtifacts(version.id);
         return {
             ...version,
             rules: JSON.parse(version.rules_json),
             runs: versionRuns,
-            promotion_readiness: assessPromotionReadiness(versionRuns),
+            evaluations: artifacts,
+            promotion_readiness: evaluation.readiness(versionRuns, artifacts),
         };
-    });
+    }));
     const latestVersion = versions.at(-1);
     return {
         ...experiment,
@@ -127,6 +119,7 @@ async function addVersion(experimentId, input = {}) {
     const experiment = await db.getStrategyExperimentById(experimentId);
     if (!experiment) throw notFound('strategy experiment not found');
     const rules = parseRules(input.rules);
+    if (rules.evaluation_policy !== undefined) evaluation.validateEvaluationPolicy(rules.evaluation_policy);
     const versions = await db.listStrategyVersions(experimentId);
     const versionNumber = versions.reduce((max, version) => Math.max(max, version.version_number), 0) + 1;
     const created = await db.createStrategyVersion({

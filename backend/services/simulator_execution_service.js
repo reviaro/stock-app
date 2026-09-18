@@ -35,7 +35,7 @@ function buildIntent(input) {
     return { type: input.type, symbol: input.symbol, shares: input.shares,
         account_id: input.account_id, fees: input.fees, notes: input.notes ?? null,
         trade_plan: input.trade_plan ?? null, journal: input.journal ?? null,
-        close_plan_id: input.close_plan_id ?? null };
+        close_plan_id: input.close_plan_id ?? null, ...(input.run_id != null ? { run_id: input.run_id } : {}) };
 }
 
 async function requireSimAccount(accountId) {
@@ -48,7 +48,7 @@ async function requireSimAccount(accountId) {
 /**
  * Execute an evaluated simulator trade. Returns { result, duplicate: boolean }.
  */
-async function executeSimulatorTrade(input) {
+async function executeSimulatorTradeIntent(input) {
     const type = input?.type;
     if (!['buy', 'sell'].includes(type)) {
         throw executionError(400, 'SIM_INVALID_ORDER', 'type must be buy or sell');
@@ -113,7 +113,16 @@ async function executeSimulatorTrade(input) {
         client_order_id: clientOrderId,
         intent,
         quote,
+        valuation_quotes: { [symbol]: quote },
     };
+    // Fetch marks before the lock; revalidate them under the lock. A concurrent
+    // new holding missing from this set causes a fail-closed entry rejection.
+    const { computeHoldings } = require('./simulator_ledger');
+    const holdings = computeHoldings(await db.listSimTransactions(accountId));
+    await Promise.all(Object.keys(holdings).filter((held) => held !== symbol).map(async (held) => {
+        const mark = await obtainExecutionQuote(held, { getHybridQuote: getDefaultHybridQuote });
+        if (mark.valid) order.valuation_quotes[held] = mark.quote;
+    }));
     if (type === 'buy' && input?.trade_plan) {
         order.trade_plan = normalizeTradePlan({
             ...input.trade_plan,
@@ -144,6 +153,27 @@ async function executeSimulatorTrade(input) {
         throw err;
     }
     return { result, duplicate: false };
+}
+
+async function executeSimulatorTrade(input) {
+    try { return await executeSimulatorTradeIntent(input); }
+    catch (err) {
+        const accountId = Number(input?.account_id);
+        if (Number.isSafeInteger(accountId) && accountId > 0 && ['buy', 'sell'].includes(input?.type)) {
+            const controls = require('./simulator_controls');
+            try {
+                await controls.transaction(async (conn) => {
+                    if (!await controls.get(conn, 'SELECT id FROM simulator_sleeves WHERE id=?', [accountId])) return;
+                    const active = await controls.activeRun(conn, accountId);
+                    await controls.run(conn, `INSERT INTO sim_decision_events(account_id,run_id,decision_key,action,outcome,detail_json,created_at)
+                        VALUES (?,?,?,?,?,?,?)`, [accountId, active?.id || null, `rejected:${require('node:crypto').randomUUID()}`,
+                        input.type, 'rejected', JSON.stringify({ client_order_id: input.client_order_id ?? null, symbol: input.symbol ?? null,
+                            shares: input.shares ?? null, code: err.code || 'SIM_EXECUTION_ERROR', reason: err.message }), new Date().toISOString()]);
+                });
+            } catch (auditError) { console.error('[simulator] rejection audit failed:', auditError.message); }
+        }
+        throw err;
+    }
 }
 
 module.exports = {

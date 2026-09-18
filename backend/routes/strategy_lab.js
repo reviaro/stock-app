@@ -53,4 +53,20 @@ router.post('/versions/:id/runs', async (req, res) => {
     }
 });
 
+router.post('/versions/:id/evaluations', async (req, res) => {
+    try {
+        const result = await require('../services/strategy_evaluation').evaluateSession(Number(req.params.id), req.body?.simulator_run_id);
+        res.status(201).json({ status: 'success', data: result });
+    } catch (error) { sendError(res, error); }
+});
+
+router.get('/evaluations/:id', async (req, res) => {
+    try {
+        const controls = require('../services/simulator_controls');
+        const row = await controls.connection((conn) => controls.get(conn, 'SELECT * FROM strategy_evaluation_artifacts WHERE id=?', [req.params.id]));
+        if (!row) return res.status(404).json({ status: 'error', error: 'evaluation artifact not found' });
+        res.json({ status: 'success', data: { ...row, artifact: JSON.parse(row.artifact_json), metrics: JSON.parse(row.metrics_json) } });
+    } catch (error) { sendError(res, error); }
+});
+
 module.exports = router;

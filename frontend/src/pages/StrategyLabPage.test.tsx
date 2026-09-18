@@ -23,7 +23,7 @@ describe('StrategyLabPage', () => {
   it('shows versioned hypotheses, deterministic evidence gates, and no live execution controls', () => {
     render(<StrategyLabPage />)
     expect(screen.getByRole('heading', { name: 'Strategy Research Lab' })).toBeInTheDocument()
-    expect(screen.getByText(/evidence registry only/i)).toBeInTheDocument()
+    expect(screen.getByText(/manual evidence is a research record/i)).toBeInTheDocument()
     expect(screen.getAllByText('Quality at a fair price')).toHaveLength(2)
     expect(screen.getAllByText(/missing backtest evidence/i).length).toBeGreaterThan(0)
     expect(screen.getByLabelText('Rules JSON')).toBeInTheDocument()

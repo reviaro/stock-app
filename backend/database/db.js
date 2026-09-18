@@ -517,6 +517,8 @@ function initDb() {
             db.run('CREATE INDEX IF NOT EXISTS idx_strategy_versions_experiment ON strategy_versions(experiment_id, version_number)');
             db.run('CREATE INDEX IF NOT EXISTS idx_strategy_runs_version ON strategy_runs(version_id, id)');
 
+            for (const sql of require('../services/simulator_controls').schema) db.run(sql);
+            for (const sql of require('../services/strategy_evaluation').schema) db.run(sql);
             db.run(`
                 CREATE INDEX IF NOT EXISTS idx_chat_history_session
                 ON chat_history(session_id, created_at DESC)
@@ -1342,7 +1344,7 @@ function setSimTaxBracket(bracket, accountId = 1) {
     });
 }
 
-function addSimTransaction(txn) {
+function addSimTransaction(txn, valuationQuotes = {}) {
     if (txn && ['buy', 'sell'].includes(txn.type)) return recordSimTradeAtomic({ transaction: txn });
     let normalized;
     try {
@@ -1351,17 +1353,19 @@ function addSimTransaction(txn) {
         return Promise.reject(err);
     }
     const { account_id: accountId, symbol, type, amount } = normalized;
-    return new Promise((resolve, reject) => {
-        const sqlite = getDb();
-        sqlite.run(
+    const controls = require('../services/simulator_controls');
+    return controls.transaction(async (sqlite) => {
+        if (await controls.activeRun(sqlite, accountId)) throw controls.error('SIM_RUN_LOCKED', 'archive the evaluation run before changing its funding');
+        const rows = await loadSimLedgerRows(sqlite, accountId);
+        if (type === 'withdrawal' && computeSimLedgerSnapshot(rows).cash < amount + normalized.fees) throw controls.error('SIM_INSUFFICIENT_CASH', 'withdrawal including fees exceeds available cash');
+        await controls.capture(sqlite, accountId, rows, valuationQuotes, 'before_flow');
+        const result = await controls.run(sqlite,
             `INSERT INTO sim_transactions (account_id, symbol, type, shares, price, amount, fees, txn_date, notes)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [accountId, symbol, type, normalized.shares, normalized.price, amount, normalized.fees, normalized.txn_date, normalized.notes],
-            function(err) {
-                sqlite.close();
-                err ? reject(err) : resolve({ id: this.lastID, account_id: accountId, symbol, type, amount });
-            }
+            [accountId, symbol, type, normalized.shares, normalized.price, amount, normalized.fees, normalized.txn_date, normalized.notes]
         );
+        await controls.capture(sqlite, accountId, [...rows, { ...normalized, id: result.id }], valuationQuotes, 'cash_flow', type === 'deposit' ? amount : -amount);
+        return { id: result.id, account_id: accountId, symbol, type, amount };
     });
 }
 
@@ -1550,7 +1554,7 @@ function computeSimLedgerSnapshot(rows) {
         const amount = Number(row.amount ?? 0);
         const fees = Number(row.fees ?? 0);
         if (row.type === 'deposit') cash += amount - fees;
-        else if (row.type === 'withdrawal') cash -= amount - fees;
+        else if (row.type === 'withdrawal') cash -= amount + fees;
         else if (row.type === 'buy') {
             cash -= amount + fees;
             shares[row.symbol] = (shares[row.symbol] || 0) + Number(row.shares ?? 0);
@@ -1564,15 +1568,14 @@ function computeSimLedgerSnapshot(rows) {
 
 function loadSimLedgerRows(sqlite, accountId) {
     return new Promise((resolve, reject) => {
-        // Cash-mode dividends are spendable cash exactly like the displayed
-        // ledger: the locked snapshot must union them in or dividend-funded
-        // buys get rejected with cash the UI already shows.
+        // Include every dividend credit. A DRIP credit offsets its linked buy;
+        // omitting it understates cash relative to the displayed ledger.
         sqlite.all(
             `SELECT id, account_id, symbol, type, shares, price, amount, fees, txn_date FROM sim_transactions WHERE account_id = ?
              UNION ALL
              SELECT 1000000000000 + id AS id, account_id, symbol, 'dividend' AS type, NULL AS shares,
                     reinvestment_price AS price, amount, 0 AS fees, txn_date
-             FROM sim_dividends WHERE account_id = ? AND reinvestment_mode = 'cash'
+             FROM sim_dividends WHERE account_id = ?
              ORDER BY txn_date ASC, id ASC`,
             [Number(accountId), Number(accountId)],
             (err, rows) => (err ? reject(err) : resolve(rows || [])),
@@ -1657,7 +1660,7 @@ function persistSimTradeAtomic(order = {}, manual = false) {
                                     resolve(JSON.parse(existing.result_json));
                                 });
                             }
-                            loadSimLedgerRows(sqlite, accountId).then((rows) => {
+                            loadSimLedgerRows(sqlite, accountId).then(async (rows) => {
                                 const snapshot = computeSimLedgerSnapshot(rows);
                                 const cost = normalized.amount + normalized.fees;
                                 if (normalized.type === 'buy' && snapshot.cash + SIM_SHARE_TOLERANCE < cost) {
@@ -1669,6 +1672,14 @@ function persistSimTradeAtomic(order = {}, manual = false) {
                                     return fail(simOrderError('SIM_INSUFFICIENT_SHARES',
                                         `insufficient shares: own ${owned}, tried to sell ${normalized.shares}`));
                                 }
+                                const controls = require('../services/simulator_controls');
+                                const activeSession = await controls.activeRun(sqlite, accountId);
+                                if (manual && activeSession) throw controls.error('SIM_RUN_LOCKED', 'archive the evaluation run before manual recording');
+                                if (order.intent?.run_id != null && order.intent.run_id !== activeSession?.id) {
+                                    throw controls.error('SIM_RUN_MISMATCH', 'run_id must identify the active run for this sleeve');
+                                }
+                                const policyId = manual ? null : await controls.enforceRisk(sqlite, accountId, rows, { ...order, transaction: normalized });
+                                await controls.capture(sqlite, accountId, rows, order.valuation_quotes || {}, 'before_trade');
 
                                 const insertTxn = () => new Promise((res, rej) => {
                                     sqlite.run(
@@ -1776,7 +1787,7 @@ function persistSimTradeAtomic(order = {}, manual = false) {
                                         return null;
                                     });
                                 });
-                                runPlanFlow.then((resolvedPlanId) => {
+                                runPlanFlow.then(async (resolvedPlanId) => {
                                     const planIdFinal = resolvedPlanId;
                                     const result = {
                                         id: transactionId,
@@ -1791,7 +1802,11 @@ function persistSimTradeAtomic(order = {}, manual = false) {
                                         intent_hash: intentHash,
                                         fill_date,
                                         fill_time,
+                                        policy_version_id: policyId,
+                                        run_id: activeSession?.id || null,
                                     };
+                                    await controls.capture(sqlite, accountId, [...rows, { ...normalized, id: transactionId }],
+                                        order.valuation_quotes || {}, manual ? 'manual_trade' : 'evaluated_trade');
                                     if (planIdFinal != null) result.trade_plan_id = planIdFinal;
                                     if (manual) {
                                         delete result.client_order_id;
@@ -1805,6 +1820,9 @@ function persistSimTradeAtomic(order = {}, manual = false) {
                                             resolve(result);
                                         });
                                     }
+                                    await controls.run(sqlite, `INSERT INTO sim_decision_events(account_id,run_id,decision_key,action,outcome,detail_json,created_at)
+                                        VALUES (?,?,?,?,?,?,?)`, [accountId, activeSession?.id || null, `order:${clientOrderId}:${transactionId}`, normalized.type,
+                                        'filled', JSON.stringify({ intent: order.intent, result, quote: order.quote }), new Date().toISOString()]);
                                     sqlite.run(
                                         `INSERT INTO sim_orders (account_id, client_order_id, intent_hash, transaction_id, result_json, quote_json, fill_date, fill_time)
                                          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1820,7 +1838,7 @@ function persistSimTradeAtomic(order = {}, manual = false) {
                                             });
                                         },
                                     );
-                                }, fail);
+                                }).catch(fail);
                             }).catch(fail);
                         },
                     );
@@ -1906,9 +1924,11 @@ function deleteAllSimTransactions(accountId = 1) {
                     if (planErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(planErr); });
                     sqlite.run('DELETE FROM sim_orders WHERE account_id = ?', [id], function(orderErr) {
                         if (orderErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(orderErr); });
-                        sqlite.run('DELETE FROM sim_transactions WHERE account_id = ?', [id], function(txnErr) {
+                        sqlite.run('DELETE FROM sim_transactions WHERE account_id = ?', [id], async function(txnErr) {
                             if (txnErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(txnErr); });
                             const deleted = this.changes;
+                            try { await require('../services/simulator_controls').capture(sqlite, id, [], {}, 'reset'); }
+                            catch (error) { return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(error); }); }
                             sqlite.run('COMMIT', (commitErr) => {
                                 sqlite.close();
                                 commitErr ? reject(commitErr) : resolve({ deleted });
@@ -2517,6 +2537,7 @@ function listStrategyRunsForExperiment(experimentId) {
 }
 
 module.exports = {
+    loadSimLedgerRows,
     VALID_BUCKETS,
     VALID_TXN_TYPES,
     DB_PATH,

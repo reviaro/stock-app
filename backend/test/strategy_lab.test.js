@@ -52,11 +52,11 @@ test('creates, lists, and returns experiment detail', async () => {
     assert.deepStrictEqual(detail.versions, []);
     assert.deepStrictEqual(detail.promotion_readiness.paper, {
         ready: false,
-        blockers: ['missing_backtest_evidence', 'missing_out_of_sample_evidence'],
+        blockers: ['missing_verified_backtest_evidence', 'missing_verified_out_of_sample_evidence'],
     });
     assert.deepStrictEqual(detail.promotion_readiness.live, {
         ready: false,
-        blockers: ['missing_backtest_evidence', 'missing_out_of_sample_evidence', 'missing_paper_evidence'],
+        blockers: ['missing_verified_backtest_evidence', 'missing_verified_out_of_sample_evidence', 'missing_verified_paper_evidence'],
     });
 });
 
@@ -122,13 +122,13 @@ test('records runs and deterministically reports paper and live readiness withou
     await strategyLab.addRun(version.id, { ...base, run_type: 'backtest' });
     let detail = await strategyLab.getExperiment(experiment.id);
     assert.strictEqual(detail.promotion_readiness.paper.ready, false);
-    assert.deepStrictEqual(detail.promotion_readiness.paper.blockers, ['missing_out_of_sample_evidence']);
+    assert.deepStrictEqual(detail.promotion_readiness.paper.blockers, ['missing_verified_backtest_evidence', 'missing_verified_out_of_sample_evidence']);
 
     await strategyLab.addRun(version.id, { ...base, run_type: 'out_of_sample' });
     detail = await strategyLab.getExperiment(experiment.id);
-    assert.strictEqual(detail.promotion_readiness.paper.ready, true);
-    assert.deepStrictEqual(detail.promotion_readiness.paper.blockers, []);
-    assert.deepStrictEqual(detail.promotion_readiness.live.blockers, ['missing_paper_evidence']);
+    assert.strictEqual(detail.promotion_readiness.paper.ready, false);
+    assert.deepStrictEqual(detail.promotion_readiness.paper.blockers, ['missing_verified_backtest_evidence', 'missing_verified_out_of_sample_evidence']);
+    assert.deepStrictEqual(detail.promotion_readiness.live.blockers, ['missing_verified_backtest_evidence', 'missing_verified_out_of_sample_evidence', 'missing_verified_paper_evidence']);
 
     const paperRun = await strategyLab.addRun(version.id, { ...base, run_type: 'paper' });
     assert.strictEqual(paperRun.run_type, 'paper');
@@ -136,7 +136,7 @@ test('records runs and deterministically reports paper and live readiness withou
     assert.strictEqual(paperRun.sharpe, 1.2);
 
     detail = await strategyLab.getExperiment(experiment.id);
-    assert.strictEqual(detail.promotion_readiness.live.ready, true);
+    assert.strictEqual(detail.promotion_readiness.live.ready, false);
     assert.strictEqual(Object.hasOwn(detail, 'promoted'), false);
     assert.strictEqual(Object.hasOwn(detail, 'live'), false);
 });
@@ -152,7 +152,7 @@ test('allocation evidence is stored without satisfying trading-strategy readines
     assert.strictEqual(run.evidence_domain, 'allocation');
     const detail = await strategyLab.getExperiment(experiment.id);
     assert.deepStrictEqual(detail.promotion_readiness.paper.blockers, [
-        'missing_backtest_evidence', 'missing_out_of_sample_evidence',
+        'missing_verified_backtest_evidence', 'missing_verified_out_of_sample_evidence',
     ]);
 });
 
@@ -161,8 +161,9 @@ test('assesses readiness from explicit evidence without side effects', () => {
         { run_type: 'backtest' },
         { run_type: 'out_of_sample' },
     ]), {
-        paper: { ready: true, blockers: [] },
-        live: { ready: false, blockers: ['missing_paper_evidence'] },
+        paper: { ready: false, blockers: ['missing_verified_backtest_evidence', 'missing_verified_out_of_sample_evidence'] },
+        live: { ready: false, blockers: ['missing_verified_backtest_evidence', 'missing_verified_out_of_sample_evidence', 'missing_verified_paper_evidence'] },
+        evidence_types_present: ['backtest', 'out_of_sample'], automated_promotion_enabled: false,
     });
 });
 
@@ -178,10 +179,10 @@ test('a new strategy version must gather its own promotion evidence', async () =
     await strategyLab.addVersion(experiment.id, { rules: { threshold: 20 } });
 
     const detail = await strategyLab.getExperiment(experiment.id);
-    assert.strictEqual(detail.versions[0].promotion_readiness.paper.ready, true);
+    assert.strictEqual(detail.versions[0].promotion_readiness.paper.ready, false);
     assert.strictEqual(detail.versions[1].promotion_readiness.paper.ready, false);
     assert.deepStrictEqual(detail.promotion_readiness.paper.blockers, [
-        'missing_backtest_evidence', 'missing_out_of_sample_evidence',
+        'missing_verified_backtest_evidence', 'missing_verified_out_of_sample_evidence',
     ]);
 });
 
