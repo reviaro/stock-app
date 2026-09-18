@@ -1,14 +1,15 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type {
   AlpacaDayTradingMonitorHealth,
   AlpacaDayTradingSnapshot,
   AlpacaDayTradePlan,
   AlpacaDayTradePlanDetail,
   AlpacaDayTradeJournalAnalytics,
+  AlpacaMonitorMode,
 } from '@/types/alpacaDayTrading'
 
-async function apiFetch<T>(url: string): Promise<T> {
-  const res = await fetch(url)
+async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(url, options)
   const json = await res.json()
   if (json.status !== 'success') throw new Error(json.error || 'API error')
   return json.data as T
@@ -63,5 +64,33 @@ export function useAlpacaDayTradingJournal() {
     queryFn: () => apiFetch('/api/alpaca-paper/day-trading/journal'),
     staleTime: 30_000,
     retry: false,
+  })
+}
+
+// The operator token is sent only as this one request's header -- never stored, never part of
+// the query cache -- so this control carries the same trust level as calling the API directly.
+export function useSetAlpacaDayTradingMode() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ mode, token }: { mode: AlpacaMonitorMode; token: string }) =>
+      apiFetch<{ mode: string; killSwitch: boolean }>('/api/alpaca-paper/day-trading/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Alpaca-Day-Trading-Token': token },
+        body: JSON.stringify({ mode, confirm: true }),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['alpaca-day-trading', 'monitor-health'] }),
+  })
+}
+
+export function useClearAlpacaDayTradingKillSwitch() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (token: string) =>
+      apiFetch<{ killSwitch: boolean }>('/api/alpaca-paper/day-trading/kill-switch/clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Alpaca-Day-Trading-Token': token },
+        body: JSON.stringify({ confirm: true }),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['alpaca-day-trading', 'monitor-health'] }),
   })
 }

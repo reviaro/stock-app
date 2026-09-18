@@ -71,6 +71,8 @@ vi.mock('@/hooks/useAlpacaDayTrading', () => ({
     isLoading: false,
     isError: false,
   }),
+  useSetAlpacaDayTradingMode: () => ({ mutate: vi.fn(), isPending: false, isError: false, error: null, isSuccess: false }),
+  useClearAlpacaDayTradingKillSwitch: () => ({ mutate: vi.fn(), isPending: false, isError: false, error: null, isSuccess: false }),
 }))
 
 describe('AlpacaPaperPage', () => {
@@ -83,7 +85,7 @@ describe('AlpacaPaperPage', () => {
     expect(screen.getByText(/Paper connection verified/i)).toBeInTheDocument()
 
     expect(screen.getByRole('heading', { name: 'Monitor health' })).toBeInTheDocument()
-    expect(screen.getByText('shadow')).toBeInTheDocument()
+    expect(screen.getAllByText('shadow').length).toBeGreaterThan(0)
 
     expect(screen.getByRole('heading', { name: 'Account & risk' })).toBeInTheDocument()
     expect(screen.getByText(/Unavailable/i)).toBeInTheDocument()
