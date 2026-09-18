@@ -92,9 +92,41 @@ export interface AlpacaDayTradeFill {
   correctionOf: string | null
 }
 
+export interface AlpacaDayTradeOrderLeg {
+  status: string
+  filledQty: number
+}
+
+export interface AlpacaDayTradeEntryOrder {
+  status: string
+  qty: number
+  filledQty: number
+  submittedAt: string | null
+}
+
+export interface AlpacaDayTradeStopLeg extends AlpacaDayTradeOrderLeg {
+  stopPrice: number | null
+}
+
+export interface AlpacaDayTradeTargetLeg extends AlpacaDayTradeOrderLeg {
+  limitPrice: number | null
+}
+
+// Discriminated on `unavailable` so the compiler forces a check before any leg is read --
+// `null` (no live orders exist, e.g. a closed plan) is a distinct third state, not folded in.
+export type AlpacaDayTradeLiveOrders =
+  | { unavailable: true }
+  | {
+      unavailable: false
+      entry: AlpacaDayTradeEntryOrder | null
+      stopLeg: AlpacaDayTradeStopLeg | null
+      targetLeg: AlpacaDayTradeTargetLeg | null
+    }
+
 export interface AlpacaDayTradePlanDetail {
   plan: AlpacaDayTradePlan
   fills: AlpacaDayTradeFill[]
+  liveOrders: AlpacaDayTradeLiveOrders | null
 }
 
 export interface AlpacaDayTradingSnapshot {

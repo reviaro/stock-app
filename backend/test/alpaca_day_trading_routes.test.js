@@ -911,6 +911,66 @@ test('GET /day-trading/plans/:id returns 404 for an unknown plan', async () => {
     assert.strictEqual(result.status, 404);
 });
 
+test('GET /day-trading/plans/:id includes the live entry/stop/target order legs for a nonterminal plan', async () => {
+    const plan = await seedActivePlan();
+    mockKillSwitchClearBroker({ positionQty: 10, legsCovered: true });
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, `/api/alpaca-paper/day-trading/plans/${plan.id}`);
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    const { liveOrders } = result.body.data;
+    assert.strictEqual(liveOrders.unavailable, false);
+    assert.strictEqual(liveOrders.entry.status, 'filled');
+    assert.strictEqual(liveOrders.entry.filledQty, 10);
+    assert.strictEqual(liveOrders.stopLeg.status, 'held');
+    assert.strictEqual(liveOrders.targetLeg.status, 'held');
+});
+
+test('GET /day-trading/plans/:id reports live orders as unavailable, not silently absent, when the broker cannot be reached', async () => {
+    const plan = await seedActivePlan();
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    global.fetch = async () => { throw new Error('network down'); };
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, `/api/alpaca-paper/day-trading/plans/${plan.id}`);
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    assert.strictEqual(result.body.data.liveOrders.unavailable, true);
+});
+
+test('GET /day-trading/plans/:id has no live orders for a terminal plan, and never calls the broker for one', async () => {
+    const plan = await seedActivePlan();
+    await db.updateAlpacaDayTradePlan(plan.id, { state: 'closed', closed_at: '2026-09-17T14:00:00Z' });
+    global.fetch = async (url) => { throw new Error(`unexpected broker request in this test: ${url}`); };
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, `/api/alpaca-paper/day-trading/plans/${plan.id}`);
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    assert.strictEqual(result.body.data.liveOrders, null);
+});
+
+test('GET /day-trading/plans/:id never leaks the broker order id through live order legs', async () => {
+    const plan = await seedActivePlan();
+    mockKillSwitchClearBroker({ positionQty: 10, legsCovered: true });
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, `/api/alpaca-paper/day-trading/plans/${plan.id}`);
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+    assert.doesNotMatch(JSON.stringify(result.body), /broker-parent-1|stop-1|target-1/);
+});
+
 test('GET /day-trading/journal returns analytics computed from closed plans', async () => {
     const plan = await seedActivePlan();
     await db.updateAlpacaDayTradePlan(plan.id, {

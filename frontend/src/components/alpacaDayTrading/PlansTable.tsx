@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { useAlpacaDayTradingPlans, useAlpacaDayTradingPlanDetail } from '@/hooks/useAlpacaDayTrading'
+import type { AlpacaDayTradeLiveOrders } from '@/types/alpacaDayTrading'
 
 function usd(value?: number | null) {
   return value == null ? '—' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value)
@@ -18,13 +19,72 @@ function stateBadge(state: string) {
   return <Badge variant="default">{state}</Badge>
 }
 
+// A live price differing from what was planned isn't an error -- a repair leg can be
+// re-attached at a different price, or a partial fill can shift things -- but it's exactly the
+// kind of thing you'd otherwise have to open Alpaca to notice, so it's flagged rather than
+// silently shown as just another number.
+function priceMismatchNote(planned: number, live: number | null) {
+  if (live == null || Math.abs(live - planned) < 0.005) return null
+  return `differs from planned ${usd(planned)}`
+}
+
+function LiveOrdersSection({ liveOrders, plannedStop, plannedTarget }: {
+  liveOrders: AlpacaDayTradeLiveOrders | null
+  plannedStop: number
+  plannedTarget: number
+}) {
+  return (
+    <div>
+      <p className="mb-1 font-medium uppercase tracking-wide text-muted-foreground">Live orders</p>
+      {liveOrders == null && <p className="text-muted-foreground">No live orders — this plan is not currently open.</p>}
+      {liveOrders?.unavailable === true && (
+        <p className="text-destructive">Couldn&apos;t reach the broker to confirm live orders right now.</p>
+      )}
+      {liveOrders?.unavailable === false && (
+        <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+          <div className="rounded-md border border-border/70 p-2">
+            <p className="text-muted-foreground">Entry</p>
+            {liveOrders.entry ? (
+              <p className="font-mono">{liveOrders.entry.status} — {liveOrders.entry.filledQty}/{liveOrders.entry.qty}</p>
+            ) : <p className="text-muted-foreground">not submitted</p>}
+          </div>
+          <div className={`rounded-md border p-2 ${liveOrders.stopLeg && liveOrders.stopLeg.filledQty > 0 ? 'border-destructive bg-destructive/10' : 'border-border/70'}`}>
+            <p className="text-muted-foreground">Stop</p>
+            {liveOrders.stopLeg ? (
+              <>
+                <p className="font-mono">{liveOrders.stopLeg.status}{liveOrders.stopLeg.filledQty > 0 ? ` — FILLED ${liveOrders.stopLeg.filledQty}` : ''}</p>
+                <p className="font-mono">{usd(liveOrders.stopLeg.stopPrice)}</p>
+                {priceMismatchNote(plannedStop, liveOrders.stopLeg.stopPrice) && (
+                  <p className="text-amber-600 dark:text-amber-400">{priceMismatchNote(plannedStop, liveOrders.stopLeg.stopPrice)}</p>
+                )}
+              </>
+            ) : <p className="text-muted-foreground">not yet discovered</p>}
+          </div>
+          <div className={`rounded-md border p-2 ${liveOrders.targetLeg && liveOrders.targetLeg.filledQty > 0 ? 'border-emerald-600 bg-emerald-600/10' : 'border-border/70'}`}>
+            <p className="text-muted-foreground">Target</p>
+            {liveOrders.targetLeg ? (
+              <>
+                <p className="font-mono">{liveOrders.targetLeg.status}{liveOrders.targetLeg.filledQty > 0 ? ` — FILLED ${liveOrders.targetLeg.filledQty}` : ''}</p>
+                <p className="font-mono">{usd(liveOrders.targetLeg.limitPrice)}</p>
+                {priceMismatchNote(plannedTarget, liveOrders.targetLeg.limitPrice) && (
+                  <p className="text-amber-600 dark:text-amber-400">{priceMismatchNote(plannedTarget, liveOrders.targetLeg.limitPrice)}</p>
+                )}
+              </>
+            ) : <p className="text-muted-foreground">not yet discovered</p>}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function PlanDetail({ planId }: { planId: number }) {
   const { data, isLoading, isError } = useAlpacaDayTradingPlanDetail(planId)
 
   if (isLoading) return <p className="text-xs text-muted-foreground">Loading plan detail…</p>
   if (isError || !data) return <p className="text-xs text-destructive">Unable to load plan detail.</p>
 
-  const { plan, fills } = data
+  const { plan, fills, liveOrders } = data
   return (
     <div className="space-y-3 rounded-md border border-border bg-background/60 p-3 text-xs">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
@@ -43,6 +103,7 @@ function PlanDetail({ planId }: { planId: number }) {
           <p className="mt-0.5">{plan.reviewNotes}</p>
         </div>
       )}
+      <LiveOrdersSection liveOrders={liveOrders} plannedStop={plan.plannedStop} plannedTarget={plan.plannedTarget} />
       <div>
         <p className="mb-1 font-medium uppercase tracking-wide text-muted-foreground">Fills ({fills.length})</p>
         {fills.length === 0 ? <p className="text-muted-foreground">No fills recorded yet.</p> : (

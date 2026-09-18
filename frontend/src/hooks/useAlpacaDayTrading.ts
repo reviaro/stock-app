@@ -49,11 +49,15 @@ export function useAlpacaDayTradingPlans(state?: string) {
   })
 }
 
+// Now does broker I/O for a nonterminal plan's live order legs (clock/position/order lookup)
+// -- same cost class as /snapshot, so it gets the same staleTime rather than React Query's
+// default, which would refire all three broker calls on every remount/refocus of a row.
 export function useAlpacaDayTradingPlanDetail(id: number | null) {
   return useQuery<AlpacaDayTradePlanDetail>({
     queryKey: ['alpaca-day-trading', 'plan', id],
     queryFn: () => apiFetch(`/api/alpaca-paper/day-trading/plans/${id}`),
     enabled: id != null,
+    staleTime: 10_000,
     retry: false,
   })
 }

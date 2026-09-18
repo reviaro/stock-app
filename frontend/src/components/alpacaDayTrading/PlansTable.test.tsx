@@ -12,10 +12,14 @@ const plan = {
   createdAt: '2026-09-17T13:30:00Z', openedAt: null, closedAt: null,
 }
 
+const { planDetail } = vi.hoisted(() => ({
+  planDetail: { current: null as unknown },
+}))
+
 vi.mock('@/hooks/useAlpacaDayTrading', () => ({
   useAlpacaDayTradingPlans: () => ({ data: [plan], isLoading: false, isError: false }),
   useAlpacaDayTradingPlanDetail: (id: number | null) => ({
-    data: id === 11 ? { plan, fills: [] } : undefined,
+    data: id === 11 ? planDetail.current : undefined,
     isLoading: false,
     isError: false,
   }),
@@ -23,6 +27,7 @@ vi.mock('@/hooks/useAlpacaDayTrading', () => ({
 
 describe('PlansTable', () => {
   it('expands a plan row to show detail, labelling review_notes as a system note when the plan errored', () => {
+    planDetail.current = { plan, fills: [], liveOrders: null }
     render(<PlansTable />)
 
     expect(screen.getByText('NVDA')).toBeInTheDocument()
@@ -30,5 +35,40 @@ describe('PlansTable', () => {
 
     expect(screen.getByText(/System note \(this plan errored\)/)).toBeInTheDocument()
     expect(screen.getByText(/entry fills \(999\) exceed the planned quantity/)).toBeInTheDocument()
+  })
+
+  it('shows no live orders for a plan that is not open, without implying a broker problem', () => {
+    planDetail.current = { plan, fills: [], liveOrders: null }
+    render(<PlansTable />)
+    fireEvent.click(screen.getByText('NVDA'))
+
+    expect(screen.getByText(/No live orders/i)).toBeInTheDocument()
+    expect(screen.queryByText(/couldn.t reach the broker/i)).not.toBeInTheDocument()
+  })
+
+  it('shows a distinct warning, not an empty section, when the broker cannot be reached to confirm live orders', () => {
+    planDetail.current = { plan, fills: [], liveOrders: { unavailable: true } }
+    render(<PlansTable />)
+    fireEvent.click(screen.getByText('NVDA'))
+
+    expect(screen.getByText(/couldn.t reach the broker/i)).toBeInTheDocument()
+  })
+
+  it('flags a live stop price that differs from the planned stop, and a stop leg that already filled', () => {
+    planDetail.current = {
+      plan,
+      fills: [],
+      liveOrders: {
+        unavailable: false,
+        entry: { status: 'filled', qty: 10, filledQty: 10, submittedAt: '2026-09-17T13:30:00Z' },
+        stopLeg: { status: 'filled', stopPrice: 97, filledQty: 10 },
+        targetLeg: { status: 'held', limitPrice: 104, filledQty: 0 },
+      },
+    }
+    render(<PlansTable />)
+    fireEvent.click(screen.getByText('NVDA'))
+
+    expect(screen.getByText(/differs from planned/i)).toBeInTheDocument()
+    expect(screen.getByText(/FILLED/)).toBeInTheDocument()
   })
 })

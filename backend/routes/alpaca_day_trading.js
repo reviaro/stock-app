@@ -386,6 +386,44 @@ router.get('/plans', async (req, res) => {
     }
 });
 
+// Only ever null (never fetched) for a terminal plan or one with no entry submitted yet -- a
+// closed/cancelled/errored plan has no live orders by definition, which is a different fact
+// than "couldn't check," so it must not collapse into the same `unavailable: true` shape a
+// broker outage produces. Reuses buildObservation (Task 11/13/14's one definition of "fresh
+// broker state for a plan") rather than re-deriving legs here a second way.
+async function fetchLiveOrders(plan) {
+    if (TERMINAL_PLAN_STATES.includes(plan.state) || !plan.entry_parent_broker_order_id) return null;
+    try {
+        const client = createPaperClient();
+        const observation = await buildObservation(plan, { client, policy: DEFAULT_MONITOR_POLICY, now: () => new Date() });
+        if (observation.brokerUnavailable) return { unavailable: true };
+        return {
+            unavailable: false,
+            entry: observation.entryOrder ? {
+                status: observation.entryOrder.status,
+                qty: observation.entryOrder.qty,
+                filledQty: observation.entryOrder.filled_qty,
+                submittedAt: observation.entryOrder.submitted_at,
+            } : null,
+            stopLeg: observation.stopLeg ? {
+                status: observation.stopLeg.status,
+                stopPrice: observation.stopLeg.stop_price != null ? Number(observation.stopLeg.stop_price) : null,
+                filledQty: Number(observation.stopLeg.filled_qty || 0),
+            } : null,
+            targetLeg: observation.targetLeg ? {
+                status: observation.targetLeg.status,
+                limitPrice: observation.targetLeg.limit_price != null ? Number(observation.targetLeg.limit_price) : null,
+                filledQty: Number(observation.targetLeg.filled_qty || 0),
+            } : null,
+        };
+    } catch (_err) {
+        // Alpaca not configured at all collapses into the same shape as a broker outage: from
+        // the dashboard's point of view both mean "the account owner's own plan/fill data is
+        // still shown below, but its live order legs cannot be confirmed right now."
+        return { unavailable: true };
+    }
+}
+
 router.get('/plans/:id', async (req, res) => {
     try {
         const plan = await store.getPlan(req.params.id);
@@ -393,7 +431,8 @@ router.get('/plans/:id', async (req, res) => {
             return res.status(404).json({ status: 'error', code: 'ALPACA_PLAN_NOT_FOUND', error: 'no Day Trading plan exists with this id' });
         }
         const fills = await store.listFillsForPlan(plan.id);
-        return res.json({ status: 'success', data: { plan: sanitizePlan(plan), fills: fills.map(sanitizeFill) } });
+        const liveOrders = await fetchLiveOrders(plan);
+        return res.json({ status: 'success', data: { plan: sanitizePlan(plan), fills: fills.map(sanitizeFill), liveOrders } });
     } catch (err) {
         return respondWithError(res, err);
     }
