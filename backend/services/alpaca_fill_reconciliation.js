@@ -7,9 +7,20 @@ const { attemptCloseFromFills } = require('./alpaca_day_trade_journal');
 // docs). is_bust/correction_of exist on alpaca_paper_fills as pass-through columns for a
 // hypothetical future feed or manual operator correction, not because either current feed
 // populates them automatically.
+// Alpaca's REST FILL activity id was observed as a timestamp-prefixed composite in production
+// (for example `20260918131205250::<execution UUID>`), while trade_updates sends only the
+// execution UUID. Canonicalize only that exact observed shape before persistence so the database's
+// UNIQUE(activity_id) constraint can dedupe the same execution across both channels. Preserve
+// every other identifier verbatim rather than guessing at undocumented formats.
+function canonicalActivityId(value) {
+    const id = String(value);
+    const match = id.match(/^\d{17}::([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i);
+    return match ? match[1] : id;
+}
+
 function normalizeRestFillActivity(raw) {
     return {
-        activity_id: String(raw.id),
+        activity_id: canonicalActivityId(raw.id),
         broker_order_id: String(raw.order_id),
         symbol: String(raw.symbol).toUpperCase(),
         side: raw.side,

@@ -112,6 +112,64 @@ test('the same execution delivered by both channels produces exactly one stored 
     assert.strictEqual(fills[0].source, 'websocket', 'first delivery wins; the later duplicate must not overwrite it');
 });
 
+test('Alpaca REST composite activity ids dedupe against the WebSocket execution id', async () => {
+    const { plan } = await seedPlanWithEntry();
+    const executionId = '9a049121-8591-402a-988a-99557c0c1610';
+    const wsShaped = normalizeWebSocketFillEvent({
+        event: 'fill', execution_id: executionId,
+        order: { id: 'broker-parent-1', symbol: 'NVDA', side: 'buy' },
+        price: '100.49', qty: '10', position_qty: '10', timestamp: '2026-09-18T17:12:05.250715853Z',
+    });
+    const restShaped = normalizeRestFillActivity({
+        id: `20260918131205250::${executionId}`,
+        order_id: 'broker-parent-1', symbol: 'NVDA', side: 'buy', qty: '10', price: '100.49',
+        transaction_time: '2026-09-18T17:12:05.250716Z', type: 'fill',
+    });
+
+    await store.recordFill({ ...wsShaped, plan_id: plan.id });
+    await store.recordFill({ ...restShaped, plan_id: plan.id });
+
+    const fills = await store.listFillsForPlan(plan.id);
+    assert.strictEqual(restShaped.activity_id, executionId);
+    assert.strictEqual(fills.length, 1);
+    assert.strictEqual(fills[0].activity_id, executionId);
+    assert.strictEqual(fills[0].source, 'websocket');
+});
+
+test('REST activity ids preserve malformed or undocumented composite prefixes verbatim', () => {
+    const executionId = '9a049121-8591-402a-988a-99557c0c1610';
+    for (const id of [`not-a-timestamp::${executionId}`, `20260918::${executionId}`]) {
+        const fill = normalizeRestFillActivity({
+            id, order_id: 'broker-parent-1', symbol: 'NVDA', side: 'buy',
+            qty: '10', price: '100.49', transaction_time: '2026-09-18T17:12:05.250716Z', type: 'fill',
+        });
+        assert.strictEqual(fill.activity_id, id);
+    }
+});
+
+test('cross-channel deduplication is symmetric when REST arrives before WebSocket', async () => {
+    const { plan } = await seedPlanWithEntry();
+    const executionId = '9a049121-8591-402a-988a-99557c0c1610';
+    const restShaped = normalizeRestFillActivity({
+        id: `20260918131205250::${executionId}`,
+        order_id: 'broker-parent-1', symbol: 'NVDA', side: 'buy', qty: '10', price: '100.49',
+        transaction_time: '2026-09-18T17:12:05.250716Z', type: 'fill',
+    });
+    const wsShaped = normalizeWebSocketFillEvent({
+        event: 'fill', execution_id: executionId,
+        order: { id: 'broker-parent-1', symbol: 'NVDA', side: 'buy' },
+        price: '100.49', qty: '10', position_qty: '10', timestamp: '2026-09-18T17:12:05.250715853Z',
+    });
+
+    await store.recordFill({ ...restShaped, plan_id: plan.id });
+    await store.recordFill({ ...wsShaped, plan_id: plan.id });
+
+    const fills = await store.listFillsForPlan(plan.id);
+    assert.strictEqual(fills.length, 1);
+    assert.strictEqual(fills[0].activity_id, executionId);
+    assert.strictEqual(fills[0].source, 'rest_reconciliation', 'first delivery wins without later overwrite');
+});
+
 // The path a live trade_updates event actually takes: already normalized by the stream module
 // before this is ever called, so this owns only what reconcileFills' own REST loop does inline
 // for each activity -- the legacy-order skip and the owning-plan lookup -- reusing those exact
