@@ -17,6 +17,10 @@ function authorizeApiRequest(req, res, next) {
     if (principal?.role === 'operator' || principal?.type === 'session') return next();
     if (!principal) return deny('authenticated capability is required');
     const read = READ_METHODS.has(req.method);
+    if (principal.role === 'alpaca-day-trading-agent') {
+        if (req.method === 'POST' && req.path === '/alpaca-paper/day-trading/entries') return next();
+        return deny('this credential can only submit scoped Alpaca Day Trading entries');
+    }
     if (principal.role !== 'simulator-agent') {
         return read ? next() : deny('operator login or a scoped simulator credential is required for mutations');
     }
