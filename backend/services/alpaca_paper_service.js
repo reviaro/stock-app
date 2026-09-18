@@ -118,6 +118,17 @@ function createPaperClient({ env = process.env, fetchImpl = global.fetch, timeou
             const qs = params.toString();
             return request(`/v2/account/activities/${encodeURIComponent(activityType)}${qs ? `?${qs}` : ''}`);
         },
+        // Verified against Alpaca's documented response shape: each entry's date/open/close are
+        // plain "YYYY-MM-DD"/"HH:MM" strings in exchange-local (America/New_York) time, with no
+        // zone marker -- the authoritative source for which calendar dates are real NYSE
+        // trading sessions (holidays, half days), rather than a hand-maintained holiday list.
+        getCalendar: ({ start, end } = {}) => {
+            const params = new URLSearchParams();
+            if (start) params.set('start', start);
+            if (end) params.set('end', end);
+            const qs = params.toString();
+            return request(`/v2/calendar${qs ? `?${qs}` : ''}`);
+        },
     };
 }
 

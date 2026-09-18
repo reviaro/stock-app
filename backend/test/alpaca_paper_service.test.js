@@ -386,6 +386,23 @@ test('walks account activities forward from a restart cursor via after and direc
     assert.strictEqual(requests[1], 'https://paper-api.alpaca.markets/v2/account/activities/FILL?until=2026-09-17T20%3A00%3A00Z');
 });
 
+test('fetches the NYSE trading calendar with start/end query params', async () => {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const requests = [];
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+    const client = createPaperClient({
+        fetchImpl: async (url) => {
+            requests.push(url);
+            return { ok: true, json: async () => ([{ date: '2026-09-18', open: '09:30', close: '16:00' }]) };
+        },
+    });
+
+    const entries = await client.getCalendar({ start: '2026-09-01', end: '2026-09-18' });
+    assert.strictEqual(requests[0], 'https://paper-api.alpaca.markets/v2/calendar?start=2026-09-01&end=2026-09-18');
+    assert.deepStrictEqual(entries, [{ date: '2026-09-18', open: '09:30', close: '16:00' }]);
+});
+
 test('URL-encodes broker order ids containing characters that are not URL-safe', async () => {
     process.env.ALPACA_API_KEY = 'paper-key';
     process.env.ALPACA_API_SECRET = 'paper-secret';

@@ -5,6 +5,7 @@ const store = require('../services/alpaca_day_trade_store');
 const { reconcileFills, buildObservation } = require('../services/alpaca_fill_reconciliation');
 const { decidePlanAction, DEFAULT_MONITOR_POLICY } = require('../services/alpaca_day_trade_monitor');
 const { executeManagementAction } = require('../services/alpaca_day_trade_repair_execution');
+const { createSessionDateResolver } = require('../services/alpaca_trading_calendar');
 
 const DEFAULT_LOCK_PATH = path.join(__dirname, '..', '..', 'run', 'alpaca-day-trading-monitor.lock');
 const DEFAULT_POLL_INTERVAL_MS = 60_000; // Section 8: every 60s while any plan/order/position is open
@@ -63,6 +64,9 @@ function createWorker({
     let timer = null;
     let lock = null;
     let client = providedClient || null;
+    // Created once client is resolved (see start()) so its calendar cache persists across every
+    // tick for this process's lifetime, rather than refetching on each 60s poll.
+    let resolveSessionDate = null;
     // Tracks whatever tick is currently executing (or the last one that ran) so stop() can wait
     // for it -- a SIGTERM arriving mid-tick (the realistic systemd shutdown, Task 16) must not
     // release the instance lock while broker calls/decisions from this process are still in
@@ -77,6 +81,23 @@ function createWorker({
         // safe even with the kill switch tripped -- it never creates new exposure -- so it
         // keeps running. The decide/execute loop below does not.
         await reconcileFills({ client, store });
+
+        // Read-only reporting, same safety class as reconcileFills above -- refreshed every
+        // tick regardless of kill_switch so the dashboard's daily P&L stays accurate even while
+        // tripped. The resolver's own cache keeps this cheap (no broker call most ticks).
+        //
+        // Caught deliberately broad, same shape as buildObservation's own catch (Task 11): this
+        // sits ahead of the decide/execute loop, so an uncaught throw here would propagate out
+        // of runTick and be swallowed by scheduleNext's top-level catch, silently skipping plan
+        // management for the whole tick on a transient calendar-fetch failure. Reporting is not
+        // worth a management outage -- leave session_date at its previous value and continue.
+        try {
+            const sessionDate = await resolveSessionDate(now());
+            if (sessionDate) await store.updateMonitorState({ session_date: sessionDate });
+            else log({ sessionDateUnavailable: 'no calendar entry covers the current time' });
+        } catch (error) {
+            log({ sessionDateError: error.message });
+        }
 
         if (monitorState.kill_switch) {
             log({ skipped: 'kill_switch_active' });
@@ -143,6 +164,7 @@ function createWorker({
         }
         try {
             if (!client) client = createClient();
+            resolveSessionDate = createSessionDateResolver({ client });
         } catch (error) {
             lock.release();
             throw error; // fatal configuration: reject and let systemd's Restart=always retry at the process level

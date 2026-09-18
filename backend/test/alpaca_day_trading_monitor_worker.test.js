@@ -22,7 +22,7 @@ beforeEach(async () => {
         sqlite.run('DELETE FROM alpaca_paper_orders');
         sqlite.run('DELETE FROM alpaca_paper_fills');
         sqlite.run(
-            "UPDATE alpaca_monitor_state SET submission_lease_holder = NULL, submission_lease_expires_at = NULL, activity_cursor = NULL, mode = 'disabled', kill_switch = 0, health_code = NULL, last_rest_reconciliation_at = NULL WHERE id = 1",
+            "UPDATE alpaca_monitor_state SET submission_lease_holder = NULL, submission_lease_expires_at = NULL, activity_cursor = NULL, mode = 'disabled', kill_switch = 0, block_entries = 0, health_code = NULL, last_rest_reconciliation_at = NULL, session_date = NULL WHERE id = 1",
             (err) => { sqlite.close(); err ? reject(err) : resolve(); },
         );
     }));
@@ -46,6 +46,7 @@ function fakeClient(overrides = {}) {
         submitOrder: async () => ({ id: 'broker-order-1', status: 'accepted' }),
         cancelOrder: async () => ({ canceled: true }),
         getAccountActivities: async () => [],
+        getCalendar: async () => [{ date: '2026-09-17', open: '09:30', close: '16:00' }],
         ...overrides,
     };
 }
@@ -108,6 +109,81 @@ test('reports ready only after startup reconciliation has completed', async () =
     }
 });
 
+test('a tick resolves and persists the current NYSE session date from the real trading calendar', async () => {
+    const lockPath = tempLockPath();
+    await store.updateMonitorState({ mode: 'shadow' });
+    let calendarCalls = 0;
+    const client = fakeClient({
+        getCalendar: async () => { calendarCalls += 1; return [{ date: '2026-09-17', open: '09:30', close: '16:00' }]; },
+    });
+    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
+    try {
+        await worker.start();
+        // Poll for the write rather than a fixed sleep-and-hope: under heavy machine load a
+        // single 20ms-interval tick can genuinely take longer than a short fixed wait, which is
+        // exactly the flakiness this session already saw in the stop()-in-flight-tick test.
+        const deadline = Date.now() + 10_000;
+        let state = await store.getMonitorState();
+        while (!state.session_date && Date.now() < deadline) {
+            await new Promise((resolve) => { setTimeout(resolve, 20); });
+            state = await store.getMonitorState();
+        }
+        assert.strictEqual(state.session_date, '2026-09-17');
+        assert.ok(calendarCalls >= 1);
+
+        const callsAfterFirstTick = calendarCalls;
+        await new Promise((resolve) => { setTimeout(resolve, 60); });
+        assert.strictEqual(calendarCalls, callsAfterFirstTick, 'the calendar is cached across ticks, not refetched every 20ms poll');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+// A transient calendar-fetch failure must not take down the decide/execute loop with it --
+// reporting is not worth a management outage. Same fail-closed-per-source shape as
+// buildObservation's own broad catch (Task 11): one failing input degrades gracefully, it does
+// not propagate out of runTick and get swallowed by scheduleNext's top-level catch, which would
+// silently skip plan management for the whole tick while reconciliation keeps succeeding.
+test('a calendar-fetch failure does not stop the decide/execute loop from still running', async () => {
+    const lockPath = tempLockPath();
+    await store.updateMonitorState({ mode: 'shadow' });
+    const { plan } = await store.createPlanWithEntry(
+        {
+            symbol: 'NVDA', setup: 's', catalyst: 'c', thesis: 't', invalidation: 'i',
+            planned_entry_low: 100.50, planned_entry_high: 100.50, planned_stop: 98.00, planned_target: 104.00,
+            planned_qty: 10, planned_risk_dollars: 25, planned_reward_risk: 1.4, planned_account_risk_pct: 0.00025,
+            exit_deadline: '2026-09-17T19:45:00.000Z',
+        },
+        {
+            idempotency_key: 'dt-nvda-entry-1', client_order_id: 'dt-nvda-entry-1', symbol: 'NVDA', side: 'buy',
+            qty: 10, order_type: 'limit', time_in_force: 'day', limit_price: 100.50,
+            status: 'filled', execution_epoch: 'day_trading', order_class: 'bracket', leg_role: 'entry',
+        },
+    );
+    await db.updateAlpacaDayTradePlan(plan.id, { entry_parent_broker_order_id: 'broker-parent-1' });
+
+    let getPositionCalls = 0;
+    const client = fakeClient({
+        getCalendar: async () => { throw new Error('calendar endpoint unavailable'); },
+        getPosition: async () => { getPositionCalls += 1; return { qty: 10, side: 'long' }; },
+    });
+    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
+    try {
+        await worker.start();
+        const deadline = Date.now() + 10_000;
+        while (getPositionCalls === 0 && Date.now() < deadline) {
+            await new Promise((resolve) => { setTimeout(resolve, 20); });
+        }
+        assert.ok(getPositionCalls > 0, 'the plan loop must still run a tick after a calendar fetch throws');
+        const state = await store.getMonitorState();
+        assert.strictEqual(state.session_date, null, 'a failed resolve must leave session_date unset, not crash the tick');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
 test('disabled mode does not run the reconcile/decide loop at all', async () => {
     const lockPath = tempLockPath();
     await store.updateMonitorState({ mode: 'disabled' });
@@ -152,8 +228,14 @@ test('a plan needing repair sets block_entries account-wide; the worker aggregat
     const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
     try {
         await worker.start();
-        await new Promise((resolve) => { setTimeout(resolve, 100); });
-        const stateWhileUncovered = await store.getMonitorState();
+        // Poll for the write rather than a fixed sleep-and-hope -- under heavy machine load a
+        // single 20ms-interval tick can genuinely take longer than a short fixed wait.
+        let stateWhileUncovered = await store.getMonitorState();
+        let deadline = Date.now() + 10_000;
+        while (!stateWhileUncovered.block_entries && Date.now() < deadline) {
+            await new Promise((resolve) => { setTimeout(resolve, 20); });
+            stateWhileUncovered = await store.getMonitorState();
+        }
         assert.strictEqual(Boolean(stateWhileUncovered.block_entries), true);
 
         // The condition clears (protective legs now cover the position) -- the very next tick
@@ -164,8 +246,12 @@ test('a plan needing repair sets block_entries account-wide; the worker aggregat
             legs: [{ id: 'stop-1', type: 'stop', side: 'sell', qty: 10, filled_qty: 0, status: 'held' },
                 { id: 'target-1', type: 'limit', side: 'sell', qty: 10, filled_qty: 0, status: 'held' }],
         });
-        await new Promise((resolve) => { setTimeout(resolve, 100); });
-        const stateAfterCovered = await store.getMonitorState();
+        let stateAfterCovered = await store.getMonitorState();
+        deadline = Date.now() + 10_000;
+        while (stateAfterCovered.block_entries && Date.now() < deadline) {
+            await new Promise((resolve) => { setTimeout(resolve, 20); });
+            stateAfterCovered = await store.getMonitorState();
+        }
         assert.strictEqual(Boolean(stateAfterCovered.block_entries), false, 'block_entries must self-heal once no plan needs anything, without an operator clearing it');
     } finally {
         await worker.stop();
