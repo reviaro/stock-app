@@ -86,6 +86,10 @@ function createWorker({
         const plans = (await store.listPlans(null)).filter((plan) => !TERMINAL_PLAN_STATES.includes(plan.state));
         let lastHealthCode = null;
         let lastHealthReason = null;
+        // Unlike kill_switch, this is not a one-way trip -- rewritten unconditionally below,
+        // true or false, every tick that reaches this point, so it self-heals the moment no
+        // plan's decision requires it anymore rather than needing an operator to clear it.
+        let anyBlockEntries = false;
 
         for (const plan of plans) {
             const observation = await buildObservation(plan, {
@@ -94,6 +98,7 @@ function createWorker({
             const decision = decidePlanAction(observation);
             log({ planId: plan.id, symbol: plan.symbol, decision });
 
+            if (decision.blockEntries) anyBlockEntries = true;
             if (decision.healthCode) { lastHealthCode = decision.healthCode; lastHealthReason = decision.reason; }
 
             if (monitorState.mode === 'paper_execute' && decision.action !== 'none') {
@@ -116,7 +121,10 @@ function createWorker({
             }
         }
 
-        if (lastHealthCode) await store.updateMonitorState({ health_code: lastHealthCode, health_error: lastHealthReason });
+        await store.updateMonitorState({
+            block_entries: anyBlockEntries,
+            ...(lastHealthCode ? { health_code: lastHealthCode, health_error: lastHealthReason } : {}),
+        });
     }
 
     function scheduleNext() {

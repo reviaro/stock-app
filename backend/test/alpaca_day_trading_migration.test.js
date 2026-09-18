@@ -192,3 +192,46 @@ test('persists a bracket entry and its protective child legs with correct parent
     assert.ok(rows.every((r) => r.execution_epoch === 'day_trading'));
     assert.strictEqual(entry.id > 0, true);
 });
+
+// A silently-failed ALTER TABLE (ignoreDuplicateColumnError swallows anything matching that one
+// message and only logs everything else) would present in production as "block_entries is
+// always undefined" -- which reads as falsy everywhere it's checked and fails *open*, not
+// closed. Every other test in this file creates a fresh DB where the column already comes from
+// CREATE TABLE; this one proves the actual upgrade-in-place path against a database that
+// predates the column.
+test('an existing database without block_entries gets the column added, defaulting to 0, on the next initDb', async () => {
+    const fixtureDb = path.join(__dirname, 'test_alpaca_monitor_state_pre_block_entries.db');
+    if (fs.existsSync(fixtureDb)) fs.unlinkSync(fixtureDb);
+    await runSql(fixtureDb, [`
+        CREATE TABLE alpaca_monitor_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            mode TEXT NOT NULL DEFAULT 'disabled' CHECK (mode IN ('disabled', 'shadow', 'paper_execute')),
+            last_rest_reconciliation_at TEXT,
+            last_websocket_event_at TEXT,
+            last_websocket_reconnect_at TEXT,
+            activity_cursor TEXT,
+            session_date TEXT,
+            health_code TEXT,
+            health_error TEXT,
+            kill_switch INTEGER NOT NULL DEFAULT 0 CHECK (kill_switch IN (0, 1)),
+            last_flatten_sweep_at TEXT,
+            submission_lease_holder TEXT,
+            submission_lease_expires_at TEXT,
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+    `, "INSERT INTO alpaca_monitor_state (id, mode) VALUES (1, 'shadow')"]);
+
+    process.env.DB_PATH_OVERRIDE = fixtureDb;
+    delete require.cache[require.resolve('../database/db')];
+    const upgradedDb = require('../database/db');
+    await upgradedDb.initDb();
+
+    const rows = await allRows(fixtureDb, 'SELECT * FROM alpaca_monitor_state WHERE id = 1');
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].block_entries, 0, 'the new column must exist and default to 0 on an upgraded database, not be undefined');
+    assert.strictEqual(rows[0].mode, 'shadow', 'the upgrade must not disturb pre-existing data in the same row');
+
+    process.env.DB_PATH_OVERRIDE = TEST_DB;
+    delete require.cache[require.resolve('../database/db')];
+    fs.unlinkSync(fixtureDb);
+});

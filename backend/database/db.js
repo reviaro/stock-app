@@ -454,12 +454,19 @@ function initDb() {
                     health_code TEXT,
                     health_error TEXT,
                     kill_switch INTEGER NOT NULL DEFAULT 0 CHECK (kill_switch IN (0, 1)),
+                    -- Task 11's decidePlanAction produces this per plan, on nearly every non-'none'
+                    -- decision including transient causes (a broker outage this tick, stale local
+                    -- state) -- unlike kill_switch, it is not a one-way trip: the worker aggregates
+                    -- and rewrites it every tick, true or false, so it self-heals once conditions
+                    -- clear rather than requiring an operator to clear it.
+                    block_entries INTEGER NOT NULL DEFAULT 0 CHECK (block_entries IN (0, 1)),
                     last_flatten_sweep_at TEXT,
                     submission_lease_holder TEXT,
                     submission_lease_expires_at TEXT,
                     updated_at TEXT DEFAULT (datetime('now'))
                 )
             `);
+            db.run('ALTER TABLE alpaca_monitor_state ADD COLUMN block_entries INTEGER NOT NULL DEFAULT 0 CHECK (block_entries IN (0, 1))', ignoreDuplicateColumnError);
             db.run(`INSERT OR IGNORE INTO alpaca_monitor_state (id, mode) VALUES (1, 'disabled')`);
 
             // Strategy Lab is an evidence registry only. These isolated tables contain
@@ -2314,9 +2321,10 @@ function getAlpacaMonitorState() {
 
 const ALPACA_MONITOR_STATE_UPDATE_FIELDS = [
     'mode', 'last_rest_reconciliation_at', 'last_websocket_event_at', 'last_websocket_reconnect_at',
-    'activity_cursor', 'session_date', 'health_code', 'health_error', 'kill_switch',
+    'activity_cursor', 'session_date', 'health_code', 'health_error', 'kill_switch', 'block_entries',
     'last_flatten_sweep_at', 'submission_lease_holder', 'submission_lease_expires_at',
 ];
+const ALPACA_MONITOR_STATE_BOOLEAN_FIELDS = new Set(['kill_switch', 'block_entries']);
 
 function updateAlpacaMonitorState(patch = {}) {
     const sets = [];
@@ -2324,7 +2332,7 @@ function updateAlpacaMonitorState(patch = {}) {
     for (const field of ALPACA_MONITOR_STATE_UPDATE_FIELDS) {
         if (patch[field] === undefined) continue;
         sets.push(`${field} = ?`);
-        params.push(field === 'kill_switch' ? (patch[field] ? 1 : 0) : patch[field]);
+        params.push(ALPACA_MONITOR_STATE_BOOLEAN_FIELDS.has(field) ? (patch[field] ? 1 : 0) : patch[field]);
     }
     if (sets.length === 0) return Promise.reject(new Error('no Alpaca monitor-state fields to update'));
     sets.push("updated_at = datetime('now')");

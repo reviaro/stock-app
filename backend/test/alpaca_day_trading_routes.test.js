@@ -80,8 +80,11 @@ beforeEach(async () => {
         sqlite.run('DELETE FROM alpaca_day_trade_plans');
         sqlite.run('DELETE FROM alpaca_paper_orders');
         sqlite.run('DELETE FROM alpaca_paper_fills');
+        // last_rest_reconciliation_at defaults to "now" so existing entries tests aren't
+        // incidentally exercising the new staleness gate below -- the dedicated staleness test
+        // overrides this explicitly to an old value.
         sqlite.run(
-            "UPDATE alpaca_monitor_state SET submission_lease_holder = NULL, submission_lease_expires_at = NULL, mode = 'disabled', kill_switch = 0 WHERE id = 1",
+            "UPDATE alpaca_monitor_state SET submission_lease_holder = NULL, submission_lease_expires_at = NULL, mode = 'disabled', kill_switch = 0, block_entries = 0, last_rest_reconciliation_at = datetime('now') WHERE id = 1",
             (err) => { sqlite.close(); err ? reject(err) : resolve(); },
         );
     }));
@@ -298,6 +301,64 @@ test('POST /day-trading/entries refuses a new entry while the kill switch is tri
     assert.strictEqual(result.status, 403, JSON.stringify(result.body));
     assert.strictEqual(result.body.code, 'ALPACA_KILL_SWITCH_ACTIVE');
     assert.strictEqual(broker.requests.length, 0, 'a tripped kill switch must refuse before ever contacting the broker');
+});
+
+// Unlike kill_switch (a one-way trip, checked regardless of mode), block_entries and the
+// monitor-liveness check only mean anything once entries could otherwise succeed at all --
+// mode !== 'paper_execute' already refuses via the existing policy path (ALPACA_ENTRIES_DISABLED)
+// with nothing new to add.
+test('POST /day-trading/entries refuses when a Day Trading plan currently needs attention (block_entries), without contacting the broker', async () => {
+    const gate = enableDayTradingGate();
+    const store = require('../services/alpaca_day_trade_store');
+    await store.updateMonitorState({ mode: 'paper_execute', block_entries: true });
+    const broker = mockAlpacaBroker();
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port,
+        fullSectionSevenIntent(),
+        '/api/alpaca-paper/day-trading/entries',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 403, JSON.stringify(result.body));
+    assert.strictEqual(result.body.code, 'ALPACA_ENTRIES_BLOCKED');
+    assert.strictEqual(broker.requests.length, 0);
+});
+
+// If the monitor isn't actively ticking, block_entries can't be trusted -- a worker that
+// crashed while block_entries happened to read false would otherwise let entries through with
+// nothing watching the resulting position. Failing closed on staleness, not just on the literal
+// flag, is what actually makes the flag meaningful.
+test('POST /day-trading/entries refuses when the monitor has not confirmed account state recently enough to trust, without contacting the broker', async () => {
+    const gate = enableDayTradingGate();
+    const store = require('../services/alpaca_day_trade_store');
+    await store.updateMonitorState({ mode: 'paper_execute', block_entries: false });
+    const db = require('../database/db');
+    await new Promise((resolve, reject) => {
+        const sqlite = db.getDb();
+        sqlite.run(
+            "UPDATE alpaca_monitor_state SET last_rest_reconciliation_at = '2020-01-01T00:00:00.000Z' WHERE id = 1",
+            (err) => { sqlite.close(); err ? reject(err) : resolve(); },
+        );
+    });
+    const broker = mockAlpacaBroker();
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port,
+        fullSectionSevenIntent(),
+        '/api/alpaca-paper/day-trading/entries',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 403, JSON.stringify(result.body));
+    assert.strictEqual(result.body.code, 'ALPACA_MONITOR_STALE');
+    assert.strictEqual(broker.requests.length, 0);
 });
 
 test('POST /orders (the generic order route) is refused once Day Trading owns the account (mode paper_execute), without any broker request', async () => {

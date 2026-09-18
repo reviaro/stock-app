@@ -46,6 +46,8 @@ const ERROR_RESPONSES = {
     ALPACA_ACCOUNT_NOT_TRADABLE: [403, 'the Alpaca account is not available for trading'],
     ALPACA_ENTRIES_DISABLED: [403, 'Day Trading entries are currently disabled'],
     ALPACA_KILL_SWITCH_ACTIVE: [403, 'the Day Trading kill switch is active; new entries are refused until it is cleared'],
+    ALPACA_ENTRIES_BLOCKED: [403, 'a Day Trading plan currently requires attention; new entries are refused until it is resolved'],
+    ALPACA_MONITOR_STALE: [403, 'the Day Trading monitor has not confirmed account state recently enough to trust; new entries are refused'],
     ALPACA_DAILY_LOSS_LIMIT_BREACHED: [403, 'the daily loss limit has been reached'],
     ALPACA_MARKET_CLOSED: [409, 'the market is not open for new entries'],
     ALPACA_ENTRY_CUTOFF_PASSED: [409, 'the entry cutoff for today has passed'],
@@ -99,6 +101,33 @@ router.post('/entries', async (req, res) => {
         // any broker call, same fail-closed placement as the other pre-network gates.
         if (monitorState?.kill_switch) {
             return res.status(403).json({ status: 'error', code: 'ALPACA_KILL_SWITCH_ACTIVE', error: 'the Day Trading kill switch is active; new entries are refused until it is cleared' });
+        }
+        // block_entries/staleness only mean anything once an entry could otherwise succeed at
+        // all -- outside paper_execute, the policy below already refuses via
+        // ALPACA_ENTRIES_DISABLED, and demanding monitor liveness there would only add a
+        // confusing second reason for the same refusal.
+        if (monitorState?.mode === 'paper_execute') {
+            if (monitorState.block_entries) {
+                return res.status(403).json({ status: 'error', code: 'ALPACA_ENTRIES_BLOCKED', error: 'a Day Trading plan currently requires attention; new entries are refused until it is resolved' });
+            }
+            // block_entries is only trustworthy while the worker is actually ticking -- a
+            // process that crashed while it happened to read false would otherwise leave
+            // entries wide open with nothing watching the resulting position. Reuses the
+            // reducer's own staleness threshold (Task 11) rather than a second, independently
+            // tuned one.
+            //
+            // What this actually proves: reconcileFills ran recently, not that the decide/
+            // execute loop did. reconcileFills runs before the kill_switch early return and
+            // before the plan loop, so a worker stuck in disabled mode or halted by a tripped
+            // switch still refreshes this timestamp while block_entries sits frozen. Both cases
+            // are covered by other gates today (entriesEnabled, ALPACA_KILL_SWITCH_ACTIVE) --
+            // if either mode transition is ever handled elsewhere, revisit whether this check
+            // still proves what it needs to here.
+            const lastTick = monitorState.last_rest_reconciliation_at;
+            const tickAgeMs = lastTick ? Date.now() - new Date(lastTick).getTime() : Infinity;
+            if (!(tickAgeMs <= DEFAULT_MONITOR_POLICY.staleReconciliationMs)) {
+                return res.status(403).json({ status: 'error', code: 'ALPACA_MONITOR_STALE', error: 'the Day Trading monitor has not confirmed account state recently enough to trust; new entries are refused' });
+            }
         }
         const policy = { ...DEFAULT_DAY_TRADE_POLICY, entriesEnabled: monitorState?.mode === 'paper_execute' };
         const result = await executeDayTradeEntry({

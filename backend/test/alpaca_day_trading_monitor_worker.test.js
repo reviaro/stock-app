@@ -124,6 +124,55 @@ test('disabled mode does not run the reconcile/decide loop at all', async () => 
     }
 });
 
+// Unlike kill_switch (a one-way trip), block_entries must be rewritten every tick, true and
+// false, so it self-heals once the condition that set it clears -- it is set on nearly every
+// non-'none' decision, including transient ones (a broker outage this tick, stale local state).
+test('a plan needing repair sets block_entries account-wide; the worker aggregates, it does not require an operator to clear it', async () => {
+    const lockPath = tempLockPath();
+    await store.updateMonitorState({ mode: 'shadow', block_entries: false });
+    const { plan } = await store.createPlanWithEntry(
+        {
+            symbol: 'NVDA', setup: 's', catalyst: 'c', thesis: 't', invalidation: 'i',
+            planned_entry_low: 100.50, planned_entry_high: 100.50, planned_stop: 98.00, planned_target: 104.00,
+            planned_qty: 10, planned_risk_dollars: 25, planned_reward_risk: 1.4, planned_account_risk_pct: 0.00025,
+            exit_deadline: '2026-09-17T19:45:00.000Z',
+        },
+        {
+            idempotency_key: 'dt-nvda-entry-1', client_order_id: 'dt-nvda-entry-1', symbol: 'NVDA', side: 'buy',
+            qty: 10, order_type: 'limit', time_in_force: 'day', limit_price: 100.50,
+            status: 'filled', execution_epoch: 'day_trading', order_class: 'bracket', leg_role: 'entry',
+        },
+    );
+    await db.updateAlpacaDayTradePlan(plan.id, { entry_parent_broker_order_id: 'broker-parent-1' });
+
+    const client = fakeClient({
+        getPosition: async () => ({ qty: 10, side: 'long' }), // uncovered -> attach_protective_oco, blockEntries: true
+        getOrder: async () => ({ id: 'broker-parent-1', status: 'filled', qty: 10, filled_qty: 10, legs: null }),
+    });
+    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
+    try {
+        await worker.start();
+        await new Promise((resolve) => { setTimeout(resolve, 100); });
+        const stateWhileUncovered = await store.getMonitorState();
+        assert.strictEqual(Boolean(stateWhileUncovered.block_entries), true);
+
+        // The condition clears (protective legs now cover the position) -- the very next tick
+        // must clear block_entries on its own, with no operator action, unlike kill_switch.
+        await db.updateAlpacaDayTradePlan(plan.id, { protective_stop_broker_order_id: 'stop-1', protective_target_broker_order_id: 'target-1' });
+        client.getOrder = async () => ({
+            id: 'broker-parent-1', status: 'filled', qty: 10, filled_qty: 10,
+            legs: [{ id: 'stop-1', type: 'stop', side: 'sell', qty: 10, filled_qty: 0, status: 'held' },
+                { id: 'target-1', type: 'limit', side: 'sell', qty: 10, filled_qty: 0, status: 'held' }],
+        });
+        await new Promise((resolve) => { setTimeout(resolve, 100); });
+        const stateAfterCovered = await store.getMonitorState();
+        assert.strictEqual(Boolean(stateAfterCovered.block_entries), false, 'block_entries must self-heal once no plan needs anything, without an operator clearing it');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
 test('shadow mode decides actions but never submits or cancels a broker order', async () => {
     const lockPath = tempLockPath();
     await store.updateMonitorState({ mode: 'shadow' });
