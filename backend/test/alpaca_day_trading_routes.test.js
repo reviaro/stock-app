@@ -81,7 +81,7 @@ beforeEach(async () => {
         sqlite.run('DELETE FROM alpaca_paper_orders');
         sqlite.run('DELETE FROM alpaca_paper_fills');
         sqlite.run(
-            "UPDATE alpaca_monitor_state SET submission_lease_holder = NULL, submission_lease_expires_at = NULL, mode = 'disabled' WHERE id = 1",
+            "UPDATE alpaca_monitor_state SET submission_lease_holder = NULL, submission_lease_expires_at = NULL, mode = 'disabled', kill_switch = 0 WHERE id = 1",
             (err) => { sqlite.close(); err ? reject(err) : resolve(); },
         );
     }));
@@ -274,6 +274,30 @@ test('POST /day-trading/entries returns a generic error message, never the polic
     assert.strictEqual(result.status, 400);
     assert.strictEqual(result.body.code, 'ALPACA_INSUFFICIENT_CASH');
     assert.doesNotMatch(result.body.error, /\d/, 'the response must not echo computed account figures');
+});
+
+// The worker already refuses to act on existing plans while the switch is tripped (Task 13);
+// the switch's actual purpose -- stop trading for the rest of the session -- only holds if the
+// one route that starts *new* trades honors it too. Previously it only checked `mode`.
+test('POST /day-trading/entries refuses a new entry while the kill switch is tripped, without contacting the broker', async () => {
+    const gate = enableDayTradingGate();
+    const store = require('../services/alpaca_day_trade_store');
+    await store.updateMonitorState({ mode: 'paper_execute', kill_switch: true });
+    const broker = mockAlpacaBroker();
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await post(
+        server.address().port,
+        fullSectionSevenIntent(),
+        '/api/alpaca-paper/day-trading/entries',
+        { 'X-Alpaca-Day-Trading-Token': 'test-day-trading-token' },
+    );
+    await new Promise((resolve) => server.close(resolve));
+    gate.restore();
+
+    assert.strictEqual(result.status, 403, JSON.stringify(result.body));
+    assert.strictEqual(result.body.code, 'ALPACA_KILL_SWITCH_ACTIVE');
+    assert.strictEqual(broker.requests.length, 0, 'a tripped kill switch must refuse before ever contacting the broker');
 });
 
 test('POST /orders (the generic order route) is refused once Day Trading owns the account (mode paper_execute), without any broker request', async () => {

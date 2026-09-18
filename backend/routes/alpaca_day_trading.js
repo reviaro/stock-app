@@ -45,6 +45,7 @@ const ERROR_RESPONSES = {
     ALPACA_MIN_CASH_RESERVE_BREACHED: [400, 'entry would breach the minimum cash reserve policy'],
     ALPACA_ACCOUNT_NOT_TRADABLE: [403, 'the Alpaca account is not available for trading'],
     ALPACA_ENTRIES_DISABLED: [403, 'Day Trading entries are currently disabled'],
+    ALPACA_KILL_SWITCH_ACTIVE: [403, 'the Day Trading kill switch is active; new entries are refused until it is cleared'],
     ALPACA_DAILY_LOSS_LIMIT_BREACHED: [403, 'the daily loss limit has been reached'],
     ALPACA_MARKET_CLOSED: [409, 'the market is not open for new entries'],
     ALPACA_ENTRY_CUTOFF_PASSED: [409, 'the entry cutoff for today has passed'],
@@ -92,6 +93,13 @@ router.post('/entries', async (req, res) => {
         // "can this system submit real orders at all" state as the automated worker, rather
         // than a second, independently-configured flag that could disagree with it.
         const monitorState = await store.getMonitorState();
+        // The kill switch's purpose is "stop trading for the rest of the session" -- the worker
+        // already refuses to act on existing plans while it's tripped (Task 13), but this route
+        // is what starts *new* ones, and previously never consulted it at all. Checked before
+        // any broker call, same fail-closed placement as the other pre-network gates.
+        if (monitorState?.kill_switch) {
+            return res.status(403).json({ status: 'error', code: 'ALPACA_KILL_SWITCH_ACTIVE', error: 'the Day Trading kill switch is active; new entries are refused until it is cleared' });
+        }
         const policy = { ...DEFAULT_DAY_TRADE_POLICY, entriesEnabled: monitorState?.mode === 'paper_execute' };
         const result = await executeDayTradeEntry({
             intent,
