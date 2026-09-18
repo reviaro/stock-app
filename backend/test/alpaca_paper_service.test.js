@@ -201,6 +201,254 @@ test('explicit operator resolution can close a broker-confirmed missing submissi
     }]);
 });
 
+test('explicit operator resolution rejects a key whose audit belongs to a different execution epoch', async () => {
+    const { resolveMissingPaperOrderAudit } = require('../services/alpaca_paper_service');
+    const updates = [];
+    await assert.rejects(
+        () => resolveMissingPaperOrderAudit({
+            idempotencyKey: 'ltr-legacy-1',
+            confirmed: true,
+            expectedEpoch: 'day_trading',
+            client: { getOrderByClientOrderId: async () => ({ found: false, order: null }) },
+            auditStore: {
+                listAlpacaPaperOrderAudits: async () => [{
+                    idempotency_key: 'ltr-legacy-1', status: 'submission_unknown', execution_epoch: 'legacy_long_term',
+                }],
+                updateAlpacaPaperOrderAudit: async (key, update) => updates.push({ key, update }),
+            },
+        }),
+        /does not belong to the day_trading execution epoch/,
+    );
+    assert.deepStrictEqual(updates, [], 'a cross-epoch resolution attempt must never write anything');
+});
+
+test('explicit operator resolution succeeds for a matching execution epoch', async () => {
+    const { resolveMissingPaperOrderAudit } = require('../services/alpaca_paper_service');
+    const result = await resolveMissingPaperOrderAudit({
+        idempotencyKey: 'dt-nvda-entry-1',
+        confirmed: true,
+        expectedEpoch: 'day_trading',
+        client: { getOrderByClientOrderId: async () => ({ found: false, order: null }) },
+        auditStore: {
+            listAlpacaPaperOrderAudits: async () => [{
+                idempotency_key: 'dt-nvda-entry-1', status: 'submission_unknown', execution_epoch: 'day_trading',
+            }],
+            updateAlpacaPaperOrderAudit: async () => {},
+        },
+    });
+    assert.deepStrictEqual(result, { status: 'submission_not_found' });
+});
+
+test('requests the nested bracket-order tree only when explicitly asked, preserving the default query', async () => {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const requests = [];
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+    const client = createPaperClient({
+        fetchImpl: async (url) => {
+            requests.push(url);
+            return { ok: true, json: async () => ([{ id: 'parent-1', legs: [{ id: 'leg-1', leg_role: 'stop_loss' }] }]) };
+        },
+    });
+
+    await client.getOrders();
+    assert.strictEqual(requests[0], 'https://paper-api.alpaca.markets/v2/orders?status=open&direction=desc');
+
+    const nested = await client.getOrders({ nested: true });
+    assert.strictEqual(requests[1], 'https://paper-api.alpaca.markets/v2/orders?status=open&direction=desc&nested=true');
+    assert.deepStrictEqual(nested[0].legs, [{ id: 'leg-1', leg_role: 'stop_loss' }]);
+
+    // Repair/exit reconciliation must be able to see closed orders too (e.g. verifying a
+    // cancel reached a terminal state, or that a stop leg actually filled) — status=open
+    // alone can't see those.
+    await client.getOrders({ status: 'all', nested: true });
+    assert.strictEqual(requests[2], 'https://paper-api.alpaca.markets/v2/orders?status=all&direction=desc&nested=true');
+});
+
+test('getOrder requests the nested leg tree only when explicitly asked, for discovering a bracket\'s protective legs', async () => {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const requests = [];
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+    const client = createPaperClient({
+        fetchImpl: async (url) => {
+            requests.push(url);
+            return { ok: true, json: async () => ({ id: 'parent-1', legs: null }) };
+        },
+    });
+
+    await client.getOrder('parent-1');
+    assert.strictEqual(requests[0], 'https://paper-api.alpaca.markets/v2/orders/parent-1');
+
+    await client.getOrder('parent-1', { nested: true });
+    assert.strictEqual(requests[1], 'https://paper-api.alpaca.markets/v2/orders/parent-1?nested=true');
+});
+
+test('cancelOrder returns a structured outcome for both a no-content success and a not-found order', async () => {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+
+    const successClient = createPaperClient({
+        fetchImpl: async () => ({ ok: true, status: 204, json: async () => { throw new Error('should not parse an empty body'); } }),
+    });
+    assert.deepStrictEqual(await successClient.cancelOrder('broker-order-1'), { canceled: true });
+
+    const missingClient = createPaperClient({
+        fetchImpl: async () => ({ ok: false, status: 404, json: async () => ({}) }),
+    });
+    assert.deepStrictEqual(await missingClient.cancelOrder('broker-order-gone'), { canceled: false, reason: 'not_found' });
+});
+
+test('replaceOrder returns the updated order on success and null when the order is already gone', async () => {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const requests = [];
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+
+    const client = createPaperClient({
+        fetchImpl: async (url, options) => {
+            requests.push({ url, options });
+            return { ok: true, status: 200, json: async () => ({ id: 'broker-order-1', status: 'replaced' }) };
+        },
+    });
+    const replaced = await client.replaceOrder('broker-order-1', { qty: '5' });
+    assert.strictEqual(replaced.status, 'replaced');
+    assert.strictEqual(requests[0].options.method, 'PATCH');
+    assert.strictEqual(requests[0].options.body, JSON.stringify({ qty: '5' }));
+
+    const missingClient = createPaperClient({
+        fetchImpl: async () => ({ ok: false, status: 404, json: async () => ({}) }),
+    });
+    assert.strictEqual(await missingClient.replaceOrder('broker-order-gone', { qty: '5' }), null);
+});
+
+test('market data requests always target the fixed Alpaca data host with the IEX feed by default', async () => {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const requests = [];
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+    const client = createPaperClient({
+        fetchImpl: async (url) => {
+            requests.push(url);
+            return { ok: true, json: async () => ({ symbol: 'NVDA' }) };
+        },
+    });
+
+    await client.getLatestQuote('NVDA');
+    await client.getLatestBar('NVDA');
+
+    assert.strictEqual(requests[0], 'https://data.alpaca.markets/v2/stocks/NVDA/quotes/latest?feed=iex');
+    assert.strictEqual(requests[1], 'https://data.alpaca.markets/v2/stocks/NVDA/bars/latest?feed=iex');
+});
+
+test('paginates FILL account activities via page_size and page_token', async () => {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const requests = [];
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+    const client = createPaperClient({
+        fetchImpl: async (url) => {
+            requests.push(url);
+            return { ok: true, json: async () => ([]) };
+        },
+    });
+
+    await client.getAccountActivities();
+    assert.strictEqual(requests[0], 'https://paper-api.alpaca.markets/v2/account/activities/FILL');
+
+    await client.getAccountActivities({ pageSize: 50, pageToken: 'cursor-abc' });
+    assert.strictEqual(requests[1], 'https://paper-api.alpaca.markets/v2/account/activities/FILL?page_size=50&page_token=cursor-abc');
+});
+
+test('walks account activities forward from a restart cursor via after and direction=asc', async () => {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const requests = [];
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+    const client = createPaperClient({
+        fetchImpl: async (url) => {
+            requests.push(url);
+            return { ok: true, json: async () => ([]) };
+        },
+    });
+
+    // page_token walks backward from the newest activity (Alpaca's default), which cannot
+    // express "everything since the last successful import" — that requires after+asc, the
+    // shape alpaca_monitor_state.activity_cursor / last_rest_reconciliation_at are for.
+    await client.getAccountActivities({ after: '2026-09-17T13:30:00Z', direction: 'asc' });
+    assert.strictEqual(
+        requests[0],
+        'https://paper-api.alpaca.markets/v2/account/activities/FILL?after=2026-09-17T13%3A30%3A00Z&direction=asc',
+    );
+
+    await client.getAccountActivities({ until: '2026-09-17T20:00:00Z' });
+    assert.strictEqual(requests[1], 'https://paper-api.alpaca.markets/v2/account/activities/FILL?until=2026-09-17T20%3A00%3A00Z');
+});
+
+test('fetches the NYSE trading calendar with start/end query params', async () => {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const requests = [];
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+    const client = createPaperClient({
+        fetchImpl: async (url) => {
+            requests.push(url);
+            return { ok: true, json: async () => ([{ date: '2026-09-18', open: '09:30', close: '16:00' }]) };
+        },
+    });
+
+    const entries = await client.getCalendar({ start: '2026-09-01', end: '2026-09-18' });
+    assert.strictEqual(requests[0], 'https://paper-api.alpaca.markets/v2/calendar?start=2026-09-01&end=2026-09-18');
+    assert.deepStrictEqual(entries, [{ date: '2026-09-18', open: '09:30', close: '16:00' }]);
+});
+
+test('URL-encodes broker order ids containing characters that are not URL-safe', async () => {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const requests = [];
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+    const client = createPaperClient({
+        fetchImpl: async (url) => {
+            requests.push(url);
+            return { ok: true, status: 204, json: async () => ({}) };
+        },
+    });
+
+    await client.cancelOrder('order id/with space&more');
+    assert.strictEqual(requests[0], 'https://paper-api.alpaca.markets/v2/orders/order%20id%2Fwith%20space%26more');
+});
+
+test('classifies a cancel-order timeout as ambiguous and a definite rejection as rejected', async () => {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+
+    const ambiguousClient = createPaperClient({
+        fetchImpl: async () => ({ ok: false, status: 408, json: async () => ({}) }),
+    });
+    await assert.rejects(ambiguousClient.cancelOrder('broker-order-1'), (err) => err.code === 'ALPACA_BROKER_UNAVAILABLE');
+
+    const rejectedClient = createPaperClient({
+        fetchImpl: async () => ({ ok: false, status: 422, json: async () => ({}) }),
+    });
+    await assert.rejects(rejectedClient.cancelOrder('broker-order-1'), (err) => err.code === 'ALPACA_BROKER_REJECTED');
+});
+
+test('does not leak API credentials in a broker error when a request fails', async () => {
+    process.env.ALPACA_API_KEY = 'super-secret-key-value';
+    process.env.ALPACA_API_SECRET = 'super-secret-secret-value';
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+    const client = createPaperClient({
+        fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) }),
+    });
+
+    await assert.rejects(client.getAccount(), (err) => {
+        const message = `${err.message} ${err.stack}`;
+        return !message.includes('super-secret-key-value') && !message.includes('super-secret-secret-value');
+    });
+});
+
 test('explicit missing-order resolution refuses an HTTP 200 null broker response', async () => {
     process.env.ALPACA_API_KEY = 'paper-key';
     process.env.ALPACA_API_SECRET = 'paper-secret';

@@ -1,4 +1,13 @@
 const PAPER_BASE_URL = 'https://paper-api.alpaca.markets';
+// Alpaca serves market data from a single fixed host for both paper and live trading
+// accounts (gated only by the account's data plan, not by the trading endpoint). It is
+// intentionally not read from any environment variable, unlike the trading base URL.
+const MARKET_DATA_BASE_URL = 'https://data.alpaca.markets';
+// Verified against Alpaca's documented websocket-streaming reference: the trade_updates stream
+// lives at wss://paper-api.alpaca.markets/stream for paper accounts (wss://api.alpaca.markets/
+// stream for live) -- hardcoded like PAPER_BASE_URL, never read from environment, so there is
+// no route to accidentally point the live socket at a real-money account.
+const TRADE_UPDATES_URL = 'wss://paper-api.alpaca.markets/stream';
 const db = require('../database/db');
 const { validatePaperOrder } = require('./alpaca_order_policy');
 
@@ -45,8 +54,8 @@ function createPaperClient({ env = process.env, fetchImpl = global.fetch, timeou
 
     const notFound = Symbol('alpaca-paper-not-found');
 
-    async function request(path, options = {}) {
-        const response = await fetchImpl(`${PAPER_BASE_URL}${path}`, {
+    async function doFetch(baseUrl, path, options = {}) {
+        const response = await fetchImpl(`${baseUrl}${path}`, {
             method: options.method || 'GET',
             headers: {
                 'APCA-API-KEY-ID': credentials.key,
@@ -65,25 +74,66 @@ function createPaperClient({ env = process.env, fetchImpl = global.fetch, timeou
                 : 'ALPACA_BROKER_UNAVAILABLE';
             throw error;
         }
+        // A cancel (DELETE) succeeds with 204 No Content; parsing a JSON body would throw.
+        if (response.status === 204) return null;
         return response.json();
     }
+
+    const request = (path, options) => doFetch(PAPER_BASE_URL, path, options);
+    const dataRequest = (path, options) => doFetch(MARKET_DATA_BASE_URL, path, options);
 
     return {
         getAccount: () => request('/v2/account'),
         getClock: () => request('/v2/clock'),
         getPositions: () => request('/v2/positions'),
-        getOrders: () => request('/v2/orders?status=open&direction=desc'),
+        getOrders: ({ status = 'open', nested = false } = {}) => request(`/v2/orders?status=${encodeURIComponent(status)}&direction=desc${nested ? '&nested=true' : ''}`),
         getAsset: (symbol) => request(`/v2/assets/${encodeURIComponent(symbol)}`),
         getPosition: async (symbol) => {
             const result = await request(`/v2/positions/${encodeURIComponent(symbol)}`, { allowNotFound: true });
             return result === notFound ? null : result;
         },
-        getOrder: (brokerOrderId) => request(`/v2/orders/${encodeURIComponent(brokerOrderId)}`),
+        getOrder: (brokerOrderId, { nested = false } = {}) => request(`/v2/orders/${encodeURIComponent(brokerOrderId)}${nested ? '?nested=true' : ''}`),
         getOrderByClientOrderId: async (clientOrderId) => {
             const result = await request(`/v2/orders:by_client_order_id?client_order_id=${encodeURIComponent(clientOrderId)}`, { allowNotFound: true });
             return result === notFound ? { found: false, order: null } : { found: true, order: result };
         },
         submitOrder: (order) => request('/v2/orders', { method: 'POST', body: order }),
+        // A cancel can legitimately race a fill or an operator having already removed the
+        // order; that is a normal outcome to report, not an error to throw.
+        cancelOrder: async (brokerOrderId) => {
+            const result = await request(`/v2/orders/${encodeURIComponent(brokerOrderId)}`, { method: 'DELETE', allowNotFound: true });
+            return result === notFound ? { canceled: false, reason: 'not_found' } : { canceled: true };
+        },
+        replaceOrder: async (brokerOrderId, patch) => {
+            const result = await request(`/v2/orders/${encodeURIComponent(brokerOrderId)}`, { method: 'PATCH', body: patch, allowNotFound: true });
+            return result === notFound ? null : result;
+        },
+        getLatestQuote: (symbol, { feed = 'iex' } = {}) => dataRequest(`/v2/stocks/${encodeURIComponent(symbol)}/quotes/latest?feed=${encodeURIComponent(feed)}`),
+        getLatestBar: (symbol, { feed = 'iex' } = {}) => dataRequest(`/v2/stocks/${encodeURIComponent(symbol)}/bars/latest?feed=${encodeURIComponent(feed)}`),
+        // page_token walks backward from the newest activity (Alpaca's default direction),
+        // which cannot express "everything since the last successful import" on its own —
+        // that requires after+direction=asc, which is what a restart/backfill cursor needs.
+        getAccountActivities: ({ activityType = 'FILL', pageToken, pageSize, after, until, direction } = {}) => {
+            const params = new URLSearchParams();
+            if (pageSize != null) params.set('page_size', String(pageSize));
+            if (pageToken) params.set('page_token', pageToken);
+            if (after) params.set('after', after);
+            if (until) params.set('until', until);
+            if (direction) params.set('direction', direction);
+            const qs = params.toString();
+            return request(`/v2/account/activities/${encodeURIComponent(activityType)}${qs ? `?${qs}` : ''}`);
+        },
+        // Verified against Alpaca's documented response shape: each entry's date/open/close are
+        // plain "YYYY-MM-DD"/"HH:MM" strings in exchange-local (America/New_York) time, with no
+        // zone marker -- the authoritative source for which calendar dates are real NYSE
+        // trading sessions (holidays, half days), rather than a hand-maintained holiday list.
+        getCalendar: ({ start, end } = {}) => {
+            const params = new URLSearchParams();
+            if (start) params.set('start', start);
+            if (end) params.set('end', end);
+            const qs = params.toString();
+            return request(`/v2/calendar${qs ? `?${qs}` : ''}`);
+        },
     };
 }
 
@@ -105,7 +155,7 @@ async function getPaperReconciliationSnapshot(options = {}) {
     const [clock, positions, openOrders] = await Promise.all([
         client.getClock(),
         client.getPositions(),
-        client.getOrders(),
+        client.getOrders({ status: 'open' }),
     ]);
 
     return {
@@ -185,8 +235,12 @@ async function submitPaperOrderUnlocked({ order, idempotencyKey, client = create
     }
 
     const symbol = String(order?.symbol || '').trim().toUpperCase();
+    // committedBuyCash/committedSellQty assume an open-orders-only list (a terminal order's
+    // qty - filled_qty reads as zero remaining, which only holds for a genuinely open one);
+    // status is pinned explicitly here so a future default change can't silently feed them
+    // filled/canceled rows.
     const [account, asset, position, openOrders] = await Promise.all([
-        client.getAccount(), client.getAsset(symbol), client.getPosition(symbol), client.getOrders(),
+        client.getAccount(), client.getAsset(symbol), client.getPosition(symbol), client.getOrders({ status: 'open' }),
     ]);
     const positionQty = position?.side === 'long' ? Number(position.qty) : 0;
     const cashAfterCommitments = Number(account?.cash) - committedBuyCash(openOrders, existingAudits);
@@ -270,13 +324,21 @@ async function reconcilePaperOrderAudits({ client = createPaperClient(), auditSt
     return result;
 }
 
-async function resolveMissingPaperOrderAudit({ idempotencyKey, confirmed = false, client = createPaperClient(), auditStore = db } = {}) {
+async function resolveMissingPaperOrderAudit({
+    idempotencyKey, confirmed = false, client = createPaperClient(), auditStore = db, expectedEpoch = null,
+} = {}) {
     const key = String(idempotencyKey || '').trim();
     if (!key || confirmed !== true) throw new Error('explicit missing-order confirmation is required');
     const audits = await auditStore.listAlpacaPaperOrderAudits();
     const audit = audits.find((row) => row.idempotency_key === key);
     if (!audit || !['pending_submission', 'submission_unknown', 'submission_failed'].includes(audit.status)) {
         throw new Error('an unresolved Alpaca paper-order audit is required');
+    }
+    // Isolation (Safety Invariant #3): a Day Trading-scoped resolution must never touch a
+    // legacy order, and vice versa. expectedEpoch defaults to null (no filter), so the generic
+    // /resolve-missing route's existing behavior is untouched.
+    if (expectedEpoch && audit.execution_epoch !== expectedEpoch) {
+        throw new Error(`this order does not belong to the ${expectedEpoch} execution epoch`);
     }
     const lookup = await client.getOrderByClientOrderId(key);
     if (!lookup || lookup.found !== false) throw new Error('Alpaca still reports this paper order or returned an invalid response');
@@ -287,4 +349,4 @@ async function resolveMissingPaperOrderAudit({ idempotencyKey, confirmed = false
     return { status: 'submission_not_found' };
 }
 
-module.exports = { PAPER_BASE_URL, getPaperConfiguration, createPaperClient, getPaperAccountSummary, getPaperReconciliationSnapshot, submitPaperOrder, reconcilePaperOrderAudits, resolveMissingPaperOrderAudit };
+module.exports = { PAPER_BASE_URL, MARKET_DATA_BASE_URL, TRADE_UPDATES_URL, getPaperCredentials, getPaperConfiguration, createPaperClient, getPaperAccountSummary, getPaperReconciliationSnapshot, submitPaperOrder, reconcilePaperOrderAudits, resolveMissingPaperOrderAudit };

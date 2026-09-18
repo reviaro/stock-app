@@ -60,9 +60,12 @@ docs/superpowers/
 HANDOFF.md
 AI_AGENT_STATUS.md
 ai_agent_status.md
-
+.claude/
 # Local tools
 .tools/
+
+# Git worktrees for isolated agent work
+.worktrees/
 
 # OS
 .DS_Store

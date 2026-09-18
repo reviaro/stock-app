@@ -4,6 +4,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { normalizeSimTransaction } = require('../services/simulator_transaction_validation');
 const { normalizeTradePlan, closeStructuredTrade } = require('../services/trade_journal');
+const { ALPACA_PAPER_ORDERS_COLUMNS_SQL } = require('./migrations/002_alpaca_execution_epochs');
 
 const VALID_BUCKETS = ['compounders', 'buy_soon', 'expensive', 'speculative', 'owned', 'unsorted'];
 const VALID_TXN_TYPES = ['buy', 'sell', 'dividend', 'deposit', 'withdrawal'];
@@ -358,25 +359,115 @@ function initDb() {
 
             // Separate, broker-facing paper-order audit mirror. It never feeds the local
             // simulator or real portfolio ledgers; idempotency prevents duplicate submits.
+            // A pre-existing database with the narrower legacy shape (buy/sell day-limit
+            // only, no execution_epoch) is upgraded in place by migration 002 below.
+            db.run(`CREATE TABLE IF NOT EXISTS alpaca_paper_orders (${ALPACA_PAPER_ORDERS_COLUMNS_SQL})`);
+            db.run('CREATE INDEX IF NOT EXISTS idx_alpaca_paper_orders_status ON alpaca_paper_orders(status, created_at DESC)');
+
+            // Day Trading strategy plans, independent of the sim_trade_plans ledger tables:
+            // these track a broker-backed bracket lifecycle, not a simulator transaction.
             db.run(`
-                CREATE TABLE IF NOT EXISTS alpaca_paper_orders (
+                CREATE TABLE IF NOT EXISTS alpaca_day_trade_plans (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    idempotency_key TEXT NOT NULL UNIQUE,
-                    broker_order_id TEXT UNIQUE,
+                    symbol TEXT NOT NULL,
+                    setup TEXT NOT NULL,
+                    catalyst TEXT NOT NULL,
+                    thesis TEXT NOT NULL,
+                    invalidation TEXT NOT NULL,
+                    planned_entry_low REAL NOT NULL,
+                    planned_entry_high REAL NOT NULL,
+                    planned_stop REAL NOT NULL,
+                    planned_target REAL NOT NULL,
+                    planned_qty INTEGER NOT NULL CHECK (planned_qty > 0),
+                    planned_risk_dollars REAL NOT NULL,
+                    planned_reward_risk REAL NOT NULL,
+                    planned_account_risk_pct REAL NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'planned'
+                        CHECK (state IN ('planned', 'entry_pending', 'partially_entered', 'active', 'exit_pending', 'closed', 'cancelled', 'error')),
+                    entry_parent_broker_order_id TEXT,
+                    protective_stop_broker_order_id TEXT,
+                    protective_target_broker_order_id TEXT,
+                    -- Denormalized cache of alpaca_paper_fills' effective totals (see
+                    -- computeFilledSummary in alpaca_day_trade_store.js), refreshed by fill
+                    -- reconciliation. Fills stay authoritative; these columns exist so plan
+                    -- reads (UI, journal) don't have to re-aggregate fills on every request.
+                    filled_entry_qty INTEGER NOT NULL DEFAULT 0 CHECK (filled_entry_qty >= 0),
+                    avg_entry_price REAL,
+                    filled_exit_qty INTEGER NOT NULL DEFAULT 0 CHECK (filled_exit_qty >= 0),
+                    avg_exit_price REAL,
+                    exit_deadline TEXT NOT NULL,
+                    exit_reason TEXT CHECK (exit_reason IS NULL OR exit_reason IN ('take_profit', 'stop_loss', 'time_exit', 'repair_exit', 'emergency_flatten', 'manual')),
+                    realized_pnl REAL,
+                    realized_r REAL,
+                    mfe REAL,
+                    mae REAL,
+                    thesis_valid INTEGER CHECK (thesis_valid IS NULL OR thesis_valid IN (0, 1)),
+                    review_notes TEXT,
+                    strategy_version TEXT,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    opened_at TEXT,
+                    closed_at TEXT
+                )
+            `);
+            db.run(`
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_alpaca_day_trade_plans_one_nonterminal
+                ON alpaca_day_trade_plans(symbol)
+                WHERE state NOT IN ('closed', 'cancelled', 'error')
+            `);
+            db.run('CREATE INDEX IF NOT EXISTS idx_alpaca_day_trade_plans_state ON alpaca_day_trade_plans(state, created_at DESC)');
+
+            // Idempotent execution-event mirror: the trade_updates WebSocket and Alpaca FILL
+            // account activities can both deliver the same event, so activity_id is the
+            // dedup key rather than a per-order or per-plan sequence.
+            db.run(`
+                CREATE TABLE IF NOT EXISTS alpaca_paper_fills (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    activity_id TEXT NOT NULL UNIQUE,
+                    broker_order_id TEXT,
+                    plan_id INTEGER,
                     symbol TEXT NOT NULL,
                     side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
                     qty INTEGER NOT NULL CHECK (qty > 0),
-                    order_type TEXT NOT NULL CHECK (order_type IN ('market', 'limit')),
-                    time_in_force TEXT NOT NULL CHECK (time_in_force = 'day'),
-                    limit_price REAL,
-                    status TEXT NOT NULL,
-                    request_payload TEXT NOT NULL,
-                    broker_payload TEXT,
-                    created_at TEXT DEFAULT (datetime('now')),
+                    price REAL NOT NULL CHECK (price > 0),
+                    executed_at TEXT NOT NULL,
+                    fill_type TEXT NOT NULL CHECK (fill_type IN ('partial_fill', 'fill')),
+                    correction_of TEXT,
+                    is_bust INTEGER NOT NULL DEFAULT 0 CHECK (is_bust IN (0, 1)),
+                    imported_at TEXT DEFAULT (datetime('now')),
+                    source TEXT NOT NULL CHECK (source IN ('websocket', 'rest_reconciliation'))
+                )
+            `);
+            db.run('CREATE INDEX IF NOT EXISTS idx_alpaca_paper_fills_plan ON alpaca_paper_fills(plan_id, executed_at)');
+            db.run('CREATE INDEX IF NOT EXISTS idx_alpaca_paper_fills_order ON alpaca_paper_fills(broker_order_id)');
+
+            // Singleton row: exactly one Day Trading monitor process is ever active (Task 13's
+            // single-instance lock), so its runtime state needs no additional key.
+            db.run(`
+                CREATE TABLE IF NOT EXISTS alpaca_monitor_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    mode TEXT NOT NULL DEFAULT 'disabled' CHECK (mode IN ('disabled', 'shadow', 'paper_execute')),
+                    last_rest_reconciliation_at TEXT,
+                    last_websocket_event_at TEXT,
+                    last_websocket_reconnect_at TEXT,
+                    activity_cursor TEXT,
+                    session_date TEXT,
+                    health_code TEXT,
+                    health_error TEXT,
+                    kill_switch INTEGER NOT NULL DEFAULT 0 CHECK (kill_switch IN (0, 1)),
+                    -- Task 11's decidePlanAction produces this per plan, on nearly every non-'none'
+                    -- decision including transient causes (a broker outage this tick, stale local
+                    -- state) -- unlike kill_switch, it is not a one-way trip: the worker aggregates
+                    -- and rewrites it every tick, true or false, so it self-heals once conditions
+                    -- clear rather than requiring an operator to clear it.
+                    block_entries INTEGER NOT NULL DEFAULT 0 CHECK (block_entries IN (0, 1)),
+                    last_flatten_sweep_at TEXT,
+                    submission_lease_holder TEXT,
+                    submission_lease_expires_at TEXT,
                     updated_at TEXT DEFAULT (datetime('now'))
                 )
             `);
-            db.run('CREATE INDEX IF NOT EXISTS idx_alpaca_paper_orders_status ON alpaca_paper_orders(status, created_at DESC)');
+            db.run('ALTER TABLE alpaca_monitor_state ADD COLUMN block_entries INTEGER NOT NULL DEFAULT 0 CHECK (block_entries IN (0, 1))', ignoreDuplicateColumnError);
+            db.run(`INSERT OR IGNORE INTO alpaca_monitor_state (id, mode) VALUES (1, 'disabled')`);
 
             // Strategy Lab is an evidence registry only. These isolated tables contain
             // experiment definitions, versioned rules, and observed test/paper runs.
@@ -478,6 +569,18 @@ function initDb() {
                     }
                 } else {
                     console.log('[migration 001] skipped; set ENABLE_LEDGER_MIGRATION=1 to run the portfolio -> transactions migration');
+                }
+
+                try {
+                    const { runAlpacaExecutionEpochsMigration } = require('./migrations/002_alpaca_execution_epochs');
+                    const epochResult = await runAlpacaExecutionEpochsMigration({ dbPath: DB_PATH });
+                    if (!epochResult.skipped) {
+                        console.log(`[migration 002] classified ${epochResult.migrated} legacy Alpaca paper-order rows (${epochResult.legacyLongTerm} legacy_long_term, ${epochResult.legacyUnattributed} legacy_unattributed)`);
+                    }
+                } catch (migrationError) {
+                    console.error('[migration 002] FAILED:', migrationError.message);
+                    reject(migrationError);
+                    return;
                 }
 
                 // Verify the schema this build actually needs before declaring success:
@@ -1818,61 +1921,120 @@ function deleteAllSimTransactions(accountId = 1) {
     });
 }
 
-function createAlpacaPaperOrderAudit(order) {
+function normalizeAlpacaPaperOrderAudit(order) {
     const normalized = {
         idempotency_key: String(order.idempotency_key || '').trim(),
+        client_order_id: order.client_order_id == null ? null : (String(order.client_order_id).trim() || null),
         symbol: String(order.symbol || '').trim().toUpperCase(),
         side: order.side,
         qty: Number(order.qty),
         order_type: order.order_type,
         time_in_force: order.time_in_force,
         limit_price: order.limit_price == null ? null : Number(order.limit_price),
+        stop_price: order.stop_price == null ? null : Number(order.stop_price),
+        take_profit_price: order.take_profit_price == null ? null : Number(order.take_profit_price),
         status: order.status,
+        execution_epoch: order.execution_epoch || 'legacy_unattributed',
+        order_class: order.order_class || 'simple',
+        leg_role: order.leg_role || null,
+        parent_broker_order_id: order.parent_broker_order_id == null ? null : String(order.parent_broker_order_id),
+        plan_id: order.plan_id == null ? null : Number(order.plan_id),
     };
+    const ORDER_TYPES = ['market', 'limit', 'stop', 'stop_limit', 'trailing_stop'];
+    const EXECUTION_EPOCHS = ['legacy_long_term', 'legacy_unattributed', 'day_trading'];
+    const ORDER_CLASSES = ['simple', 'bracket', 'oco', 'oto'];
+    const LEG_ROLES = ['entry', 'take_profit', 'stop_loss', 'time_exit', 'repair_exit', 'emergency_flatten'];
     if (!normalized.idempotency_key || !normalized.symbol || !['buy', 'sell'].includes(normalized.side)
         || !Number.isInteger(normalized.qty) || normalized.qty <= 0
-        || !['market', 'limit'].includes(normalized.order_type) || normalized.time_in_force !== 'day'
-        || !normalized.status) {
-        return Promise.reject(new Error('invalid Alpaca paper order audit record'));
+        || !ORDER_TYPES.includes(normalized.order_type) || normalized.time_in_force !== 'day'
+        || !normalized.status || !EXECUTION_EPOCHS.includes(normalized.execution_epoch)
+        || !ORDER_CLASSES.includes(normalized.order_class)
+        || (normalized.leg_role !== null && !LEG_ROLES.includes(normalized.leg_role))) {
+        throw new Error('invalid Alpaca paper order audit record');
     }
     if (normalized.order_type === 'limit' && !(normalized.limit_price > 0)) {
-        return Promise.reject(new Error('limit paper-order audit requires positive limit_price'));
+        throw new Error('limit paper-order audit requires positive limit_price');
+    }
+    return normalized;
+}
+
+function insertAlpacaPaperOrderAuditRow(sqlite, normalized, callback) {
+    sqlite.run(
+        `INSERT INTO alpaca_paper_orders (
+            idempotency_key, client_order_id, symbol, side, qty, order_type, time_in_force, limit_price,
+            stop_price, take_profit_price, status, execution_epoch, order_class, leg_role,
+            parent_broker_order_id, plan_id, request_payload
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            normalized.idempotency_key, normalized.client_order_id, normalized.symbol, normalized.side, normalized.qty,
+            normalized.order_type, normalized.time_in_force, normalized.limit_price, normalized.stop_price,
+            normalized.take_profit_price, normalized.status, normalized.execution_epoch, normalized.order_class,
+            normalized.leg_role, normalized.parent_broker_order_id, normalized.plan_id,
+            JSON.stringify(normalized),
+        ],
+        function(err) {
+            if (err) {
+                if (/UNIQUE constraint failed: alpaca_paper_orders\.idempotency_key/i.test(err.message)) {
+                    return callback(new Error('duplicate Alpaca paper-order idempotency key'));
+                }
+                if (/UNIQUE constraint failed: alpaca_paper_orders\.client_order_id/i.test(err.message)) {
+                    return callback(new Error('duplicate Alpaca paper-order client order id'));
+                }
+                return callback(err);
+            }
+            return callback(null, { id: this.lastID, ...normalized });
+        },
+    );
+}
+
+function createAlpacaPaperOrderAudit(order) {
+    let normalized;
+    try {
+        normalized = normalizeAlpacaPaperOrderAudit(order);
+    } catch (validationError) {
+        return Promise.reject(validationError);
     }
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
-        sqlite.run(
-            `INSERT INTO alpaca_paper_orders (
-                idempotency_key, symbol, side, qty, order_type, time_in_force, limit_price, status, request_payload
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-                normalized.idempotency_key, normalized.symbol, normalized.side, normalized.qty,
-                normalized.order_type, normalized.time_in_force, normalized.limit_price, normalized.status,
-                JSON.stringify(normalized),
-            ],
-            function(err) {
-                sqlite.close();
-                if (err) {
-                    if (/UNIQUE constraint failed: alpaca_paper_orders\.idempotency_key/i.test(err.message)) {
-                        return reject(new Error('duplicate Alpaca paper-order idempotency key'));
-                    }
-                    return reject(err);
-                }
-                return resolve({ id: this.lastID, ...normalized });
-            },
-        );
+        insertAlpacaPaperOrderAuditRow(sqlite, normalized, (err, row) => {
+            sqlite.close();
+            err ? reject(err) : resolve(row);
+        });
     });
 }
 
-function updateAlpacaPaperOrderAudit(idempotencyKey, { status, broker_order_id = null, broker_payload = null }) {
+function updateAlpacaPaperOrderAudit(idempotencyKey, {
+    status, broker_order_id = null, broker_payload = null,
+    filled_qty = null, avg_fill_price = null, unresolved = null,
+    broker_created_at = null, submitted_at = null, broker_updated_at = null,
+    filled_at = null, canceled_at = null, expired_at = null,
+}) {
     const key = String(idempotencyKey || '').trim();
     if (!key || !status) return Promise.reject(new Error('invalid Alpaca paper order audit update'));
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
         sqlite.run(
             `UPDATE alpaca_paper_orders
-             SET status = ?, broker_order_id = COALESCE(?, broker_order_id), broker_payload = ?, updated_at = datetime('now')
+             SET status = ?,
+                 broker_order_id = COALESCE(?, broker_order_id),
+                 broker_payload = COALESCE(?, broker_payload),
+                 filled_qty = COALESCE(?, filled_qty),
+                 avg_fill_price = COALESCE(?, avg_fill_price),
+                 unresolved = COALESCE(?, unresolved),
+                 broker_created_at = COALESCE(?, broker_created_at),
+                 submitted_at = COALESCE(?, submitted_at),
+                 broker_updated_at = COALESCE(?, broker_updated_at),
+                 filled_at = COALESCE(?, filled_at),
+                 canceled_at = COALESCE(?, canceled_at),
+                 expired_at = COALESCE(?, expired_at),
+                 updated_at = datetime('now')
              WHERE idempotency_key = ?`,
-            [status, broker_order_id, broker_payload == null ? null : JSON.stringify(broker_payload), key],
+            [
+                status, broker_order_id, broker_payload == null ? null : JSON.stringify(broker_payload),
+                filled_qty, avg_fill_price, unresolved == null ? null : (unresolved ? 1 : 0),
+                broker_created_at, submitted_at, broker_updated_at, filled_at, canceled_at, expired_at,
+                key,
+            ],
             function(err) {
                 sqlite.close();
                 if (err) return reject(err);
@@ -1890,6 +2052,350 @@ function listAlpacaPaperOrderAudits() {
             sqlite.close();
             err ? reject(err) : resolve(rows || []);
         });
+    });
+}
+
+function getAlpacaPaperOrderAuditByIdempotencyKey(idempotencyKey) {
+    const key = String(idempotencyKey || '').trim();
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.get('SELECT * FROM alpaca_paper_orders WHERE idempotency_key = ?', [key], (err, row) => {
+            sqlite.close();
+            err ? reject(err) : resolve(row || null);
+        });
+    });
+}
+
+function normalizeAlpacaDayTradePlan(plan) {
+    const normalized = {
+        symbol: String(plan.symbol || '').trim().toUpperCase(),
+        setup: String(plan.setup || '').trim(),
+        catalyst: String(plan.catalyst || '').trim(),
+        thesis: String(plan.thesis || '').trim(),
+        invalidation: String(plan.invalidation || '').trim(),
+        planned_entry_low: Number(plan.planned_entry_low),
+        planned_entry_high: Number(plan.planned_entry_high),
+        planned_stop: Number(plan.planned_stop),
+        planned_target: Number(plan.planned_target),
+        planned_qty: Number(plan.planned_qty),
+        planned_risk_dollars: Number(plan.planned_risk_dollars),
+        planned_reward_risk: Number(plan.planned_reward_risk),
+        planned_account_risk_pct: Number(plan.planned_account_risk_pct),
+        state: plan.state || 'entry_pending',
+        exit_deadline: String(plan.exit_deadline || '').trim(),
+        strategy_version: plan.strategy_version == null ? null : String(plan.strategy_version),
+    };
+    if (!normalized.symbol || !normalized.setup || !normalized.catalyst || !normalized.thesis || !normalized.invalidation
+        || !normalized.exit_deadline || !Number.isInteger(normalized.planned_qty) || normalized.planned_qty <= 0
+        || !Number.isFinite(normalized.planned_entry_low) || !Number.isFinite(normalized.planned_entry_high)
+        || !Number.isFinite(normalized.planned_stop) || !Number.isFinite(normalized.planned_target)
+        || !Number.isFinite(normalized.planned_risk_dollars) || !Number.isFinite(normalized.planned_reward_risk)
+        || !Number.isFinite(normalized.planned_account_risk_pct)) {
+        throw new Error('invalid Alpaca Day Trading plan');
+    }
+    return normalized;
+}
+
+function createAlpacaDayTradePlanWithEntry(plan, entryOrder) {
+    let normalizedPlan;
+    try {
+        normalizedPlan = normalizeAlpacaDayTradePlan(plan);
+    } catch (validationError) {
+        return Promise.reject(validationError);
+    }
+
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        let settled = false;
+        const finish = (error, value) => {
+            if (settled) return;
+            settled = true;
+            if (error) {
+                sqlite.run('ROLLBACK', () => { sqlite.close(); reject(error); });
+            } else {
+                sqlite.close();
+                resolve(value);
+            }
+        };
+
+        sqlite.serialize(() => {
+            // The plan INSERT is nested inside BEGIN's own callback (rather than queued
+            // alongside it via serialize() alone) because serialize() only orders statement
+            // dispatch — it does not stop a later statement just because an earlier one's
+            // callback reported an error. Nesting is what actually prevents an unguarded
+            // write if BEGIN itself fails (e.g. under lock contention).
+            sqlite.run('BEGIN TRANSACTION', (beginErr) => {
+                if (beginErr) return finish(beginErr);
+
+                sqlite.run(
+                    `INSERT INTO alpaca_day_trade_plans (
+                        symbol, setup, catalyst, thesis, invalidation, planned_entry_low, planned_entry_high,
+                        planned_stop, planned_target, planned_qty, planned_risk_dollars, planned_reward_risk,
+                        planned_account_risk_pct, state, exit_deadline, strategy_version, opened_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+                    [
+                        normalizedPlan.symbol, normalizedPlan.setup, normalizedPlan.catalyst, normalizedPlan.thesis,
+                        normalizedPlan.invalidation, normalizedPlan.planned_entry_low, normalizedPlan.planned_entry_high,
+                        normalizedPlan.planned_stop, normalizedPlan.planned_target, normalizedPlan.planned_qty,
+                        normalizedPlan.planned_risk_dollars, normalizedPlan.planned_reward_risk,
+                        normalizedPlan.planned_account_risk_pct, normalizedPlan.state, normalizedPlan.exit_deadline,
+                        normalizedPlan.strategy_version,
+                    ],
+                    function(planErr) {
+                        if (planErr) {
+                            if (/UNIQUE constraint failed: alpaca_day_trade_plans\.symbol/i.test(planErr.message)) {
+                                return finish(new Error(`a nonterminal Day Trading plan already exists for ${normalizedPlan.symbol}`));
+                            }
+                            return finish(planErr);
+                        }
+                        const planId = this.lastID;
+                        let normalizedOrder;
+                        try {
+                            normalizedOrder = normalizeAlpacaPaperOrderAudit({
+                                ...entryOrder,
+                                plan_id: planId,
+                                execution_epoch: entryOrder.execution_epoch || 'day_trading',
+                                leg_role: entryOrder.leg_role || 'entry',
+                            });
+                        } catch (orderValidationError) {
+                            return finish(orderValidationError);
+                        }
+                        insertAlpacaPaperOrderAuditRow(sqlite, normalizedOrder, (orderErr, orderRow) => {
+                            if (orderErr) return finish(orderErr);
+                            sqlite.run('COMMIT', (commitErr) => {
+                                if (commitErr) return finish(commitErr);
+                                finish(null, { plan: { id: planId, ...normalizedPlan }, order: orderRow });
+                            });
+                        });
+                    },
+                );
+                },
+            );
+        });
+    });
+}
+
+function getAlpacaDayTradePlan(id) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.get('SELECT * FROM alpaca_day_trade_plans WHERE id = ?', [Number(id)], (err, row) => {
+            sqlite.close();
+            err ? reject(err) : resolve(row || null);
+        });
+    });
+}
+
+function getActiveAlpacaDayTradePlanForSymbol(symbol) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.get(
+            `SELECT * FROM alpaca_day_trade_plans
+             WHERE symbol = ? AND state NOT IN ('closed', 'cancelled', 'error')
+             ORDER BY id DESC LIMIT 1`,
+            [String(symbol).toUpperCase()],
+            (err, row) => {
+                sqlite.close();
+                err ? reject(err) : resolve(row || null);
+            },
+        );
+    });
+}
+
+function listAlpacaDayTradePlans(state = null) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        const where = state ? 'WHERE state = ?' : '';
+        const params = state ? [state] : [];
+        sqlite.all(`SELECT * FROM alpaca_day_trade_plans ${where} ORDER BY id DESC`, params, (err, rows) => {
+            sqlite.close();
+            err ? reject(err) : resolve(rows || []);
+        });
+    });
+}
+
+const ALPACA_DAY_TRADE_PLAN_UPDATE_FIELDS = [
+    'state', 'entry_parent_broker_order_id', 'protective_stop_broker_order_id', 'protective_target_broker_order_id',
+    'filled_entry_qty', 'avg_entry_price', 'filled_exit_qty', 'avg_exit_price', 'exit_reason',
+    'realized_pnl', 'realized_r', 'mfe', 'mae', 'thesis_valid', 'review_notes', 'opened_at', 'closed_at',
+];
+const TERMINAL_ALPACA_DAY_TRADE_PLAN_STATES = ['closed', 'cancelled', 'error'];
+
+function updateAlpacaDayTradePlan(id, patch = {}) {
+    const sets = [];
+    const params = [];
+    for (const field of ALPACA_DAY_TRADE_PLAN_UPDATE_FIELDS) {
+        if (patch[field] === undefined) continue;
+        sets.push(`${field} = ?`);
+        params.push(field === 'thesis_valid' && patch[field] != null ? (patch[field] ? 1 : 0) : patch[field]);
+    }
+    if (sets.length === 0) return Promise.reject(new Error('no Alpaca Day Trading plan fields to update'));
+    params.push(Number(id));
+    // A transition INTO a terminal state is guarded in the WHERE clause itself, not just by
+    // a caller reading the row first: two concurrent closers (e.g. a time-exit sweep and a
+    // take-profit fill event both concluding the same plan is done) would otherwise both
+    // pass a read-then-write pre-check and the second write would overwrite the first's
+    // exit_reason/realized_pnl/closed_at. This does not block a benign update (such as
+    // adding review notes) against an already-terminal plan.
+    const closingTransition = TERMINAL_ALPACA_DAY_TRADE_PLAN_STATES.includes(patch.state);
+    const where = closingTransition
+        ? `WHERE id = ? AND state NOT IN ('${TERMINAL_ALPACA_DAY_TRADE_PLAN_STATES.join("', '")}')`
+        : 'WHERE id = ?';
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(`UPDATE alpaca_day_trade_plans SET ${sets.join(', ')} ${where}`, params, function(err) {
+            sqlite.close();
+            if (err) return reject(err);
+            if (this.changes !== 1) return reject(new Error('Alpaca Day Trading plan not found'));
+            resolve({ updated: this.changes });
+        });
+    });
+}
+
+function createAlpacaPaperFill(fill) {
+    const normalized = {
+        activity_id: String(fill.activity_id || '').trim(),
+        broker_order_id: fill.broker_order_id == null ? null : String(fill.broker_order_id),
+        plan_id: fill.plan_id == null ? null : Number(fill.plan_id),
+        symbol: String(fill.symbol || '').trim().toUpperCase(),
+        side: fill.side,
+        qty: Number(fill.qty),
+        price: Number(fill.price),
+        executed_at: String(fill.executed_at || '').trim(),
+        fill_type: fill.fill_type,
+        correction_of: fill.correction_of == null ? null : String(fill.correction_of),
+        is_bust: fill.is_bust ? 1 : 0,
+        source: fill.source,
+    };
+    if (!normalized.activity_id || !normalized.symbol || !['buy', 'sell'].includes(normalized.side)
+        || !Number.isInteger(normalized.qty) || normalized.qty <= 0 || !(normalized.price > 0) || !normalized.executed_at
+        || !['partial_fill', 'fill'].includes(normalized.fill_type)
+        || !['websocket', 'rest_reconciliation'].includes(normalized.source)) {
+        return Promise.reject(new Error('invalid Alpaca paper fill record'));
+    }
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            `INSERT OR IGNORE INTO alpaca_paper_fills (
+                activity_id, broker_order_id, plan_id, symbol, side, qty, price, executed_at,
+                fill_type, correction_of, is_bust, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                normalized.activity_id, normalized.broker_order_id, normalized.plan_id, normalized.symbol,
+                normalized.side, normalized.qty, normalized.price, normalized.executed_at, normalized.fill_type,
+                normalized.correction_of, normalized.is_bust, normalized.source,
+            ],
+            (err) => {
+                if (err) { sqlite.close(); return reject(err); }
+                sqlite.get('SELECT * FROM alpaca_paper_fills WHERE activity_id = ?', [normalized.activity_id], (getErr, row) => {
+                    sqlite.close();
+                    getErr ? reject(getErr) : resolve(row);
+                });
+            },
+        );
+    });
+}
+
+function listAlpacaPaperFillsForPlan(planId) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.all(
+            'SELECT * FROM alpaca_paper_fills WHERE plan_id = ? ORDER BY executed_at ASC, id ASC',
+            [Number(planId)],
+            (err, rows) => {
+                sqlite.close();
+                err ? reject(err) : resolve(rows || []);
+            },
+        );
+    });
+}
+
+function getAlpacaMonitorState() {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.get('SELECT * FROM alpaca_monitor_state WHERE id = 1', (err, row) => {
+            sqlite.close();
+            err ? reject(err) : resolve(row || null);
+        });
+    });
+}
+
+const ALPACA_MONITOR_STATE_UPDATE_FIELDS = [
+    'mode', 'last_rest_reconciliation_at', 'last_websocket_event_at', 'last_websocket_reconnect_at',
+    'activity_cursor', 'session_date', 'health_code', 'health_error', 'kill_switch', 'block_entries',
+    'last_flatten_sweep_at', 'submission_lease_holder', 'submission_lease_expires_at',
+];
+const ALPACA_MONITOR_STATE_BOOLEAN_FIELDS = new Set(['kill_switch', 'block_entries']);
+
+function updateAlpacaMonitorState(patch = {}) {
+    const sets = [];
+    const params = [];
+    for (const field of ALPACA_MONITOR_STATE_UPDATE_FIELDS) {
+        if (patch[field] === undefined) continue;
+        sets.push(`${field} = ?`);
+        params.push(ALPACA_MONITOR_STATE_BOOLEAN_FIELDS.has(field) ? (patch[field] ? 1 : 0) : patch[field]);
+    }
+    if (sets.length === 0) return Promise.reject(new Error('no Alpaca monitor-state fields to update'));
+    sets.push("updated_at = datetime('now')");
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(`UPDATE alpaca_monitor_state SET ${sets.join(', ')} WHERE id = 1`, params, function(err) {
+            sqlite.close();
+            if (err) return reject(err);
+            resolve({ updated: this.changes });
+        });
+    });
+}
+
+// Safety Invariant #10: the web server and the standalone monitor worker are separate
+// processes, so the existing in-process Promise queue (alpaca_paper_service.js's
+// submissionQueue) cannot serialize submissions between them — only a lease stored in SQLite
+// can. This is a single conditional UPDATE, not a read-then-write: the free-to-acquire
+// condition is entirely inside the WHERE clause, so there is no window between checking and
+// claiming for a second caller to race into. A NULL submission_lease_expires_at on a held
+// lease (corrupted or never set) makes `submission_lease_expires_at < ?` evaluate to NULL in
+// SQLite, which is not true, so the row is correctly treated as still held rather than free.
+function acquireAlpacaMonitorSubmissionLease({ holderId, leaseDurationMs, now }) {
+    const holder = String(holderId || '').trim();
+    if (!holder) return Promise.reject(new Error('a holder id is required to acquire the submission lease'));
+    const nowDate = new Date(now);
+    if (!Number.isFinite(Number(leaseDurationMs)) || Number(leaseDurationMs) <= 0 || Number.isNaN(nowDate.getTime())) {
+        return Promise.reject(new Error('a valid lease duration and current time are required'));
+    }
+    const expiresAt = new Date(nowDate.getTime() + Number(leaseDurationMs)).toISOString();
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            `UPDATE alpaca_monitor_state
+             SET submission_lease_holder = ?, submission_lease_expires_at = ?, updated_at = datetime('now')
+             WHERE id = 1 AND (submission_lease_holder IS NULL OR submission_lease_expires_at < ?)`,
+            [holder, expiresAt, nowDate.toISOString()],
+            function(err) {
+                sqlite.close();
+                if (err) return reject(err);
+                resolve({ acquired: this.changes === 1, expiresAt });
+            },
+        );
+    });
+}
+
+// Only the current holder can release its own lease — a slow caller whose lease already
+// expired and was reclaimed by someone else must not be able to clear the new holder's claim.
+function releaseAlpacaMonitorSubmissionLease({ holderId }) {
+    const holder = String(holderId || '').trim();
+    if (!holder) return Promise.reject(new Error('a holder id is required to release the submission lease'));
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            `UPDATE alpaca_monitor_state
+             SET submission_lease_holder = NULL, submission_lease_expires_at = NULL, updated_at = datetime('now')
+             WHERE id = 1 AND submission_lease_holder = ?`,
+            [holder],
+            function(err) {
+                sqlite.close();
+                if (err) return reject(err);
+                resolve({ released: this.changes === 1 });
+            },
+        );
     });
 }
 
@@ -2066,6 +2572,18 @@ module.exports = {
     createAlpacaPaperOrderAudit,
     updateAlpacaPaperOrderAudit,
     listAlpacaPaperOrderAudits,
+    getAlpacaPaperOrderAuditByIdempotencyKey,
+    createAlpacaDayTradePlanWithEntry,
+    getAlpacaDayTradePlan,
+    getActiveAlpacaDayTradePlanForSymbol,
+    listAlpacaDayTradePlans,
+    updateAlpacaDayTradePlan,
+    createAlpacaPaperFill,
+    listAlpacaPaperFillsForPlan,
+    getAlpacaMonitorState,
+    updateAlpacaMonitorState,
+    acquireAlpacaMonitorSubmissionLease,
+    releaseAlpacaMonitorSubmissionLease,
     createStrategyExperiment,
     listStrategyExperiments,
     getStrategyExperimentById,
