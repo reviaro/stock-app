@@ -51,6 +51,7 @@ function createAuth({
     sessionSecret,
     apiToken = '',
     simulatorTokens = [],
+    alpacaDayTradingToken = '',
     secureCookie = false,
     allowLoopback = true,
     sessionTtlSeconds = SESSION_TTL_SECONDS,
@@ -68,9 +69,13 @@ function createAuth({
         || (entry.manage_limits !== undefined && typeof entry.manage_limits !== 'boolean'))) {
         throw new Error('Simulator credentials require a token of at least 32 characters, positive account_id, and optional boolean manage_limits');
     }
+    if (alpacaDayTradingToken && (typeof alpacaDayTradingToken !== 'string' || alpacaDayTradingToken.length < 32)) {
+        throw new Error('Alpaca Day Trading credential requires a token of at least 32 characters');
+    }
     const tokens = simulatorTokens.map((entry) => entry.token);
-    if (new Set(tokens).size !== tokens.length || tokens.includes(apiToken)) {
-        throw new Error('Simulator credentials must be unique and distinct from the general API token');
+    const allScopedTokens = [...tokens, ...(alpacaDayTradingToken ? [alpacaDayTradingToken] : [])];
+    if (new Set(allScopedTokens).size !== allScopedTokens.length || allScopedTokens.includes(apiToken)) {
+        throw new Error('Scoped credentials must be unique and distinct from the general API token');
     }
 
     const attempts = new Map();
@@ -184,6 +189,10 @@ function createAuth({
                     manage_limits: agent.manage_limits === true, username: `simulator-${agent.account_id}` };
                 return next();
             }
+            if (alpacaDayTradingToken && safeEqualText(token, alpacaDayTradingToken)) {
+                req.auth = { type: 'bearer', role: 'alpaca-day-trading-agent', username: 'alpaca-day-trading-agent' };
+                return next();
+            }
             if (bearerIsValid(req)) {
                 req.auth = { type: 'bearer', role: 'reader', username };
                 return next();
@@ -269,6 +278,7 @@ function createAuthFromEnv(env = process.env) {
         sessionSecret: env.STOCK_DASHBOARD_SESSION_SECRET,
         apiToken: env.STOCK_DASHBOARD_API_TOKEN || '',
         simulatorTokens: JSON.parse(env.STOCK_DASHBOARD_SIMULATOR_TOKENS || '[]'),
+        alpacaDayTradingToken: env.ALPACA_DAY_TRADING_ENTRY_TOKEN || '',
         secureCookie: env.STOCK_DASHBOARD_SECURE_COOKIE === '1',
         allowLoopback: env.STOCK_DASHBOARD_ALLOW_LOOPBACK !== '0',
         publicOrigin: env.STOCK_DASHBOARD_PUBLIC_ORIGIN || '',
