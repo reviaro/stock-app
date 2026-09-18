@@ -2,10 +2,12 @@ const fs = require('fs');
 const path = require('path');
 
 const store = require('../services/alpaca_day_trade_store');
-const { reconcileFills, buildObservation } = require('../services/alpaca_fill_reconciliation');
+const { reconcileFills, buildObservation, recordWebSocketFill } = require('../services/alpaca_fill_reconciliation');
 const { decidePlanAction, DEFAULT_MONITOR_POLICY } = require('../services/alpaca_day_trade_monitor');
 const { executeManagementAction } = require('../services/alpaca_day_trade_repair_execution');
 const { createSessionDateResolver } = require('../services/alpaca_trading_calendar');
+const { createTradeUpdatesStream } = require('../services/alpaca_trade_updates_stream');
+const { TRADE_UPDATES_URL } = require('../services/alpaca_paper_service');
 
 const DEFAULT_LOCK_PATH = path.join(__dirname, '..', '..', 'run', 'alpaca-day-trading-monitor.lock');
 const DEFAULT_POLL_INTERVAL_MS = 60_000; // Section 8: every 60s while any plan/order/position is open
@@ -58,6 +60,10 @@ function createWorker({
     policy = DEFAULT_MONITOR_POLICY,
     now = () => new Date(),
     log = () => {},
+    wsUrl = TRADE_UPDATES_URL,
+    wsApiKey,
+    wsApiSecret,
+    streamFactory = createTradeUpdatesStream,
 } = {}) {
     let ready = false;
     let stopped = false;
@@ -67,6 +73,10 @@ function createWorker({
     // Created once client is resolved (see start()) so its calendar cache persists across every
     // tick for this process's lifetime, rather than refetching on each 60s poll.
     let resolveSessionDate = null;
+    // REST (reconcileFills, every poll) is the plan's own designated completeness channel and
+    // is fully sufficient on its own -- the WebSocket exists purely to react faster. Without
+    // credentials configured, this simply never connects; nothing else changes.
+    let stream = null;
     // Tracks whatever tick is currently executing (or the last one that ran) so stop() can wait
     // for it -- a SIGTERM arriving mid-tick (the realistic systemd shutdown, Task 16) must not
     // release the instance lock while broker calls/decisions from this process are still in
@@ -157,6 +167,34 @@ function createWorker({
         }, pollIntervalMs);
     }
 
+    // Called bare by the stream module (never awaited, never .catch()'d at that call site) --
+    // an escaping rejection here would surface as an unhandled promise rejection, which
+    // terminates the process by default on modern Node. The detached-IIFE-with-internal-catch
+    // shape makes this impossible structurally: handleFill itself returns synchronously.
+    function handleFill(normalized) {
+        (async () => {
+            try {
+                await recordWebSocketFill(normalized, { store });
+                await store.updateMonitorState({ last_websocket_event_at: now().toISOString() });
+                // REST remains the authoritative completeness pass -- this recorded the live
+                // event for low latency, but protective-leg discovery and close-from-fills only
+                // happen here, against complete broker evidence, same as every poll tick.
+                await reconcileFills({ client, store });
+            } catch (error) {
+                log({ webSocketFillError: error.message });
+            }
+        })();
+    }
+
+    async function handleReconnect() {
+        try {
+            await reconcileFills({ client, store });
+            await store.updateMonitorState({ last_websocket_reconnect_at: now().toISOString() });
+        } catch (error) {
+            log({ webSocketReconnectError: error.message });
+        }
+    }
+
     async function start() {
         lock = acquireInstanceLock(lockPath);
         if (!lock.acquired) {
@@ -165,6 +203,13 @@ function createWorker({
         try {
             if (!client) client = createClient();
             resolveSessionDate = createSessionDateResolver({ client });
+            if (wsApiKey && wsApiSecret) {
+                stream = streamFactory({
+                    url: wsUrl, apiKey: wsApiKey, apiSecret: wsApiSecret,
+                    onFill: handleFill, onReconnect: handleReconnect,
+                    onStateChange: (state) => log({ webSocketState: state }),
+                });
+            }
         } catch (error) {
             lock.release();
             throw error; // fatal configuration: reject and let systemd's Restart=always retry at the process level
@@ -194,6 +239,10 @@ function createWorker({
         // instance could acquire it and start deciding/executing while this process's own
         // broker calls for the same plans are still outstanding.
         await currentTick;
+        // Same reasoning as the in-flight tick above: closed before the lock releases, not
+        // after, so a systemd-restarted second instance never has two live sockets open for
+        // the same account at once.
+        if (stream) stream.close();
         // Graceful shutdown leaves broker-native protective orders intact (systemd hardening,
         // Section 8): this never cancels or flattens anything on the way out.
         if (lock) lock.release();

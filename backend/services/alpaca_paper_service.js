@@ -3,6 +3,11 @@ const PAPER_BASE_URL = 'https://paper-api.alpaca.markets';
 // accounts (gated only by the account's data plan, not by the trading endpoint). It is
 // intentionally not read from any environment variable, unlike the trading base URL.
 const MARKET_DATA_BASE_URL = 'https://data.alpaca.markets';
+// Verified against Alpaca's documented websocket-streaming reference: the trade_updates stream
+// lives at wss://paper-api.alpaca.markets/stream for paper accounts (wss://api.alpaca.markets/
+// stream for live) -- hardcoded like PAPER_BASE_URL, never read from environment, so there is
+// no route to accidentally point the live socket at a real-money account.
+const TRADE_UPDATES_URL = 'wss://paper-api.alpaca.markets/stream';
 const db = require('../database/db');
 const { validatePaperOrder } = require('./alpaca_order_policy');
 
@@ -344,4 +349,4 @@ async function resolveMissingPaperOrderAudit({
     return { status: 'submission_not_found' };
 }
 
-module.exports = { PAPER_BASE_URL, MARKET_DATA_BASE_URL, getPaperConfiguration, createPaperClient, getPaperAccountSummary, getPaperReconciliationSnapshot, submitPaperOrder, reconcilePaperOrderAudits, resolveMissingPaperOrderAudit };
+module.exports = { PAPER_BASE_URL, MARKET_DATA_BASE_URL, TRADE_UPDATES_URL, getPaperCredentials, getPaperConfiguration, createPaperClient, getPaperAccountSummary, getPaperReconciliationSnapshot, submitPaperOrder, reconcilePaperOrderAudits, resolveMissingPaperOrderAudit };

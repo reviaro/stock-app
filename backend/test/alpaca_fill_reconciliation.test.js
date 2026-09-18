@@ -13,6 +13,7 @@ const {
     discoverProtectiveLegs,
     reconcileFills,
     buildObservation,
+    recordWebSocketFill,
 } = require('../services/alpaca_fill_reconciliation');
 
 before(async () => {
@@ -109,6 +110,47 @@ test('the same execution delivered by both channels produces exactly one stored 
     const fills = await store.listFillsForPlan(plan.id);
     assert.strictEqual(fills.length, 1);
     assert.strictEqual(fills[0].source, 'websocket', 'first delivery wins; the later duplicate must not overwrite it');
+});
+
+// The path a live trade_updates event actually takes: already normalized by the stream module
+// before this is ever called, so this owns only what reconcileFills' own REST loop does inline
+// for each activity -- the legacy-order skip and the owning-plan lookup -- reusing those exact
+// helpers rather than a second implementation that could drift from the REST path's rules.
+test('recordWebSocketFill records a normalized event against its owning plan', async () => {
+    const { plan } = await seedPlanWithEntry();
+    const normalized = normalizeWebSocketFillEvent({
+        event: 'fill', execution_id: 'ws-execution-1',
+        order: { id: 'broker-parent-1', symbol: 'NVDA', side: 'buy' },
+        price: '100.49', qty: '10', position_qty: '10', timestamp: '2026-09-17T13:31:00Z',
+    });
+
+    const result = await recordWebSocketFill(normalized, { store });
+    assert.strictEqual(result.recorded, true);
+
+    const fills = await store.listFillsForPlan(plan.id);
+    assert.strictEqual(fills.length, 1);
+    assert.strictEqual(fills[0].source, 'websocket');
+    assert.strictEqual(fills[0].activity_id, 'ws-execution-1');
+});
+
+test('recordWebSocketFill never records a legacy (non-Day-Trading) order\'s event', async () => {
+    await store.createOrderAudit({
+        idempotency_key: 'ltr-legacy-1', symbol: 'AAPL', side: 'buy', qty: 5,
+        order_type: 'limit', time_in_force: 'day', limit_price: 190, status: 'pending_submission', execution_epoch: 'legacy_long_term',
+    });
+    await db.updateAlpacaPaperOrderAudit('ltr-legacy-1', { status: 'filled', broker_order_id: 'broker-legacy-1' });
+    const normalized = normalizeWebSocketFillEvent({
+        event: 'fill', execution_id: 'ws-execution-legacy-1',
+        order: { id: 'broker-legacy-1', symbol: 'AAPL', side: 'buy' },
+        price: '190', qty: '5', position_qty: '5', timestamp: '2026-09-17T13:31:00Z',
+    });
+
+    const result = await recordWebSocketFill(normalized, { store });
+    assert.strictEqual(result.recorded, false);
+
+    const audits = await store.listOrderAudits();
+    const legacyAudit = audits.find((a) => a.broker_order_id === 'broker-legacy-1');
+    assert.ok(legacyAudit, 'sanity: the legacy audit row exists');
 });
 
 test('discoverProtectiveLegs persists the stop and target broker order ids from a nested bracket lookup', async () => {

@@ -232,10 +232,29 @@ async function buildObservation(plan, {
     }
 }
 
+// The one thing a live trade_updates delivery needs that a REST activity doesn't already have
+// by the time it reaches here: the event is already normalized (the stream module applies
+// normalizeWebSocketFillEvent itself before calling onFill). This owns exactly what
+// reconcileFills' own per-activity loop does inline -- the legacy-order skip and the
+// owning-plan lookup -- reusing the same helpers so the two channels can never apply different
+// rules for the same underlying fill. Deliberately does not run discoverProtectiveLegs or
+// attemptCloseFromFills itself; the caller (the worker's onFill handler) follows this with a
+// full reconcileFills pass, which already does both against complete REST evidence.
+async function recordWebSocketFill(normalized, { store: injectedStore = store } = {}) {
+    const orderAudits = await injectedStore.listOrderAudits();
+    if (isLegacyOrder(normalized.broker_order_id, orderAudits)) return { recorded: false, reason: 'legacy_order' };
+
+    const plans = await injectedStore.listPlans(null);
+    const owningPlan = findOwningPlan(normalized.broker_order_id, plans);
+    await injectedStore.recordFill({ ...normalized, plan_id: owningPlan ? owningPlan.id : null });
+    return { recorded: true };
+}
+
 module.exports = {
     normalizeRestFillActivity,
     normalizeWebSocketFillEvent,
     discoverProtectiveLegs,
     reconcileFills,
     buildObservation,
+    recordWebSocketFill,
 };

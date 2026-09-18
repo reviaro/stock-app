@@ -184,6 +184,173 @@ test('a calendar-fetch failure does not stop the decide/execute loop from still 
     }
 });
 
+function fakeStreamFactory(calls) {
+    return (options) => {
+        calls.push(options);
+        return { close: () => { calls.closed = (calls.closed || 0) + 1; } };
+    };
+}
+
+test('start() connects the WebSocket stream when credentials are provided; stop() closes it before releasing the lock', async () => {
+    const lockPath = tempLockPath();
+    await store.updateMonitorState({ mode: 'disabled' });
+    const calls = [];
+    const worker = createWorker({
+        client: fakeClient(), lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW,
+        wsApiKey: 'k', wsApiSecret: 's', streamFactory: fakeStreamFactory(calls),
+    });
+    try {
+        await worker.start();
+        assert.strictEqual(calls.length, 1);
+        assert.strictEqual(calls[0].apiKey, 'k');
+        assert.strictEqual(calls[0].apiSecret, 's');
+        assert.ok(calls[0].url.startsWith('wss://'));
+        assert.strictEqual(typeof calls[0].onFill, 'function');
+        assert.strictEqual(typeof calls[0].onReconnect, 'function');
+    } finally {
+        await worker.stop();
+        assert.strictEqual(calls.closed, 1, 'stop() must close the stream');
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('start() does not attempt to connect the WebSocket stream when no credentials are configured', async () => {
+    const lockPath = tempLockPath();
+    await store.updateMonitorState({ mode: 'disabled' });
+    const calls = [];
+    const worker = createWorker({
+        client: fakeClient(), lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW,
+        streamFactory: fakeStreamFactory(calls),
+    });
+    try {
+        await worker.start();
+        assert.strictEqual(calls.length, 0, 'REST remains a fully sufficient fallback with no WS credentials configured');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('a WebSocket fill delivery is recorded, triggers reconciliation, and updates last_websocket_event_at', async () => {
+    const lockPath = tempLockPath();
+    await store.updateMonitorState({ mode: 'shadow' });
+    const { plan } = await store.createPlanWithEntry(
+        {
+            symbol: 'NVDA', setup: 's', catalyst: 'c', thesis: 't', invalidation: 'i',
+            planned_entry_low: 100.50, planned_entry_high: 100.50, planned_stop: 98.00, planned_target: 104.00,
+            planned_qty: 10, planned_risk_dollars: 25, planned_reward_risk: 1.4, planned_account_risk_pct: 0.00025,
+            exit_deadline: '2026-09-17T19:45:00.000Z',
+        },
+        {
+            idempotency_key: 'dt-nvda-entry-1', client_order_id: 'dt-nvda-entry-1', symbol: 'NVDA', side: 'buy',
+            qty: 10, order_type: 'limit', time_in_force: 'day', limit_price: 100.50,
+            status: 'filled', execution_epoch: 'day_trading', order_class: 'bracket', leg_role: 'entry',
+        },
+    );
+    await db.updateAlpacaDayTradePlan(plan.id, { entry_parent_broker_order_id: 'broker-parent-1' });
+
+    let capturedOnFill = null;
+    const client = fakeClient();
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW,
+        wsApiKey: 'k', wsApiSecret: 's',
+        streamFactory: (options) => { capturedOnFill = options.onFill; return { close: () => {} }; },
+    });
+    try {
+        await worker.start();
+        assert.strictEqual(typeof capturedOnFill, 'function');
+
+        capturedOnFill({
+            activity_id: 'ws-execution-1', broker_order_id: 'broker-parent-1', symbol: 'NVDA', side: 'buy',
+            qty: 10, price: 100.49, executed_at: '2026-09-17T13:31:00Z', fill_type: 'fill', source: 'websocket',
+        });
+
+        const deadline = Date.now() + 10_000;
+        let fills = await store.listFillsForPlan(plan.id);
+        while (fills.length === 0 && Date.now() < deadline) {
+            await new Promise((resolve) => { setTimeout(resolve, 20); });
+            fills = await store.listFillsForPlan(plan.id);
+        }
+        assert.strictEqual(fills.length, 1);
+        assert.strictEqual(fills[0].source, 'websocket');
+
+        const state = await store.getMonitorState();
+        assert.ok(state.last_websocket_event_at);
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('a WebSocket reconnect triggers reconciliation and updates last_websocket_reconnect_at', async () => {
+    const lockPath = tempLockPath();
+    await store.updateMonitorState({ mode: 'shadow' });
+    let capturedOnReconnect = null;
+    let reconciliationCalls = 0;
+    const client = fakeClient({
+        getAccountActivities: async () => { reconciliationCalls += 1; return []; },
+    });
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW,
+        wsApiKey: 'k', wsApiSecret: 's',
+        streamFactory: (options) => { capturedOnReconnect = options.onReconnect; return { close: () => {} }; },
+    });
+    try {
+        await worker.start();
+        assert.strictEqual(typeof capturedOnReconnect, 'function');
+        const callsBeforeReconnect = reconciliationCalls;
+
+        await capturedOnReconnect();
+
+        assert.ok(reconciliationCalls > callsBeforeReconnect, 'a reconnect must trigger a fresh reconciliation pass');
+        const state = await store.getMonitorState();
+        assert.ok(state.last_websocket_reconnect_at);
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+// onFill is called bare by the stream module (never awaited, never .catch()'d at that call
+// site) -- if the handler here let a rejection escape, it would surface as an unhandled promise
+// rejection, which terminates the process by default on modern Node. This must be impossible
+// structurally, not just unlikely.
+test('an error while handling a WebSocket fill delivery is logged, not thrown', async () => {
+    const lockPath = tempLockPath();
+    await store.updateMonitorState({ mode: 'shadow' });
+    let capturedOnFill = null;
+    const logs = [];
+    const client = fakeClient();
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW,
+        wsApiKey: 'k', wsApiSecret: 's', log: (entry) => logs.push(entry),
+        streamFactory: (options) => { capturedOnFill = options.onFill; return { close: () => {} }; },
+    });
+    try {
+        await worker.start();
+        // Deliberately not asserting doesNotThrow here: handleFill returns synchronously by
+        // construction (the detached-IIFE guard), so that would pass even with the internal
+        // catch removed and the rejection escaping unhandled. Asserting on the log is the
+        // assertion that actually fails if the guard is deleted.
+        capturedOnFill({ event: 'not-a-real-fill-shape' });
+
+        const deadline = Date.now() + 10_000;
+        while (!logs.some((entry) => entry.webSocketFillError) && Date.now() < deadline) {
+            await new Promise((resolve) => { setTimeout(resolve, 20); });
+        }
+        assert.ok(logs.some((entry) => entry.webSocketFillError), 'the handler must log the failure, not swallow it silently');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+// This proves the REST reconcile/decide loop stays fully off in disabled mode -- it does not
+// prove zero broker connectivity of any kind. The WebSocket stream (when credentials are
+// configured) connects in start() regardless of mode and keeps recording fills passively even
+// while disabled, on the same "evidence recording is always safe" reasoning reconcileFills
+// itself already relies on elsewhere in this file. This test's fixture never provides WS
+// credentials, so that path is simply inert here, not proven absent.
 test('disabled mode does not run the reconcile/decide loop at all', async () => {
     const lockPath = tempLockPath();
     await store.updateMonitorState({ mode: 'disabled' });
