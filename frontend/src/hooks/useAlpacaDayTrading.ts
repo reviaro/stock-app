@@ -71,15 +71,13 @@ export function useAlpacaDayTradingJournal() {
   })
 }
 
-// The operator token is sent only as this one request's header -- never stored, never part of
-// the query cache -- so this control carries the same trust level as calling the API directly.
 export function useSetAlpacaDayTradingMode() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ mode, token }: { mode: AlpacaMonitorMode; token: string }) =>
+    mutationFn: (mode: AlpacaMonitorMode) =>
       apiFetch<{ mode: string; killSwitch: boolean }>('/api/alpaca-paper/day-trading/mode', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Alpaca-Day-Trading-Token': token },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode, confirm: true }),
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['alpaca-day-trading', 'monitor-health'] }),
@@ -89,10 +87,10 @@ export function useSetAlpacaDayTradingMode() {
 export function useClearAlpacaDayTradingKillSwitch() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (token: string) =>
+    mutationFn: () =>
       apiFetch<{ killSwitch: boolean }>('/api/alpaca-paper/day-trading/kill-switch/clear', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Alpaca-Day-Trading-Token': token },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ confirm: true }),
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['alpaca-day-trading', 'monitor-health'] }),

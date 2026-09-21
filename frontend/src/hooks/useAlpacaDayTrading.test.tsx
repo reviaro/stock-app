@@ -14,32 +14,29 @@ function mount<T>(hook: () => T) {
 const response = (status: number, data: unknown) =>
   new Response(JSON.stringify(status < 400 ? { status: 'success', data } : { status: 'error', error: 'Rejected' }), { status })
 
-// Locks the exact wire shape dayTradingGateOpen/the /mode route require -- header name and
-// body shape are bare literals with nothing else (tsc, the mocked-hook component tests) to
-// catch a silent typo or rename.
-test('useSetAlpacaDayTradingMode POSTs the mode, confirm flag, and operator token header', async () => {
+test('useSetAlpacaDayTradingMode uses the authenticated operator session without exposing a server token in the browser', async () => {
   const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(response(200, { mode: 'shadow', killSwitch: false }))
   const { result } = mount(() => useSetAlpacaDayTradingMode())
-  await act(async () => { await result.current.mutateAsync({ mode: 'shadow', token: 'secret-token' }) })
+  await act(async () => { await result.current.mutateAsync('shadow') })
 
   expect(fetcher).toHaveBeenCalledTimes(1)
   const [url, options] = fetcher.mock.calls[0]
   expect(url).toBe('/api/alpaca-paper/day-trading/mode')
   expect(options?.method).toBe('POST')
-  expect((options?.headers as Record<string, string>)['X-Alpaca-Day-Trading-Token']).toBe('secret-token')
+  expect((options?.headers as Record<string, string>)['X-Alpaca-Day-Trading-Token']).toBeUndefined()
   expect(JSON.parse(options?.body as string)).toEqual({ mode: 'shadow', confirm: true })
 })
 
-test('useClearAlpacaDayTradingKillSwitch POSTs confirm and the operator token header', async () => {
+test('useClearAlpacaDayTradingKillSwitch uses the authenticated operator session', async () => {
   const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(response(200, { killSwitch: false }))
   const { result } = mount(() => useClearAlpacaDayTradingKillSwitch())
-  await act(async () => { await result.current.mutateAsync('secret-token') })
+  await act(async () => { await result.current.mutateAsync() })
 
   expect(fetcher).toHaveBeenCalledTimes(1)
   const [url, options] = fetcher.mock.calls[0]
   expect(url).toBe('/api/alpaca-paper/day-trading/kill-switch/clear')
   expect(options?.method).toBe('POST')
-  expect((options?.headers as Record<string, string>)['X-Alpaca-Day-Trading-Token']).toBe('secret-token')
+  expect((options?.headers as Record<string, string>)['X-Alpaca-Day-Trading-Token']).toBeUndefined()
   expect(JSON.parse(options?.body as string)).toEqual({ confirm: true })
 })
 
