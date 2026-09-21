@@ -56,6 +56,15 @@ test('exitReasonForBrokerOrderId falls back to manual for an unrecognized broker
     assert.strictEqual(exitReasonForBrokerOrderId(plan, null), 'manual');
 });
 
+test('exitReasonForBrokerOrderId preserves management leg roles from the order audit', () => {
+    const plan = { id: 7, protective_stop_broker_order_id: 'stop-1', protective_target_broker_order_id: 'target-1' };
+    for (const legRole of ['time_exit', 'repair_exit', 'emergency_flatten']) {
+        assert.strictEqual(exitReasonForBrokerOrderId(plan, `order-${legRole}`, [
+            { broker_order_id: `order-${legRole}`, plan_id: 7, execution_epoch: 'day_trading', leg_role: legRole },
+        ]), legRole);
+    }
+});
+
 test('computeDayTradeJournalAnalytics reuses trade_journal\'s generic analytics via a state->status rename', () => {
     const plans = [
         { state: 'closed', setup: 'breakout', realized_pnl: 100, realized_r: 2 },

@@ -72,6 +72,22 @@ function listFillsForPlan(planId) {
     return db.listAlpacaPaperFillsForPlan(planId);
 }
 
+function appendEvent(event) {
+    return db.appendAlpacaDayTradeEvent(event);
+}
+
+function listEvents(planId = null) {
+    return db.listAlpacaDayTradeEvents(planId);
+}
+
+function getEventByKey(eventKey) {
+    return db.getAlpacaDayTradeEventByKey(eventKey);
+}
+
+function reviewPlan(planId, review) {
+    return db.reviewAlpacaDayTradePlan(planId, review);
+}
+
 async function computeFilledSummaryForPlan(planId) {
     const fills = await db.listAlpacaPaperFillsForPlan(planId);
     return computeFilledSummary(fills);
@@ -119,6 +135,10 @@ module.exports = {
     closePlan,
     recordFill,
     listFillsForPlan,
+    appendEvent,
+    listEvents,
+    getEventByKey,
+    reviewPlan,
     computeFilledSummaryForPlan,
     getMonitorState,
     updateMonitorState,

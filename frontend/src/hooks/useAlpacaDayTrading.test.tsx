@@ -1,8 +1,8 @@
-import { act, renderHook } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, expect, test, vi } from 'vitest'
 import type { ReactNode } from 'react'
-import { useSetAlpacaDayTradingMode, useClearAlpacaDayTradingKillSwitch } from './useAlpacaDayTrading'
+import { useSetAlpacaDayTradingMode, useClearAlpacaDayTradingKillSwitch, useAlpacaDayTradingJournal } from './useAlpacaDayTrading'
 
 beforeEach(() => { vi.restoreAllMocks() })
 
@@ -41,4 +41,22 @@ test('useClearAlpacaDayTradingKillSwitch POSTs confirm and the operator token he
   expect(options?.method).toBe('POST')
   expect((options?.headers as Record<string, string>)['X-Alpaca-Day-Trading-Token']).toBe('secret-token')
   expect(JSON.parse(options?.body as string)).toEqual({ confirm: true })
+})
+
+// Pins the /journal response as {analytics, trades, events}, not the flat analytics object it
+// used to be -- a regression here silently breaks DayTradingJournalCard, which reads
+// journal.analytics rather than the query data directly.
+test('useAlpacaDayTradingJournal returns the nested analytics/trades/events shape', async () => {
+  const data = {
+    analytics: { closed_trade_count: 1, win_rate_pct: 100, expectancy: 35, profit_factor: null, average_r: 1.4, total_pnl: 35, by_setup: {} },
+    trades: [{ id: 1, symbol: 'AMD', state: 'closed' }],
+    events: [{ source: 'semantic', planId: 1, eventType: 'review', action: 'review', outcome: 'recorded', reason: null, detail: {}, occurredAt: '2026-09-21T00:00:00.000Z' }],
+  }
+  vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(response(200, data))
+  const { result } = mount(() => useAlpacaDayTradingJournal())
+  await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+  expect(result.current.data?.analytics.closed_trade_count).toBe(1)
+  expect(result.current.data?.trades).toHaveLength(1)
+  expect(result.current.data?.events[0].eventType).toBe('review')
 })

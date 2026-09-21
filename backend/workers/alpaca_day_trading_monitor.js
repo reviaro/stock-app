@@ -82,10 +82,40 @@ function createWorker({
     // release the instance lock while broker calls/decisions from this process are still in
     // flight, or a systemd-restarted second instance could start deciding/executing concurrently.
     let currentTick = Promise.resolve();
+    // A per-process monotonic counter, not the injected `now()` (frozen in tests) and not
+    // last_rest_reconciliation_at (which stops advancing while reconciliation is stalled --
+    // reusing it as the cycle id would make every event_key in a stalled tick collide with the
+    // prior good tick's). Combined with the real wall clock so it also can't collide with a
+    // prior process lifetime's keys after a restart.
+    let tickSequence = 0;
+    // Journaling is level-triggered by nature (buildObservation re-derives the decision fresh
+    // every tick) but an unchanged "still nothing to do" observation is zero-information noise
+    // in an append-only, never-pruned table. These track the last recorded state per plan (and
+    // whether the account was already idle) so only genuine transitions get a row -- action
+    // execution and kill-switch handling below are entirely unaffected by this, since deciding
+    // and acting must never depend on whether the decision was worth writing down.
+    const lastDecisionSignature = new Map();
+    let wasIdle = false;
+
+    // A semantic-event append is an audit row, not a lease: its insert-or-ignore outcome must
+    // never gate whether the decide/execute loop actually runs an action, and a failure to
+    // write it must never abort the rest of the tick (skipping later plans, a pending kill
+    // switch, or the terminal block_entries write below). Logged, not thrown.
+    async function recordMonitorEvent(payload) {
+        try {
+            return await store.appendEvent(payload);
+        } catch (error) {
+            log({ monitorEventError: error.message, eventKey: payload.event_key });
+            return { inserted: false };
+        }
+    }
 
     async function runTick() {
         const monitorState = await store.getMonitorState();
         if (monitorState?.mode === 'disabled') return;
+        tickSequence += 1;
+        const cycleId = `${Date.now()}-${tickSequence}`;
+        const occurredAt = new Date().toISOString();
 
         // Evidence recording (importing fills, closing plans with complete broker evidence) is
         // safe even with the kill switch tripped -- it never creates new exposure -- so it
@@ -122,6 +152,25 @@ function createWorker({
         // plan's decision requires it anymore rather than needing an operator to clear it.
         let anyBlockEntries = false;
 
+        if (plans.length === 0) {
+            if (!wasIdle) {
+                await recordMonitorEvent({
+                    event_key: `monitor:${cycleId}:no_active_plans`, plan_id: null, event_type: 'monitor_decision',
+                    action: 'none', outcome: 'no_active_plans', reason: 'no_active_plans',
+                    detail: { mode: monitorState.mode, cycle_id: cycleId }, occurred_at: occurredAt,
+                });
+                wasIdle = true;
+            }
+        } else {
+            wasIdle = false;
+        }
+
+        // Bounded by currently-open plans, not by every plan this process has ever seen.
+        const activePlanIds = new Set(plans.map((plan) => plan.id));
+        for (const id of lastDecisionSignature.keys()) {
+            if (!activePlanIds.has(id)) lastDecisionSignature.delete(id);
+        }
+
         for (const plan of plans) {
             const observation = await buildObservation(plan, {
                 client, policy, now, log,
@@ -129,14 +178,43 @@ function createWorker({
             const decision = decidePlanAction(observation);
             log({ planId: plan.id, symbol: plan.symbol, decision });
 
+            const decisionOutcome = monitorState.mode === 'shadow'
+                ? 'shadow_observed_only'
+                : (decision.action === 'none' ? 'no_action_required' : 'action_pending');
             if (decision.blockEntries) anyBlockEntries = true;
             if (decision.healthCode) { lastHealthCode = decision.healthCode; lastHealthReason = decision.reason; }
+            const decisionSignature = JSON.stringify({
+                action: decision.action, outcome: decisionOutcome, reason: decision.reason || null,
+                healthCode: decision.healthCode || null, blockEntries: Boolean(decision.blockEntries),
+                activateKillSwitch: Boolean(decision.activateKillSwitch),
+            });
+            if (lastDecisionSignature.get(plan.id) !== decisionSignature) {
+                lastDecisionSignature.set(plan.id, decisionSignature);
+                await recordMonitorEvent({
+                    event_key: `monitor:${cycleId}:plan:${plan.id}`, plan_id: plan.id, event_type: 'monitor_decision',
+                    action: decision.action, outcome: decisionOutcome, reason: decision.reason || null,
+                    detail: {
+                        mode: monitorState.mode, cycle_id: cycleId, health_code: decision.healthCode || null,
+                        block_entries: Boolean(decision.blockEntries), activate_kill_switch: Boolean(decision.activateKillSwitch),
+                    }, occurred_at: occurredAt,
+                });
+            }
 
             if (monitorState.mode === 'paper_execute' && decision.action !== 'none') {
                 try {
                     await executeManagementAction(decision, plan, { client, holderId, now: now() });
+                    await recordMonitorEvent({
+                        event_key: `monitor:${cycleId}:plan:${plan.id}:action`, plan_id: plan.id, event_type: 'monitor_action',
+                        action: decision.action, outcome: 'submitted', reason: decision.reason || null,
+                        detail: { cycle_id: cycleId }, occurred_at: occurredAt,
+                    });
                 } catch (error) {
                     log({ planId: plan.id, symbol: plan.symbol, executionError: error.message });
+                    await recordMonitorEvent({
+                        event_key: `monitor:${cycleId}:plan:${plan.id}:action`, plan_id: plan.id, event_type: 'monitor_action',
+                        action: decision.action, outcome: 'failed', reason: error.code || 'execution_failed',
+                        detail: { cycle_id: cycleId, error: error.message }, occurred_at: occurredAt,
+                    });
                 }
             }
             // mode 'shadow': decided and logged, never executed -- Section 10 Stage 2 requires
@@ -144,6 +222,11 @@ function createWorker({
 
             if (decision.activateKillSwitch) {
                 await store.updateMonitorState({ kill_switch: true });
+                await recordMonitorEvent({
+                    event_key: `monitor:${cycleId}:kill_switch:${plan.id}`, plan_id: plan.id, event_type: 'kill_switch',
+                    action: 'activate', outcome: 'activated', reason: decision.reason || 'monitor_anomaly',
+                    detail: { cycle_id: cycleId, symbol: plan.symbol }, occurred_at: occurredAt,
+                });
                 log({ planId: plan.id, killSwitchActivated: true });
                 // Stop processing further plans in *this* tick immediately: the switch exists
                 // to stop subsequent writes, not to be recorded after the fact while the rest

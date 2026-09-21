@@ -4,7 +4,7 @@ import type {
   AlpacaDayTradingSnapshot,
   AlpacaDayTradePlan,
   AlpacaDayTradePlanDetail,
-  AlpacaDayTradeJournalAnalytics,
+  AlpacaDayTradeJournal,
   AlpacaMonitorMode,
 } from '@/types/alpacaDayTrading'
 
@@ -63,7 +63,7 @@ export function useAlpacaDayTradingPlanDetail(id: number | null) {
 }
 
 export function useAlpacaDayTradingJournal() {
-  return useQuery<AlpacaDayTradeJournalAnalytics>({
+  return useQuery<AlpacaDayTradeJournal>({
     queryKey: ['alpaca-day-trading', 'journal'],
     queryFn: () => apiFetch('/api/alpaca-paper/day-trading/journal'),
     staleTime: 30_000,

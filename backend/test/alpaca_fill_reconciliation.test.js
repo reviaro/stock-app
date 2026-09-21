@@ -313,6 +313,10 @@ test('reconcileFills maps a take-profit exit fill to exit_reason take_profit', a
     const closed = await store.getPlan(plan.id);
     assert.strictEqual(closed.exit_reason, 'take_profit');
     assert.strictEqual(closed.realized_pnl, 35);
+    const closure = (await store.listEvents(plan.id)).find((event) => event.event_type === 'closure');
+    assert.ok(closure);
+    assert.match(closure.detail_json, /"realized_pnl":35/);
+    assert.match(closure.detail_json, /"confirmed_flat_qty":0/);
 });
 
 test('reconcileFills does not close the plan while the broker still reports a nonzero position (no premature close)', async () => {
@@ -395,6 +399,7 @@ test('reconcileFills keeps an unresolved fill (unknown order id) on record and d
     ));
     assert.ok(orphan, 'the unlinkable fill must still be recorded, with plan_id null, not dropped');
     assert.strictEqual(orphan.plan_id, null);
+    assert.ok((await store.listEvents()).some((event) => event.event_type === 'anomaly' && event.reason === 'orphan_fill'));
 });
 
 test('reconcileFills stops advancing the cursor at the first activity that fails to normalize, so a re-run can recover it', async () => {
@@ -422,6 +427,7 @@ test('reconcileFills stops advancing the cursor at the first activity that fails
     assert.strictEqual(state.activity_cursor, '2026-09-17T13:31:00Z', 'the cursor must not pass the malformed activity');
     assert.strictEqual(state.health_code, 'RECONCILIATION_STALLED', 'an aborted pass must be observable, not just inferable from a stopped cursor');
     assert.strictEqual(state.last_rest_reconciliation_at, null, 'a stalled pass must not be recorded as a successful reconciliation');
+    assert.ok((await store.listEvents()).some((event) => event.event_type === 'anomaly' && event.reason === 'fill_normalization_failed'));
 
     // A re-run (e.g. after an operator fixes/skips the bad record upstream) must still see
     // fill-good-2, which it would not if the cursor had advanced past it.
@@ -488,7 +494,9 @@ test('an overfilled plan is moved to error and does not stall reconciliation for
 
     const rereadBad = await store.getPlan(badPlan.id);
     assert.strictEqual(rereadBad.state, 'error');
-    assert.match(rereadBad.review_notes, /exceed the planned quantity/i);
+    assert.strictEqual(rereadBad.review_notes, null, 'machine anomalies must not overwrite human review notes');
+    const badEvents = await store.listEvents(badPlan.id);
+    assert.ok(badEvents.some((event) => event.event_type === 'anomaly' && /exceed the planned quantity/i.test(event.detail_json)));
 
     const rereadGood = await store.getPlan(goodPlan.id);
     assert.strictEqual(rereadGood.state, 'closed', 'the good plan must still close despite the other plan\'s corruption');

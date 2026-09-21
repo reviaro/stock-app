@@ -1,5 +1,8 @@
+import { useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
 import { useAlpacaDayTradingJournal } from '@/hooks/useAlpacaDayTrading'
+import type { AlpacaDayTradeJournalEvent } from '@/types/alpacaDayTrading'
 
 function money(value: number | null) {
   return value == null ? '—' : value.toLocaleString('en-US', { style: 'currency', currency: 'USD' })
@@ -13,8 +16,81 @@ function rMultiple(value: number | null) {
   return value == null ? '—' : `${value.toFixed(2)}R`
 }
 
+const OUTCOME_BAD = new Set(['rejected', 'failed', 'stalled', 'unresolved', 'refused'])
+const OUTCOME_GOOD = new Set(['cleared', 'closed', 'acknowledged', 'activated'])
+
+function eventBadgeVariant(event: AlpacaDayTradeJournalEvent): 'default' | 'secondary' | 'destructive' | 'outline' {
+  if (event.eventType === 'anomaly' || (event.eventType === 'kill_switch' && event.action === 'activate')) return 'destructive'
+  if (event.outcome && OUTCOME_BAD.has(event.outcome)) return 'destructive'
+  if (event.outcome && OUTCOME_GOOD.has(event.outcome)) return 'default'
+  return 'secondary'
+}
+
+function eventSymbol(event: AlpacaDayTradeJournalEvent): string | null {
+  const symbol = (event.detail as { symbol?: unknown } | null)?.symbol
+  return typeof symbol === 'string' ? symbol : null
+}
+
+type JournalSourceFilter = 'all' | 'semantic' | 'order_audit' | 'fill'
+
+const SOURCE_FILTER_LABELS: Record<JournalSourceFilter, string> = {
+  all: 'All events',
+  semantic: 'Decisions & reviews',
+  order_audit: 'Orders',
+  fill: 'Fills',
+}
+
+// Newest first, like a log -- the backend returns events in chronological (ascending) order
+// because that's also what a plan's own fill/order history needs, but an operator scanning
+// this card wants to see what just happened without scrolling past the whole day first.
+function JournalTimeline({ events }: { events: AlpacaDayTradeJournalEvent[] }) {
+  const [sourceFilter, setSourceFilter] = useState<JournalSourceFilter>('all')
+  const filtered = sourceFilter === 'all' ? events : events.filter((event) => event.source === sourceFilter)
+  const mostRecentFirst = [...filtered].reverse()
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between">
+        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Timeline</p>
+        <select
+          aria-label="Filter timeline by event source"
+          className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+          value={sourceFilter}
+          onChange={(event) => setSourceFilter(event.target.value as JournalSourceFilter)}
+        >
+          {(Object.keys(SOURCE_FILTER_LABELS) as JournalSourceFilter[]).map((key) => (
+            <option key={key} value={key}>{SOURCE_FILTER_LABELS[key]}</option>
+          ))}
+        </select>
+      </div>
+      {mostRecentFirst.length === 0 ? (
+        <p className="text-xs text-muted-foreground">No journal events recorded yet.</p>
+      ) : (
+        <ol className="max-h-96 space-y-1.5 overflow-y-auto text-xs">
+          {mostRecentFirst.map((event, index) => {
+            const symbol = eventSymbol(event)
+            return (
+              <li key={event.eventKey ?? `${event.source}-${event.occurredAt}-${index}`} className="rounded-md border border-border/70 bg-background/60 p-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-muted-foreground">{new Date(event.occurredAt).toLocaleString()}</span>
+                  <Badge variant={eventBadgeVariant(event)}>{event.eventType}</Badge>
+                  {symbol && <span className="font-medium">{symbol}</span>}
+                  {event.action && <span className="text-muted-foreground">{event.action}</span>}
+                  {event.outcome && <span className="font-medium">{event.outcome}</span>}
+                </div>
+                {event.reason && <p className="mt-1 text-muted-foreground">{event.reason}</p>}
+              </li>
+            )
+          })}
+        </ol>
+      )}
+    </div>
+  )
+}
+
 export function DayTradingJournalCard() {
-  const { data: analytics, isLoading, isError } = useAlpacaDayTradingJournal()
+  const { data: journal, isLoading, isError } = useAlpacaDayTradingJournal()
+  const analytics = journal?.analytics
 
   return (
     <Card aria-label="Alpaca Day Trading journal analytics">
@@ -56,6 +132,7 @@ export function DayTradingJournalCard() {
                 </div>
               )}
             </div>
+            <JournalTimeline events={journal?.events ?? []} />
           </>
         )}
       </CardContent>

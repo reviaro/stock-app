@@ -23,6 +23,27 @@ function dayTradingGateOpen(req) {
         && req.get('X-Alpaca-Day-Trading-Token') === token;
 }
 
+function requireDayTradingScope(req, res) {
+    if (!dayTradingGateOpen(req)) {
+        res.status(403).json({ status: 'error', code: 'ALPACA_DAY_TRADING_ENTRY_DISABLED', error: 'Day Trading entry submission is disabled' });
+        return false;
+    }
+    if (Number(req.body?.account_id) !== 2) {
+        res.status(400).json({ status: 'error', code: 'ALPACA_ACCOUNT_SCOPE_REQUIRED', error: 'account_id 2 is required for Day Trading strategy requests' });
+        return false;
+    }
+    return true;
+}
+
+async function recordKillSwitchClear(outcome, reason, plan = null) {
+    const occurredAt = new Date().toISOString();
+    await store.appendEvent({
+        event_key: `kill_switch:clear:${occurredAt}:${plan?.id || 'account'}`, plan_id: plan?.id || null,
+        event_type: 'kill_switch', action: 'clear', outcome, reason,
+        detail: { symbol: plan?.symbol || null }, occurred_at: occurredAt,
+    });
+}
+
 // Invariant #16 (private identifiers): the response carries only the generic phrase and the
 // error code, never the underlying Error#message — Task 7's policy messages embed computed
 // account figures (e.g. "position value would be 30.15% of equity"), which is account state a
@@ -72,6 +93,18 @@ function respondWithError(res, err) {
     return res.status(status).json({ status: 'error', code: err.code || 'ALPACA_DAY_TRADING_ERROR', error: message });
 }
 
+async function recordEntryRouteRejection(clientOrderId, code, intent = {}) {
+    if (!clientOrderId) return;
+    const eventKey = `entry:${clientOrderId}:route_rejection:${code}`;
+    const existing = await store.getEventByKey(eventKey);
+    await store.appendEvent({
+        event_key: eventKey, plan_id: null, event_type: 'entry_rejection', action: 'submit_entry',
+        outcome: 'rejected', reason: code,
+        detail: { symbol: String(intent.symbol || '').toUpperCase() || null, qty: intent.qty == null ? null : Number(intent.qty) },
+        occurred_at: existing?.occurred_at || new Date().toISOString(),
+    });
+}
+
 router.post('/entries', async (req, res) => {
     if (!dayTradingGateOpen(req)) {
         return res.status(403).json({ status: 'error', code: 'ALPACA_DAY_TRADING_ENTRY_DISABLED', error: 'Day Trading entry submission is disabled' });
@@ -100,6 +133,7 @@ router.post('/entries', async (req, res) => {
         // is what starts *new* ones, and previously never consulted it at all. Checked before
         // any broker call, same fail-closed placement as the other pre-network gates.
         if (monitorState?.kill_switch) {
+            await recordEntryRouteRejection(clientOrderId, 'ALPACA_KILL_SWITCH_ACTIVE', intent);
             return res.status(403).json({ status: 'error', code: 'ALPACA_KILL_SWITCH_ACTIVE', error: 'the Day Trading kill switch is active; new entries are refused until it is cleared' });
         }
         // block_entries/staleness only mean anything once an entry could otherwise succeed at
@@ -108,6 +142,7 @@ router.post('/entries', async (req, res) => {
         // confusing second reason for the same refusal.
         if (monitorState?.mode === 'paper_execute') {
             if (monitorState.block_entries) {
+                await recordEntryRouteRejection(clientOrderId, 'ALPACA_ENTRIES_BLOCKED', intent);
                 return res.status(403).json({ status: 'error', code: 'ALPACA_ENTRIES_BLOCKED', error: 'a Day Trading plan currently requires attention; new entries are refused until it is resolved' });
             }
             // block_entries is only trustworthy while the worker is actually ticking -- a
@@ -126,6 +161,7 @@ router.post('/entries', async (req, res) => {
             const lastTick = monitorState.last_rest_reconciliation_at;
             const tickAgeMs = lastTick ? Date.now() - new Date(lastTick).getTime() : Infinity;
             if (!(tickAgeMs <= DEFAULT_MONITOR_POLICY.staleReconciliationMs)) {
+                await recordEntryRouteRejection(clientOrderId, 'ALPACA_MONITOR_STALE', intent);
                 return res.status(403).json({ status: 'error', code: 'ALPACA_MONITOR_STALE', error: 'the Day Trading monitor has not confirmed account state recently enough to trust; new entries are refused' });
             }
         }
@@ -149,6 +185,30 @@ router.post('/entries', async (req, res) => {
             },
         });
     } catch (err) {
+        await recordEntryRouteRejection(clientOrderId, err.code || 'ALPACA_DAY_TRADING_ERROR', intent);
+        return respondWithError(res, err);
+    }
+});
+
+router.post('/decisions', async (req, res) => {
+    if (!requireDayTradingScope(req, res)) return;
+    const decisionKey = String(req.body?.decision_key || '').trim();
+    const reason = String(req.body?.reason || '').trim();
+    if (!decisionKey || !reason) {
+        return res.status(400).json({ status: 'error', code: 'ALPACA_DECISION_INVALID', error: 'decision_key and reason are required' });
+    }
+    try {
+        const eventKey = `decision:${decisionKey}`;
+        const existing = await store.getEventByKey(eventKey);
+        const result = await store.appendEvent({
+            event_key: eventKey, plan_id: null, event_type: 'strategy_decision', action: 'no_trade', outcome: 'skipped', reason,
+            detail: req.body?.details || {}, occurred_at: existing?.occurred_at || req.body?.occurred_at || new Date().toISOString(),
+        });
+        return res.status(result.inserted ? 201 : 200).json({ status: 'success', data: { decisionKey, recorded: result.inserted, replayed: !result.inserted } });
+    } catch (err) {
+        if (err.code === 'ALPACA_EVENT_KEY_CONFLICT') {
+            return res.status(409).json({ status: 'error', code: err.code, error: 'this decision key was already used for different decision data' });
+        }
         return respondWithError(res, err);
     }
 });
@@ -169,8 +229,15 @@ router.post('/mode', async (req, res) => {
         return res.status(400).json({ status: 'error', code: 'ALPACA_CONFIRMATION_REQUIRED', error: 'explicit confirmation is required to change the Day Trading monitor mode' });
     }
     try {
+        const previous = await store.getMonitorState();
         await store.updateMonitorState({ mode });
         const state = await store.getMonitorState();
+        const occurredAt = new Date().toISOString();
+        await store.appendEvent({
+            event_key: `mode:${occurredAt}:${previous?.mode || 'unknown'}:${mode}`, plan_id: null,
+            event_type: 'mode_change', action: 'set_mode', outcome: mode, reason: 'operator_confirmed',
+            detail: { from: previous?.mode ?? null, to: mode }, occurred_at: occurredAt,
+        });
         return res.json({ status: 'success', data: { mode: state.mode, killSwitch: Boolean(state.kill_switch) } });
     } catch (err) {
         return respondWithError(res, err);
@@ -244,15 +311,18 @@ router.post('/kill-switch/clear', async (req, res) => {
         for (const plan of plans) {
             const observation = await buildObservation(plan, { client, policy: DEFAULT_MONITOR_POLICY, now: () => new Date() });
             if (observation.brokerUnavailable) {
+                await recordKillSwitchClear('refused', 'broker_unavailable', plan);
                 return res.status(503).json({ status: 'error', code: 'ALPACA_ACCOUNT_STATE_UNVERIFIABLE', error: 'the broker could not be reached to verify the account is safe; the kill switch was not cleared' });
             }
             const decision = decidePlanAction(observation);
             if (decision.action !== 'none') {
+                await recordKillSwitchClear('refused', decision.reason || 'account_not_safe', plan);
                 return res.status(409).json({ status: 'error', code: 'ALPACA_ACCOUNT_NOT_CONFIRMED_SAFE', error: 'the account is not confirmed flat or fully covered; the kill switch was not cleared' });
             }
         }
 
         await store.updateMonitorState({ kill_switch: false });
+        await recordKillSwitchClear('cleared', 'account_confirmed_safe');
         return res.json({ status: 'success', data: { killSwitch: false } });
     } catch (err) {
         return respondWithError(res, err);
@@ -475,10 +545,50 @@ router.get('/plans/:id', async (req, res) => {
     }
 });
 
+router.post('/plans/:id/review', async (req, res) => {
+    if (!requireDayTradingScope(req, res)) return;
+    try {
+        const plan = await store.getPlan(req.params.id);
+        if (!plan) return res.status(404).json({ status: 'error', code: 'ALPACA_PLAN_NOT_FOUND', error: 'no Day Trading plan exists with this id' });
+        const result = await store.reviewPlan(plan.id, {
+            revision_key: req.body?.revision_key, thesis_valid: req.body?.thesis_valid,
+            mfe: req.body?.mfe, mae: req.body?.mae, review_notes: req.body?.review_notes, occurred_at: req.body?.occurred_at,
+        });
+        return res.status(result.inserted ? 201 : 200).json({ status: 'success', data: { planId: plan.id, recorded: result.inserted, replayed: !result.inserted } });
+    } catch (err) {
+        if (err.code === 'ALPACA_EVENT_KEY_CONFLICT') return res.status(409).json({ status: 'error', code: err.code, error: 'this review revision was already used for different review data' });
+        if (/invalid Alpaca Day Trading review/.test(err.message)) return res.status(400).json({ status: 'error', code: 'ALPACA_REVIEW_INVALID', error: 'a revision key, thesis validity, and valid review metrics are required' });
+        return respondWithError(res, err);
+    }
+});
+
 router.get('/journal', async (_req, res) => {
     try {
-        const plans = await store.listPlans(null);
-        return res.json({ status: 'success', data: computeDayTradeJournalAnalytics(plans) });
+        const [plans, semanticEvents, orderAudits] = await Promise.all([
+            store.listPlans(null), store.listEvents(), store.listOrderAudits(),
+        ]);
+        const fills = (await Promise.all(plans.map((plan) => store.listFillsForPlan(plan.id)))).flat();
+        const events = [
+            ...semanticEvents.map((event) => ({
+                source: 'semantic', eventKey: event.event_key, planId: event.plan_id, eventType: event.event_type,
+                action: event.action, outcome: event.outcome, reason: event.reason,
+                detail: JSON.parse(event.detail_json || '{}'), occurredAt: event.occurred_at,
+            })),
+            ...orderAudits.filter((audit) => audit.execution_epoch === 'day_trading').map((audit) => ({
+                source: 'order_audit', planId: audit.plan_id, eventType: 'order', action: audit.leg_role,
+                outcome: audit.status, reason: null,
+                detail: { symbol: audit.symbol, side: audit.side, qty: audit.qty, orderType: audit.order_type, legRole: audit.leg_role },
+                occurredAt: audit.created_at,
+            })),
+            ...fills.map((fill) => ({
+                source: 'fill', planId: fill.plan_id, eventType: 'fill', action: fill.side, outcome: fill.fill_type, reason: null,
+                detail: { symbol: fill.symbol, side: fill.side, qty: fill.qty, price: fill.price, source: fill.source, isBust: Boolean(fill.is_bust) },
+                occurredAt: fill.executed_at,
+            })),
+        ].sort((a, b) => String(a.occurredAt).localeCompare(String(b.occurredAt)));
+        return res.json({ status: 'success', data: {
+            analytics: computeDayTradeJournalAnalytics(plans), trades: plans.map(sanitizePlan), events,
+        } });
     } catch (err) {
         return respondWithError(res, err);
     }
