@@ -67,7 +67,11 @@ vi.mock('@/hooks/useAlpacaDayTrading', () => ({
   useAlpacaDayTradingPlans: () => ({ data: [], isLoading: false, isError: false }),
   useAlpacaDayTradingPlanDetail: () => ({ data: undefined, isLoading: false, isError: false }),
   useAlpacaDayTradingJournal: () => ({
-    data: { closed_trade_count: 0, win_rate_pct: null, expectancy: null, profit_factor: null, average_r: null, total_pnl: 0, by_setup: {} },
+    data: {
+      analytics: { closed_trade_count: 0, win_rate_pct: null, expectancy: null, profit_factor: null, average_r: null, total_pnl: 0, by_setup: {} },
+      trades: [],
+      events: [],
+    },
     isLoading: false,
     isError: false,
   }),

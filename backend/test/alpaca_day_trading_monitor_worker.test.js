@@ -130,10 +130,23 @@ test('a tick resolves and persists the current NYSE session date from the real t
         }
         assert.strictEqual(state.session_date, '2026-09-17');
         assert.ok(calendarCalls >= 1);
+        let noActiveEvents = (await store.listEvents()).filter((event) => event.event_type === 'monitor_decision' && event.outcome === 'no_active_plans');
+        const eventDeadline = Date.now() + 10_000;
+        while (noActiveEvents.length === 0 && Date.now() < eventDeadline) {
+            await new Promise((resolve) => { setTimeout(resolve, 20); });
+            noActiveEvents = (await store.listEvents()).filter((event) => event.event_type === 'monitor_decision' && event.outcome === 'no_active_plans');
+        }
+        assert.ok(noActiveEvents.length >= 1);
 
         const callsAfterFirstTick = calendarCalls;
         await new Promise((resolve) => { setTimeout(resolve, 60); });
         assert.strictEqual(calendarCalls, callsAfterFirstTick, 'the calendar is cached across ticks, not refetched every 20ms poll');
+
+        // Regression: staying idle for several more ticks must not add more no_active_plans
+        // rows -- it's a heartbeat on the transition into idle, not a per-tick liveness ping in
+        // a table that can never be pruned.
+        const noActiveEventsAfterMoreTicks = (await store.listEvents()).filter((event) => event.event_type === 'monitor_decision' && event.outcome === 'no_active_plans');
+        assert.strictEqual(noActiveEventsAfterMoreTicks.length, noActiveEvents.length, 'staying idle must not add another no_active_plans row per tick');
     } finally {
         await worker.stop();
         if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
@@ -453,8 +466,23 @@ test('shadow mode decides actions but never submits or cancels a broker order', 
     const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
     try {
         await worker.start();
-        await new Promise((resolve) => { setTimeout(resolve, 100); });
+        const deadline = Date.now() + 10_000;
+        let decisions = [];
+        while (decisions.length === 0 && Date.now() < deadline) {
+            await new Promise((resolve) => { setTimeout(resolve, 20); });
+            decisions = (await store.listEvents(plan.id)).filter((event) => event.event_type === 'monitor_decision');
+        }
         assert.strictEqual(submitCalls, 0, 'shadow mode must never actually submit an order');
+        assert.ok(decisions.length >= 1, 'each durable cycle records its decision');
+        assert.strictEqual(new Set(decisions.map((event) => event.event_key)).size, decisions.length, 'cycle keys prevent duplicate spam');
+        assert.ok(decisions.every((event) => event.outcome === 'shadow_observed_only'));
+
+        // Regression: the fixture's decision never changes tick over tick (position and order
+        // state are both static), so several more ticks passing must not add more rows -- an
+        // unchanged observation is noise in a table that can never be pruned, not history.
+        await new Promise((resolve) => { setTimeout(resolve, 200); }); // ~10 more ticks at 20ms
+        const decisionsAfterMoreTicks = (await store.listEvents(plan.id)).filter((event) => event.event_type === 'monitor_decision');
+        assert.strictEqual(decisionsAfterMoreTicks.length, decisions.length, 'an unchanged decision must be journaled once, not every tick');
     } finally {
         await worker.stop();
         if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
@@ -572,9 +600,94 @@ test('once one plan trips the kill switch mid-tick, a later plan in the same tic
         assert.strictEqual(submitted.length, 1, 'the plan after the kill-switch trip must not also be executed in the same tick');
         assert.strictEqual(submitted[0].client_order_id.startsWith('dt-cover-'), true);
 
-        const state = await store.getMonitorState();
+        let state = await store.getMonitorState();
+        const stateDeadline = Date.now() + 10_000;
+        while (!state.kill_switch && Date.now() < stateDeadline) {
+            await new Promise((resolve) => { setTimeout(resolve, 20); });
+            state = await store.getMonitorState();
+        }
         assert.strictEqual(state.kill_switch, 1); // SQLite stores this as an integer, not a JS boolean
     } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+// Regression for a real bug: a semantic-event append is an audit row, not a lease. Gating the
+// decide/execute loop on its insert-or-ignore outcome (or letting a rejection from it escape
+// the per-plan loop) previously meant a repeated event_key -- most realistically produced by a
+// reconciliation stall pinning the cycle id across ticks -- could silently freeze the *rest of
+// the tick*: a later plan's own repair action, and even a pending kill-switch activation, along
+// with the terminal block_entries write that lets it self-heal. None of that may depend on
+// whether the plan's own decision event happened to write successfully.
+test('a semantic-event append failure for one plan does not suppress a later plan\'s management action or the terminal block_entries write', async () => {
+    const lockPath = tempLockPath();
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: TEST_NOW().toISOString() });
+    // listPlans orders by id DESC, so the plan created *second* (BBB) is processed *first*.
+    const planA = await seedPlan('AAA', 'dt-aaa-append-fail');
+    const planB = await seedPlan('BBB', 'dt-bbb-append-fail');
+
+    const submittedSymbols = [];
+    // Once a plan's repair order is submitted its legs become "discovered" -- like a real
+    // attach succeeding -- so the loop converges in one tick instead of resubmitting forever,
+    // which would otherwise hammer the db at the 20ms poll interval for the length of this test.
+    const coveredOrderIds = new Set();
+    const client = fakeClient({
+        getPosition: async () => ({ qty: 10, side: 'long' }), // uncovered -> attach_protective_oco for both, no kill switch
+        getOrder: async (id) => ({
+            id, status: 'filled', qty: 10, filled_qty: 10,
+            legs: coveredOrderIds.has(id)
+                ? [{ id: `${id}-stop`, type: 'stop', side: 'sell', qty: 10, filled_qty: 0, status: 'held' },
+                    { id: `${id}-target`, type: 'limit', side: 'sell', qty: 10, filled_qty: 0, status: 'held' }]
+                : null,
+        }),
+        submitOrder: async (order) => {
+            submittedSymbols.push(order.symbol);
+            coveredOrderIds.add(`broker-parent-${order.symbol}`);
+            return { id: `x-${order.symbol}`, status: 'accepted' };
+        },
+    });
+
+    const originalAppendEvent = store.appendEvent;
+    let injected = false;
+    // Simulates the real conflict shape (same event_key, diverged payload) landing on
+    // whichever plan the loop reaches first (BBB), without touching any other append.
+    store.appendEvent = (event) => {
+        if (!injected && event.event_type === 'monitor_decision' && event.plan_id === planB.id) {
+            injected = true;
+            return Promise.reject(Object.assign(new Error('simulated event key payload conflict'), { code: 'ALPACA_EVENT_KEY_CONFLICT' }));
+        }
+        return originalAppendEvent(event);
+    };
+
+    // A slower poll interval than this file's usual 20ms -- two plans both perpetually needing
+    // repair until the assertions below patch them covered means every tick writes several
+    // events for both, and this test doesn't need tick-tight timing to prove its point.
+    const worker = createWorker({ client, lockPath, pollIntervalMs: 50, idlePollIntervalMs: 50, now: TEST_NOW });
+    try {
+        await worker.start();
+        const submitDeadline = Date.now() + 5_000;
+        while (!(submittedSymbols.includes('AAA') && submittedSymbols.includes('BBB')) && Date.now() < submitDeadline) {
+            await new Promise((resolve) => { setTimeout(resolve, 50); });
+        }
+        assert.ok(injected, 'the injected failure must actually have fired for this assertion to mean anything');
+        assert.ok(submittedSymbols.includes('BBB'), 'the plan whose own decision-event append failed must still have its action executed');
+        assert.ok(submittedSymbols.includes('AAA'), 'a later plan in the same tick must still be managed after an earlier plan\'s decision-event append failed');
+        // Also directly persist discovery (the same two fields the real discoverProtectiveLegs
+        // path writes), same as the block_entries self-heal test above -- buildObservation reads
+        // these columns, not just the live getOrder legs, to decide a plan is covered.
+        await db.updateAlpacaDayTradePlan(planA.id, { protective_stop_broker_order_id: 'stop-aaa', protective_target_broker_order_id: 'target-aaa' });
+        await db.updateAlpacaDayTradePlan(planB.id, { protective_stop_broker_order_id: 'stop-bbb', protective_target_broker_order_id: 'target-bbb' });
+
+        let state = await store.getMonitorState();
+        const healDeadline = Date.now() + 5_000;
+        while (state.block_entries !== 0 && Date.now() < healDeadline) {
+            await new Promise((resolve) => { setTimeout(resolve, 50); });
+            state = await store.getMonitorState();
+        }
+        assert.strictEqual(state.block_entries, 0, 'the terminal block_entries write must still self-heal after a mid-tick decision-event append failure');
+    } finally {
+        store.appendEvent = originalAppendEvent;
         await worker.stop();
         if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
     }

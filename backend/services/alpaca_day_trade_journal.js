@@ -34,9 +34,12 @@ function computeRealizedOutcome(plan, summary) {
 // time_exit/repair_exit/emergency_flatten orders don't exist yet (Task 11/13 build the code
 // paths that create them) — any sell fill not matched to a recorded protective leg is presumed
 // manual (e.g. an operator sold directly through Alpaca's own UI) until those exist.
-function exitReasonForBrokerOrderId(plan, brokerOrderId) {
+function exitReasonForBrokerOrderId(plan, brokerOrderId, orderAudits = []) {
     if (brokerOrderId && brokerOrderId === plan.protective_stop_broker_order_id) return 'stop_loss';
     if (brokerOrderId && brokerOrderId === plan.protective_target_broker_order_id) return 'take_profit';
+    const audit = orderAudits.find((row) => row.broker_order_id === brokerOrderId
+        && Number(row.plan_id) === Number(plan.id) && row.execution_epoch === 'day_trading');
+    if (audit && ['time_exit', 'repair_exit', 'emergency_flatten'].includes(audit.leg_role)) return audit.leg_role;
     return 'manual';
 }
 
@@ -65,10 +68,12 @@ async function attemptCloseFromFills(plan, { client }) {
     if (remainingQty !== 0) return null;
 
     const exitFill = latestExitFill(fills);
-    const exitReason = exitReasonForBrokerOrderId(plan, exitFill?.broker_order_id);
+    const orderAudits = await store.listOrderAudits();
+    const exitReason = exitReasonForBrokerOrderId(plan, exitFill?.broker_order_id, orderAudits);
     const { realizedPnl, realizedR } = computeRealizedOutcome(plan, summary);
+    const closedAt = new Date().toISOString();
 
-    return store.updatePlan(plan.id, {
+    await store.updatePlan(plan.id, {
         state: 'closed',
         exit_reason: exitReason,
         realized_pnl: realizedPnl,
@@ -77,8 +82,18 @@ async function attemptCloseFromFills(plan, { client }) {
         avg_entry_price: summary.entry.avgPrice,
         filled_exit_qty: summary.exit.qty,
         avg_exit_price: summary.exit.avgPrice,
-        closed_at: new Date().toISOString(),
+        closed_at: closedAt,
     });
+    await store.appendEvent({
+        event_key: `closure:${plan.id}:${exitFill?.activity_id || closedAt}`, plan_id: plan.id,
+        event_type: 'closure', action: exitReason, outcome: 'closed', reason: 'broker_flat_verified',
+        detail: {
+            symbol: plan.symbol, exit_reason: exitReason, realized_pnl: realizedPnl, realized_r: realizedR,
+            filled_entry_qty: summary.entry.qty, avg_entry_price: summary.entry.avgPrice,
+            filled_exit_qty: summary.exit.qty, avg_exit_price: summary.exit.avgPrice, confirmed_flat_qty: 0,
+        }, occurred_at: closedAt,
+    });
+    return store.getPlan(plan.id);
 }
 
 // computeJournalAnalytics (trade_journal.js) only ever reads row.status/realized_pnl/

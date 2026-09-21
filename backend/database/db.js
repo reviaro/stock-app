@@ -440,6 +440,31 @@ function initDb() {
             db.run('CREATE INDEX IF NOT EXISTS idx_alpaca_paper_fills_plan ON alpaca_paper_fills(plan_id, executed_at)');
             db.run('CREATE INDEX IF NOT EXISTS idx_alpaca_paper_fills_order ON alpaca_paper_fills(broker_order_id)');
 
+            db.run(`
+                CREATE TABLE IF NOT EXISTS alpaca_day_trade_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_key TEXT NOT NULL UNIQUE,
+                    plan_id INTEGER,
+                    event_type TEXT NOT NULL,
+                    action TEXT,
+                    outcome TEXT,
+                    reason TEXT,
+                    detail_json TEXT NOT NULL DEFAULT '{}',
+                    occurred_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    FOREIGN KEY(plan_id) REFERENCES alpaca_day_trade_plans(id)
+                )
+            `);
+            db.run('CREATE INDEX IF NOT EXISTS idx_alpaca_day_trade_events_timeline ON alpaca_day_trade_events(occurred_at, id)');
+            db.run(`CREATE TRIGGER IF NOT EXISTS alpaca_day_trade_events_no_update
+                BEFORE UPDATE ON alpaca_day_trade_events BEGIN
+                    SELECT RAISE(ABORT, 'alpaca_day_trade_events is immutable');
+                END`);
+            db.run(`CREATE TRIGGER IF NOT EXISTS alpaca_day_trade_events_no_delete
+                BEFORE DELETE ON alpaca_day_trade_events BEGIN
+                    SELECT RAISE(ABORT, 'alpaca_day_trade_events is immutable');
+                END`);
+
             // Singleton row: exactly one Day Trading monitor process is ever active (Task 13's
             // single-instance lock), so its runtime state needs no additional key.
             db.run(`
@@ -2304,14 +2329,150 @@ function createAlpacaPaperFill(fill) {
                 normalized.side, normalized.qty, normalized.price, normalized.executed_at, normalized.fill_type,
                 normalized.correction_of, normalized.is_bust, normalized.source,
             ],
-            (err) => {
+            function(err) {
                 if (err) { sqlite.close(); return reject(err); }
+                const inserted = this.changes === 1;
                 sqlite.get('SELECT * FROM alpaca_paper_fills WHERE activity_id = ?', [normalized.activity_id], (getErr, row) => {
                     sqlite.close();
-                    getErr ? reject(getErr) : resolve(row);
+                    getErr ? reject(getErr) : resolve({ ...row, inserted });
                 });
             },
         );
+    });
+}
+
+const ALPACA_EVENT_PRIVATE_KEYS = new Set([
+    'token', 'api_key', 'api_secret', 'account_id', 'broker_order_id', 'client_order_id',
+    'broker_payload', 'raw_payload', 'request_payload', 'idempotency_key',
+]);
+
+function sanitizeAlpacaEventDetail(value) {
+    if (Array.isArray(value)) return value.map(sanitizeAlpacaEventDetail);
+    if (!value || typeof value !== 'object') return value;
+    return Object.keys(value).sort().reduce((result, key) => {
+        if (!ALPACA_EVENT_PRIVATE_KEYS.has(key.toLowerCase())) result[key] = sanitizeAlpacaEventDetail(value[key]);
+        return result;
+    }, {});
+}
+
+function normalizeAlpacaDayTradeEvent(event) {
+    const normalized = {
+        event_key: String(event.event_key || '').trim(),
+        plan_id: event.plan_id == null ? null : Number(event.plan_id),
+        event_type: String(event.event_type || '').trim(),
+        action: event.action == null ? null : String(event.action).trim() || null,
+        outcome: event.outcome == null ? null : String(event.outcome).trim() || null,
+        reason: event.reason == null ? null : String(event.reason).trim() || null,
+        detail_json: JSON.stringify(sanitizeAlpacaEventDetail(event.detail || {})),
+        occurred_at: String(event.occurred_at || new Date().toISOString()).trim(),
+    };
+    if (!normalized.event_key || !normalized.event_type || !normalized.occurred_at
+        || (normalized.plan_id != null && (!Number.isInteger(normalized.plan_id) || normalized.plan_id <= 0))) {
+        throw new Error('invalid Alpaca Day Trading event');
+    }
+    return normalized;
+}
+
+function sameAlpacaEventPayload(row, event) {
+    return row.plan_id === event.plan_id && row.event_type === event.event_type
+        && row.action === event.action && row.outcome === event.outcome && row.reason === event.reason
+        && row.detail_json === event.detail_json && row.occurred_at === event.occurred_at;
+}
+
+function insertAlpacaDayTradeEventRow(sqlite, normalized, callback) {
+    sqlite.run(
+        `INSERT OR IGNORE INTO alpaca_day_trade_events
+         (event_key, plan_id, event_type, action, outcome, reason, detail_json, occurred_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [normalized.event_key, normalized.plan_id, normalized.event_type, normalized.action, normalized.outcome,
+            normalized.reason, normalized.detail_json, normalized.occurred_at],
+        function(err) {
+            if (err) return callback(err);
+            const inserted = this.changes === 1;
+            sqlite.get('SELECT * FROM alpaca_day_trade_events WHERE event_key = ?', [normalized.event_key], (getErr, row) => {
+                if (getErr) return callback(getErr);
+                if (!inserted && !sameAlpacaEventPayload(row, normalized)) {
+                    return callback(Object.assign(new Error('Alpaca Day Trading event key payload conflict'), { code: 'ALPACA_EVENT_KEY_CONFLICT' }));
+                }
+                callback(null, { inserted, event: row });
+            });
+        },
+    );
+}
+
+function appendAlpacaDayTradeEvent(event) {
+    let normalized;
+    try { normalized = normalizeAlpacaDayTradeEvent(event); } catch (error) { return Promise.reject(error); }
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        insertAlpacaDayTradeEventRow(sqlite, normalized, (err, result) => {
+            sqlite.close();
+            err ? reject(err) : resolve(result);
+        });
+    });
+}
+
+function listAlpacaDayTradeEvents(planId = null) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        const where = planId == null ? '' : 'WHERE plan_id = ?';
+        const params = planId == null ? [] : [Number(planId)];
+        sqlite.all(`SELECT * FROM alpaca_day_trade_events ${where} ORDER BY occurred_at ASC, id ASC`, params, (err, rows) => {
+            sqlite.close();
+            err ? reject(err) : resolve(rows || []);
+        });
+    });
+}
+
+function getAlpacaDayTradeEventByKey(eventKey) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.get('SELECT * FROM alpaca_day_trade_events WHERE event_key = ?', [String(eventKey || '')], (err, row) => {
+            sqlite.close();
+            err ? reject(err) : resolve(row || null);
+        });
+    });
+}
+
+function reviewAlpacaDayTradePlan(id, review) {
+    const revisionKey = String(review.revision_key || '').trim();
+    if (!revisionKey || typeof review.thesis_valid !== 'boolean'
+        || (review.mfe != null && !Number.isFinite(Number(review.mfe)))
+        || (review.mae != null && !Number.isFinite(Number(review.mae)))) {
+        return Promise.reject(new Error('invalid Alpaca Day Trading review'));
+    }
+    const eventKey = `review:${Number(id)}:${revisionKey}`;
+    const detail = {
+        thesis_valid: review.thesis_valid, mfe: review.mfe ?? null, mae: review.mae ?? null,
+        review_notes: String(review.review_notes || '').trim() || null, revision_key: revisionKey,
+    };
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run('BEGIN IMMEDIATE', (beginErr) => {
+            if (beginErr) { sqlite.close(); return reject(beginErr); }
+            sqlite.get('SELECT occurred_at FROM alpaca_day_trade_events WHERE event_key = ?', [eventKey], (lookupErr, existing) => {
+                if (lookupErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(lookupErr); });
+                const normalized = normalizeAlpacaDayTradeEvent({
+                    event_key: eventKey, plan_id: Number(id), event_type: 'review', action: 'review', outcome: 'recorded',
+                    detail, occurred_at: existing?.occurred_at || review.occurred_at || new Date().toISOString(),
+                });
+                insertAlpacaDayTradeEventRow(sqlite, normalized, (eventErr, result) => {
+                    if (eventErr) return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(eventErr); });
+                    if (!result.inserted) return sqlite.run('COMMIT', (commitErr) => { sqlite.close(); commitErr ? reject(commitErr) : resolve(result); });
+                    sqlite.run(
+                        'UPDATE alpaca_day_trade_plans SET thesis_valid = ?, mfe = ?, mae = ?, review_notes = ? WHERE id = ?',
+                        [review.thesis_valid ? 1 : 0, review.mfe ?? null, review.mae ?? null, String(review.review_notes || '').trim() || null, Number(id)],
+                        function(updateErr) {
+                            if (updateErr || this.changes !== 1) {
+                                const error = updateErr || new Error('Alpaca Day Trading plan not found');
+                                return sqlite.run('ROLLBACK', () => { sqlite.close(); reject(error); });
+                            }
+                            sqlite.run('COMMIT', (commitErr) => { sqlite.close(); commitErr ? reject(commitErr) : resolve(result); });
+                        },
+                    );
+                });
+            });
+        });
     });
 }
 
@@ -2601,6 +2762,10 @@ module.exports = {
     updateAlpacaDayTradePlan,
     createAlpacaPaperFill,
     listAlpacaPaperFillsForPlan,
+    appendAlpacaDayTradeEvent,
+    listAlpacaDayTradeEvents,
+    getAlpacaDayTradeEventByKey,
+    reviewAlpacaDayTradePlan,
     getAlpacaMonitorState,
     updateAlpacaMonitorState,
     acquireAlpacaMonitorSubmissionLease,

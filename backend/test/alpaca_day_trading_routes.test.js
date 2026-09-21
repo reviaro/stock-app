@@ -704,6 +704,7 @@ test('POST /day-trading/kill-switch/clear succeeds with zero nonterminal plans (
     const state = await store.getMonitorState();
     assert.strictEqual(state.kill_switch, 0);
     assert.ok(state.last_rest_reconciliation_at, 'reconciliation must have actually run, not been skipped');
+    assert.ok((await store.listEvents()).some((event) => event.event_type === 'kill_switch' && event.action === 'clear' && event.outcome === 'cleared'));
 });
 
 test('POST /day-trading/kill-switch/clear succeeds when every open plan is flat', async () => {
@@ -768,6 +769,7 @@ test('POST /day-trading/kill-switch/clear refuses when a plan is uncovered, and 
 
     assert.strictEqual(result.status, 409);
     assert.strictEqual((await store.getMonitorState()).kill_switch, 1);
+    assert.ok((await store.listEvents()).some((event) => event.event_type === 'kill_switch' && event.action === 'clear' && event.outcome === 'refused'));
 });
 
 test('POST /day-trading/kill-switch/clear refuses when a plan shows an unexpected short position', async () => {
@@ -1067,6 +1069,8 @@ test('GET /day-trading/journal returns analytics computed from closed plans', as
     await new Promise((resolve) => server.close(resolve));
 
     assert.strictEqual(result.status, 200, JSON.stringify(result.body));
-    assert.strictEqual(result.body.data.closed_trade_count, 1);
-    assert.strictEqual(result.body.data.total_pnl, 35);
+    assert.strictEqual(result.body.data.analytics.closed_trade_count, 1);
+    assert.strictEqual(result.body.data.analytics.total_pnl, 35);
+    assert.ok(Array.isArray(result.body.data.trades));
+    assert.ok(Array.isArray(result.body.data.events));
 });

@@ -161,3 +161,21 @@ export interface AlpacaDayTradeJournalAnalytics {
   total_pnl: number
   by_setup: Record<string, AlpacaDayTradeJournalSetupStats>
 }
+
+export interface AlpacaDayTradeJournalEvent {
+  source: 'semantic' | 'order_audit' | 'fill'
+  eventKey?: string
+  planId: number | null
+  eventType: string
+  action: string | null
+  outcome: string | null
+  reason: string | null
+  detail: Record<string, unknown>
+  occurredAt: string
+}
+
+export interface AlpacaDayTradeJournal {
+  analytics: AlpacaDayTradeJournalAnalytics
+  trades: AlpacaDayTradePlan[]
+  events: AlpacaDayTradeJournalEvent[]
+}

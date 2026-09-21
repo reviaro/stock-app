@@ -111,6 +111,13 @@ async function executeDayTradeEntry({
             if (!plan) {
                 throw executionError('ALPACA_PLAN_NOT_FOUND', `Day Trading order ${key} has no associated plan; cannot be safely replayed`);
             }
+            const replayEventKey = `entry:${plan.id}:${key}:replay`;
+            const existingReplayEvent = await store.getEventByKey(replayEventKey);
+            await store.appendEvent({
+                event_key: replayEventKey, plan_id: plan.id, event_type: 'entry_replay',
+                action: 'submit_entry', outcome: 'replayed', reason: 'idempotent_replay',
+                detail: { symbol: plan.symbol, qty: plan.planned_qty }, occurred_at: existingReplayEvent?.occurred_at || new Date(now).toISOString(),
+            });
             return { replayed: true, plan, order: existing };
         }
 
@@ -182,12 +189,33 @@ async function executeDayTradeEntry({
             },
         );
 
+        const occurredAt = new Date(now).toISOString();
+        await store.appendEvent({
+            event_key: `entry:${plan.id}:${key}:intent`, plan_id: plan.id, event_type: 'entry_intent',
+            action: 'submit_entry', outcome: 'planned', reason: null,
+            detail: {
+                symbol, setup: intent.setup, catalyst: intent.catalyst, thesis: intent.thesis,
+                invalidation: intent.invalidation, planned_qty: order.qty, planned_stop: stopPrice,
+                planned_target: targetPrice, planned_risk_dollars: plannedRiskDollars,
+            }, occurred_at: occurredAt,
+        });
+        await store.appendEvent({
+            event_key: `entry:${plan.id}:${key}:submission`, plan_id: plan.id, event_type: 'entry_submission',
+            action: 'submit_entry', outcome: 'started', reason: null,
+            detail: { symbol, qty: order.qty, order_type: 'limit' }, occurred_at: occurredAt,
+        });
+
         try {
             const brokerOrder = { ...order, client_order_id: key };
             const brokerResult = await client.submitOrder(brokerOrder);
             const brokerStatus = String(brokerResult.status || 'submitted');
             await store.updateOrderAudit(key, { status: brokerStatus, broker_order_id: brokerResult.id || null, broker_payload: { status: brokerStatus } });
             await store.updatePlan(plan.id, { entry_parent_broker_order_id: brokerResult.id || null });
+            await store.appendEvent({
+                event_key: `entry:${plan.id}:${key}:outcome`, plan_id: plan.id, event_type: 'entry_outcome',
+                action: 'submit_entry', outcome: 'acknowledged', reason: brokerStatus,
+                detail: { symbol, qty: order.qty, status: brokerStatus }, occurred_at: occurredAt,
+            });
             return {
                 plan: { ...plan, entry_parent_broker_order_id: brokerResult.id || null },
                 order: { ...auditRow, status: brokerStatus, broker_order_id: brokerResult.id || null },
@@ -198,8 +226,14 @@ async function executeDayTradeEntry({
                 status: rejected ? 'submission_rejected' : 'submission_unknown',
                 broker_payload: { error: rejected ? 'broker_rejected' : 'submission_outcome_unknown', status: submissionError.status || null },
             });
+            await store.appendEvent({
+                event_key: `entry:${plan.id}:${key}:outcome`, plan_id: plan.id, event_type: 'entry_outcome',
+                action: 'submit_entry', outcome: rejected ? 'rejected' : 'unknown',
+                reason: rejected ? 'broker_rejected' : 'submission_outcome_unknown',
+                detail: { symbol, qty: order.qty, status: submissionError.status || null }, occurred_at: occurredAt,
+            });
             if (rejected) {
-                await store.updatePlan(plan.id, { state: 'error', review_notes: submissionError.message });
+                await store.updatePlan(plan.id, { state: 'error' });
                 throw submissionError;
             }
             throw executionError('ALPACA_SUBMISSION_UNKNOWN', `Day Trading order submission outcome is ambiguous: ${submissionError.message}`);

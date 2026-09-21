@@ -85,12 +85,36 @@ async function discoverProtectiveLegs(plan, { client }) {
     return patch;
 }
 
-function findOwningPlan(brokerOrderId, plans) {
-    return plans.find((plan) => [
+function findOwningPlan(brokerOrderId, plans, orderAudits = []) {
+    const direct = plans.find((plan) => [
         plan.entry_parent_broker_order_id,
         plan.protective_stop_broker_order_id,
         plan.protective_target_broker_order_id,
-    ].includes(brokerOrderId)) || null;
+    ].includes(brokerOrderId));
+    if (direct) return direct;
+    const audit = orderAudits.find((row) => row.broker_order_id === brokerOrderId && row.execution_epoch === 'day_trading' && row.plan_id != null);
+    return audit ? plans.find((plan) => Number(plan.id) === Number(audit.plan_id)) || null : null;
+}
+
+async function recordCanonicalFill(normalized, owningPlan, injectedStore) {
+    const recorded = await injectedStore.recordFill({ ...normalized, plan_id: owningPlan ? owningPlan.id : null });
+    if (!recorded.inserted) return { recorded: true, inserted: false, fill: recorded };
+    await injectedStore.appendEvent({
+        event_key: `fill:${recorded.id}`, plan_id: owningPlan ? owningPlan.id : null,
+        event_type: 'fill', action: normalized.side, outcome: normalized.fill_type,
+        reason: owningPlan ? null : 'orphan_fill',
+        detail: { symbol: normalized.symbol, side: normalized.side, qty: normalized.qty, price: normalized.price, source: normalized.source },
+        occurred_at: normalized.executed_at,
+    });
+    if (!owningPlan) {
+        await injectedStore.appendEvent({
+            event_key: `anomaly:orphan_fill:${recorded.id}`, plan_id: null, event_type: 'anomaly',
+            action: 'reconcile_fill', outcome: 'unresolved', reason: 'orphan_fill',
+            detail: { symbol: normalized.symbol, side: normalized.side, qty: normalized.qty, price: normalized.price },
+            occurred_at: normalized.executed_at,
+        });
+    }
+    return { recorded: true, inserted: true, fill: recorded };
 }
 
 // idempotency_key/broker_order_id are unique database-wide, so a fill's order could in
@@ -137,6 +161,12 @@ async function reconcileFills({ client, store: injectedStore = store }) {
             normalized = normalizeRestFillActivity(raw);
         } catch (error) {
             stallReason = `failed to normalize a FILL activity: ${error.message}`;
+            await injectedStore.appendEvent({
+                event_key: `anomaly:reconciliation_stall:${String(raw?.id || raw?.transaction_time || cursor || 'unknown')}`,
+                plan_id: null, event_type: 'anomaly', action: 'reconcile_fills', outcome: 'stalled',
+                reason: 'fill_normalization_failed', detail: { symbol: raw?.symbol || null, error: error.message },
+                occurred_at: raw?.transaction_time || new Date().toISOString(),
+            });
             break; // malformed: stop before it, leave the cursor at the last good activity
         }
 
@@ -145,11 +175,16 @@ async function reconcileFills({ client, store: injectedStore = store }) {
             continue; // acknowledged and skipped, never stored
         }
 
-        const owningPlan = findOwningPlan(normalized.broker_order_id, refreshedPlans);
+        const owningPlan = findOwningPlan(normalized.broker_order_id, refreshedPlans, orderAudits);
         try {
-            await injectedStore.recordFill({ ...normalized, plan_id: owningPlan ? owningPlan.id : null });
+            await recordCanonicalFill(normalized, owningPlan, injectedStore);
         } catch (error) {
             stallReason = `failed to record fill ${normalized.activity_id}: ${error.message}`;
+            await injectedStore.appendEvent({
+                event_key: `anomaly:reconciliation_stall:${normalized.activity_id}`, plan_id: owningPlan ? owningPlan.id : null,
+                event_type: 'anomaly', action: 'reconcile_fills', outcome: 'stalled', reason: 'fill_persistence_failed',
+                detail: { symbol: normalized.symbol, error: error.message }, occurred_at: normalized.executed_at,
+            });
             break; // insert failure: stop before it too
         }
         cursor = normalized.executed_at;
@@ -188,7 +223,13 @@ async function reconcileFills({ client, store: injectedStore = store }) {
         try {
             await attemptCloseFromFills(plan, { client });
         } catch (closeError) {
-            await injectedStore.updatePlan(plan.id, { state: 'error', review_notes: closeError.message });
+            await injectedStore.updatePlan(plan.id, { state: 'error' });
+            await injectedStore.appendEvent({
+                event_key: `anomaly:close_from_fills:${plan.id}:${String(closeError.code || 'error')}`,
+                plan_id: plan.id, event_type: 'anomaly', action: 'close_from_fills', outcome: 'failed',
+                reason: closeError.code || 'close_failed', detail: { symbol: plan.symbol, error: closeError.message },
+                occurred_at: new Date().toISOString(),
+            });
         }
     }
 }
@@ -256,9 +297,8 @@ async function recordWebSocketFill(normalized, { store: injectedStore = store } 
     if (isLegacyOrder(normalized.broker_order_id, orderAudits)) return { recorded: false, reason: 'legacy_order' };
 
     const plans = await injectedStore.listPlans(null);
-    const owningPlan = findOwningPlan(normalized.broker_order_id, plans);
-    await injectedStore.recordFill({ ...normalized, plan_id: owningPlan ? owningPlan.id : null });
-    return { recorded: true };
+    const owningPlan = findOwningPlan(normalized.broker_order_id, plans, orderAudits);
+    return recordCanonicalFill(normalized, owningPlan, injectedStore);
 }
 
 module.exports = {
