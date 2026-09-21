@@ -23,6 +23,14 @@ function dayTradingGateOpen(req) {
         && req.get('X-Alpaca-Day-Trading-Token') === token;
 }
 
+function operatorControlGateOpen(req) {
+    if (process.env.ALPACA_DAY_TRADING_ENTRY_ENABLED !== 'true') return false;
+    const token = process.env.ALPACA_DAY_TRADING_ENTRY_TOKEN;
+    if (!token) return false;
+    return (req.auth?.type === 'session' && req.auth?.role === 'operator')
+        || req.get('X-Alpaca-Day-Trading-Token') === token;
+}
+
 function requireDayTradingScope(req, res) {
     if (!dayTradingGateOpen(req)) {
         res.status(403).json({ status: 'error', code: 'ALPACA_DAY_TRADING_ENTRY_DISABLED', error: 'Day Trading entry submission is disabled' });
@@ -218,7 +226,7 @@ router.post('/decisions', async (req, res) => {
 // trip). Task 13's worker already checks kill_switch at the top of every tick and refuses to
 // act while it's set, so mode=paper_execute with kill_switch=true is inert, not unsafe.
 router.post('/mode', async (req, res) => {
-    if (!dayTradingGateOpen(req)) {
+    if (!operatorControlGateOpen(req)) {
         return res.status(403).json({ status: 'error', code: 'ALPACA_DAY_TRADING_ENTRY_DISABLED', error: 'Day Trading entry submission is disabled' });
     }
     const mode = String(req.body?.mode || '').trim();
@@ -296,7 +304,7 @@ router.post('/resolve-missing', async (req, res) => {
 // observation closed to 'none', which this loop would otherwise misread as "safe" -- the exact
 // inversion of what a broker outage during a safety check must mean.
 router.post('/kill-switch/clear', async (req, res) => {
-    if (!dayTradingGateOpen(req)) {
+    if (!operatorControlGateOpen(req)) {
         return res.status(403).json({ status: 'error', code: 'ALPACA_DAY_TRADING_ENTRY_DISABLED', error: 'Day Trading entry submission is disabled' });
     }
     if (req.body?.confirm !== true) {

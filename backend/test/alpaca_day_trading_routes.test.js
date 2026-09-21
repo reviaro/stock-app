@@ -48,13 +48,14 @@ function get(port, requestPath, headers = {}) {
     });
 }
 
-function createApp() {
+function createApp(auth = null) {
     delete require.cache[require.resolve('../services/alpaca_paper_service')];
     delete require.cache[require.resolve('../services/alpaca_day_trade_execution')];
     delete require.cache[require.resolve('../routes/alpaca_paper')];
     delete require.cache[require.resolve('../routes/alpaca_day_trading')];
     const app = express();
     app.use(express.json());
+    if (auth) app.use((req, _res, next) => { req.auth = auth; next(); });
     app.use('/api/alpaca-paper', require('../routes/alpaca_paper'));
     app.use('/api/alpaca-paper/day-trading', require('../routes/alpaca_day_trading'));
     return app;
@@ -415,6 +416,41 @@ test('POST /day-trading/mode is disabled without the Day Trading gate token', as
     assert.strictEqual(result.status, 403);
 });
 
+test('POST /day-trading/mode accepts an authenticated operator session without exposing the server token to the browser', async () => {
+    const gate = enableDayTradingGate();
+    const app = createApp({ type: 'session', role: 'operator', username: 'dashboard-user' });
+    const server = app.listen(0);
+    try {
+        const result = await post(server.address().port, { mode: 'shadow', confirm: true }, '/api/alpaca-paper/day-trading/mode');
+        assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+        assert.strictEqual(result.body.data.mode, 'shadow');
+    } finally {
+        await new Promise((resolve) => server.close(resolve));
+        gate.restore();
+    }
+});
+
+test('POST /day-trading/mode rejects partial principals that are not authenticated operator sessions', async () => {
+    const gate = enableDayTradingGate();
+    try {
+        for (const principal of [
+            { type: 'session', role: 'reader', username: 'forged-session' },
+            { type: 'bearer', role: 'operator', username: 'forged-operator' },
+        ]) {
+            const app = createApp(principal);
+            const server = app.listen(0);
+            try {
+                const result = await post(server.address().port, { mode: 'shadow', confirm: true }, '/api/alpaca-paper/day-trading/mode');
+                assert.strictEqual(result.status, 403, JSON.stringify(principal));
+            } finally {
+                await new Promise((resolve) => server.close(resolve));
+            }
+        }
+    } finally {
+        gate.restore();
+    }
+});
+
 test('POST /day-trading/mode rejects an unknown mode value without writing anything', async () => {
     const gate = enableDayTradingGate();
     const before = await store.getMonitorState();
@@ -669,6 +705,22 @@ test('POST /day-trading/kill-switch/clear requires the Day Trading gate', async 
     await new Promise((resolve) => server.close(resolve));
 
     assert.strictEqual(result.status, 403);
+});
+
+test('POST /day-trading/kill-switch/clear accepts an authenticated operator session without exposing the server token to the browser', async () => {
+    const gate = enableDayTradingGate();
+    await store.updateMonitorState({ kill_switch: true });
+    mockKillSwitchClearBroker();
+    const app = createApp({ type: 'session', role: 'operator', username: 'dashboard-user' });
+    const server = app.listen(0);
+    try {
+        const result = await post(server.address().port, { confirm: true }, '/api/alpaca-paper/day-trading/kill-switch/clear');
+        assert.strictEqual(result.status, 200, JSON.stringify(result.body));
+        assert.strictEqual((await store.getMonitorState()).kill_switch, 0);
+    } finally {
+        await new Promise((resolve) => server.close(resolve));
+        gate.restore();
+    }
 });
 
 test('POST /day-trading/kill-switch/clear requires explicit confirmation', async () => {

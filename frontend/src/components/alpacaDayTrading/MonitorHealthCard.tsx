@@ -30,63 +30,70 @@ function modeBadge(mode: string | null) {
 }
 
 function MonitorControls({ mode, killSwitch }: { mode: string | null; killSwitch: boolean }) {
-  const [token, setToken] = useState('')
   const [pendingMode, setPendingMode] = useState<AlpacaMonitorMode>('disabled')
   const [modeConfirmText, setModeConfirmText] = useState('')
   const [killSwitchConfirmText, setKillSwitchConfirmText] = useState('')
   const setMode = useSetAlpacaDayTradingMode()
   const clearKillSwitch = useClearAlpacaDayTradingKillSwitch()
+  const controlPending = setMode.isPending || clearKillSwitch.isPending
 
-  const modeChangeReady = token.length > 0 && modeConfirmText === pendingMode
-  const killSwitchClearReady = token.length > 0 && killSwitchConfirmText === 'CLEAR'
+  const modeChangeReady = pendingMode !== mode
+    && (pendingMode !== 'paper_execute' || modeConfirmText === pendingMode)
+  const killSwitchClearReady = killSwitchConfirmText === 'CLEAR'
+  const resetModeFeedback = () => {
+    if (!controlPending && (setMode.isSuccess || setMode.isError)) setMode.reset()
+  }
+  const resetKillSwitchFeedback = () => {
+    if (!controlPending && (clearKillSwitch.isSuccess || clearKillSwitch.isError)) clearKillSwitch.reset()
+  }
 
   return (
     <div className="space-y-3 rounded-md border border-border/70 bg-background/60 p-3 text-xs">
       <p className="font-semibold text-foreground">Operator controls</p>
       <p className="text-muted-foreground">
-        These act on the live paper account. Every action below requires the Day Trading operator token
-        (never stored — sent only on the request you submit, exactly as if you called the API yourself).
-        Both actions also require the backend's own ALPACA_DAY_TRADING_ENTRY_ENABLED flag to be on; if that's
-        off, a correct token here still gets refused.
+        These act on the live paper account through your authenticated operator session. Both actions also
+        require the backend's ALPACA_DAY_TRADING_ENTRY_ENABLED flag to be on; if it is off, the request is refused.
       </p>
-
-      <div className="space-y-1">
-        <label htmlFor="dt-operator-token" className="block text-muted-foreground">Operator token</label>
-        <input
-          id="dt-operator-token"
-          type="password"
-          autoComplete="off"
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          className="w-full rounded-md border border-border bg-secondary px-2 py-1"
-        />
-      </div>
 
       <div className="space-y-1 border-t border-border/70 pt-2">
         <label htmlFor="dt-new-mode" className="block text-muted-foreground">New mode (current: {mode ?? 'unknown'})</label>
         <select
           id="dt-new-mode"
           value={pendingMode}
-          onChange={(e) => { setPendingMode(e.target.value as AlpacaMonitorMode); setModeConfirmText('') }}
+          disabled={controlPending}
+          onChange={(e) => {
+            resetModeFeedback()
+            setPendingMode(e.target.value as AlpacaMonitorMode)
+            setModeConfirmText('')
+          }}
           className="w-full rounded-md border border-border bg-secondary px-2 py-1"
         >
           {MODES.map((m) => <option key={m} value={m}>{m}</option>)}
         </select>
-        <label htmlFor="dt-mode-confirm" className="block text-muted-foreground">Type &quot;{pendingMode}&quot; to confirm</label>
-        <input
-          id="dt-mode-confirm"
-          value={modeConfirmText}
-          onChange={(e) => setModeConfirmText(e.target.value)}
-          className="w-full rounded-md border border-border bg-secondary px-2 py-1"
-        />
+        {pendingMode === 'paper_execute' && (
+          <>
+            <label htmlFor="dt-mode-confirm" className="block text-muted-foreground">Type &quot;paper_execute&quot; to confirm</label>
+            <input
+              id="dt-mode-confirm"
+              value={modeConfirmText}
+              disabled={controlPending}
+              onChange={(e) => {
+                resetModeFeedback()
+                setModeConfirmText(e.target.value)
+              }}
+              className="w-full rounded-md border border-border bg-secondary px-2 py-1"
+            />
+          </>
+        )}
         <Button
           type="button"
           size="sm"
-          variant="destructive"
-          disabled={!modeChangeReady || setMode.isPending}
+          variant={pendingMode === 'paper_execute' ? 'destructive' : 'outline'}
+          disabled={!modeChangeReady || controlPending}
           onClick={() => {
-            setMode.mutate({ mode: pendingMode, token }, {
-              onSuccess: () => { setModeConfirmText(''); setToken('') },
+            if (controlPending) return
+            setMode.mutate(pendingMode, {
+              onSuccess: () => { setModeConfirmText('') },
             })
           }}
         >
@@ -105,7 +112,11 @@ function MonitorControls({ mode, killSwitch }: { mode: string | null; killSwitch
             <input
               id="dt-kill-switch-confirm"
               value={killSwitchConfirmText}
-              onChange={(e) => setKillSwitchConfirmText(e.target.value)}
+              disabled={controlPending}
+              onChange={(e) => {
+                resetKillSwitchFeedback()
+                setKillSwitchConfirmText(e.target.value)
+              }}
               className="w-full rounded-md border border-border bg-secondary px-2 py-1"
             />
             <p className="text-muted-foreground">Verifies the account is flat/covered before clearing — refuses otherwise.</p>
@@ -113,10 +124,11 @@ function MonitorControls({ mode, killSwitch }: { mode: string | null; killSwitch
               type="button"
               size="sm"
               variant="destructive"
-              disabled={!killSwitchClearReady || clearKillSwitch.isPending}
+              disabled={!killSwitchClearReady || controlPending}
               onClick={() => {
-                clearKillSwitch.mutate(token, {
-                  onSuccess: () => { setKillSwitchConfirmText(''); setToken('') },
+                if (controlPending) return
+                clearKillSwitch.mutate(undefined, {
+                  onSuccess: () => { setKillSwitchConfirmText('') },
                 })
               }}
             >

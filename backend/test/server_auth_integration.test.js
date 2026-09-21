@@ -72,7 +72,7 @@ test('server leaves auth session public while protecting dashboard APIs', async 
     }
 });
 
-test('dedicated Alpaca Day Trading bearer reaches the entry route but not the broker with invalid scope', async () => {
+test('dedicated Alpaca Day Trading bearer reaches its scoped journal and entry routes with invalid scope', async () => {
     const token = 'day-trading-agent-token-at-least-32-characters';
     const auth = createAuth({
         username: 'dashboard-user',
@@ -89,16 +89,22 @@ test('dedicated Alpaca Day Trading bearer reaches the entry route but not the br
     const server = app.listen(0, '127.0.0.1');
     await new Promise((resolve) => server.once('listening', resolve));
     try {
-        const response = await request(server.address().port, '/api/alpaca-paper/day-trading/entries', {
-            method: 'POST',
-            headers: {
-                Authorization: `Bearer ${token}`,
-                'X-Alpaca-Day-Trading-Token': token,
-            },
-            body: { account_id: 999 },
-        });
-        assert.equal(response.status, 400);
-        assert.equal(response.body.code, 'ALPACA_ACCOUNT_SCOPE_REQUIRED');
+        for (const path of [
+            '/api/alpaca-paper/day-trading/entries',
+            '/api/alpaca-paper/day-trading/decisions',
+            '/api/alpaca-paper/day-trading/plans/1/review',
+        ]) {
+            const response = await request(server.address().port, path, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    'X-Alpaca-Day-Trading-Token': token,
+                },
+                body: { account_id: 999 },
+            });
+            assert.equal(response.status, 400, path);
+            assert.equal(response.body.code, 'ALPACA_ACCOUNT_SCOPE_REQUIRED', path);
+        }
     } finally {
         await new Promise((resolve) => server.close(resolve));
         if (savedEnabled == null) delete process.env.ALPACA_DAY_TRADING_ENTRY_ENABLED;
@@ -124,6 +130,11 @@ test('dedicated Alpaca Day Trading bearer is denied unrelated mutations', async 
         for (const [path, body] of [
             ['/api/alpaca-paper/orders', {}],
             ['/api/alpaca-paper/day-trading/mode', { mode: 'paper_execute', confirm: true }],
+            ['/api/alpaca-paper/day-trading/kill-switch/clear', { confirm: true }],
+            ['/api/alpaca-paper/day-trading/decisions/', { account_id: 2, decision_key: 'near-miss', reason: 'must be denied' }],
+            ['/api/alpaca-paper/day-trading/plans/0/review', { account_id: 2 }],
+            ['/api/alpaca-paper/day-trading/plans/01/review', { account_id: 2 }],
+            ['/api/alpaca-paper/day-trading/plans/1/review/extra', { account_id: 2 }],
             ['/api/simulator/trade', { account_id: 2 }],
         ]) {
             const response = await request(server.address().port, path, {
