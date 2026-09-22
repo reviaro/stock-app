@@ -125,8 +125,105 @@ function listOrderAudits() {
     return db.listAlpacaPaperOrderAudits();
 }
 
+function deriveFillSummaryPatch(plan, fills = []) {
+    const summary = computeFilledSummary(fills);
+
+    // Overfill fail-closed: identical in meaning to assertNoOverfill without circular dependency
+    if (summary.entry.qty > plan.planned_qty || summary.exit.qty > summary.entry.qty) {
+        const error = new Error(`Alpaca fill overfill detected for plan ${plan.id}`);
+        error.code = 'ALPACA_FILL_OVERFILL';
+        throw error;
+    }
+
+    // Derived state, long-only, in exact priority
+    let state = plan.state;
+    if (summary.exit.qty > 0) {
+        state = 'exit_pending';
+    } else if (summary.entry.qty === 0) {
+        state = plan.state;
+    } else if (summary.entry.qty < plan.planned_qty) {
+        state = 'partially_entered';
+    } else if (summary.entry.qty === plan.planned_qty) {
+        state = 'active';
+    }
+
+    const supersededActivityIds = new Set(
+        fills.filter((fill) => fill.correction_of).map((fill) => fill.correction_of),
+    );
+    const effective = fills.filter((fill) => !fill.is_bust && !supersededActivityIds.has(fill.activity_id));
+    const effectiveBuyFills = effective.filter((fill) => fill.side === 'buy');
+
+    // opened_at candidate = executed_at of the EARLIEST effective buy fill, or null if none
+    const earliestEffectiveBuy = effectiveBuyFills.reduce((earliest, fill) => {
+        if (!earliest) return fill;
+        if (fill.executed_at < earliest.executed_at) return fill;
+        if (fill.executed_at === earliest.executed_at && String(fill.activity_id) < String(earliest.activity_id)) return fill;
+        return earliest;
+    }, null);
+    const openedAtCandidate = earliestEffectiveBuy ? earliestEffectiveBuy.executed_at : null;
+
+    // Return null if state, filled_entry_qty, avg_entry_price, filled_exit_qty, avg_exit_price
+    // all equal the plan row's current values AND (plan.opened_at is set OR the opened_at candidate is null).
+    const planOpenedAtSet = plan.opened_at != null && plan.opened_at !== '';
+    const isUnchanged = (
+        state === plan.state
+        && plan.filled_entry_qty === summary.entry.qty
+        && plan.avg_entry_price === summary.entry.avgPrice
+        && plan.filled_exit_qty === summary.exit.qty
+        && plan.avg_exit_price === summary.exit.avgPrice
+        && (planOpenedAtSet || openedAtCandidate === null)
+    );
+    if (isUnchanged) return null;
+
+    const patch = {
+        state,
+        filled_entry_qty: summary.entry.qty,
+        avg_entry_price: summary.entry.avgPrice,
+        filled_exit_qty: summary.exit.qty,
+        avg_exit_price: summary.exit.avgPrice,
+        opened_at: openedAtCandidate,
+    };
+
+    let event = null;
+    if (state !== plan.state) {
+        const latestEffectiveFill = effective.reduce((latest, fill) => {
+            if (!latest) return fill;
+            if (fill.executed_at > latest.executed_at) return fill;
+            if (fill.executed_at === latest.executed_at && String(fill.activity_id) > String(latest.activity_id)) return fill;
+            return latest;
+        }, null);
+
+        event = {
+            event_key: `plan_state:${plan.id}:${plan.state}->${state}:${latestEffectiveFill.activity_id}`,
+            plan_id: plan.id,
+            event_type: 'plan_state',
+            action: 'sync_from_fills',
+            outcome: state,
+            reason: 'fill_summary_sync',
+            detail: {
+                symbol: plan.symbol,
+                from: plan.state,
+                to: state,
+                filled_entry_qty: summary.entry.qty,
+                avg_entry_price: summary.entry.avgPrice,
+                filled_exit_qty: summary.exit.qty,
+                avg_exit_price: summary.exit.avgPrice,
+            },
+            occurred_at: latestEffectiveFill.executed_at,
+        };
+    }
+
+    return { patch, event };
+}
+
+async function syncPlanFillSummary(planId) {
+    return db.syncAlpacaDayTradePlanFillSummary(planId, (plan, fills) => deriveFillSummaryPatch(plan, fills));
+}
+
 module.exports = {
     computeFilledSummary,
+    deriveFillSummaryPatch,
+    syncPlanFillSummary,
     createPlanWithEntry,
     getPlan,
     getActivePlanForSymbol,

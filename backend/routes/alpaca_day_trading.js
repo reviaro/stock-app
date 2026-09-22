@@ -582,12 +582,29 @@ router.get('/journal', async (_req, res) => {
                 action: event.action, outcome: event.outcome, reason: event.reason,
                 detail: JSON.parse(event.detail_json || '{}'), occurredAt: event.occurred_at,
             })),
-            ...orderAudits.filter((audit) => audit.execution_epoch === 'day_trading').map((audit) => ({
-                source: 'order_audit', planId: audit.plan_id, eventType: 'order', action: audit.leg_role,
-                outcome: audit.status, reason: null,
-                detail: { symbol: audit.symbol, side: audit.side, qty: audit.qty, orderType: audit.order_type, legRole: audit.leg_role },
-                occurredAt: audit.created_at,
-            })),
+            ...orderAudits.filter((audit) => audit.execution_epoch === 'day_trading').map((audit) => {
+                let brokerPayload = null;
+                if (audit.broker_payload) {
+                    try {
+                        brokerPayload = typeof audit.broker_payload === 'string'
+                            ? JSON.parse(audit.broker_payload)
+                            : audit.broker_payload;
+                    } catch (_) {}
+                }
+                return {
+                    source: 'order_audit', planId: audit.plan_id, eventType: 'order', action: audit.leg_role,
+                    outcome: audit.status, reason: null,
+                    detail: {
+                        symbol: audit.symbol,
+                        side: audit.side,
+                        qty: audit.qty,
+                        orderType: audit.order_type,
+                        legRole: audit.leg_role,
+                        brokerMessage: brokerPayload?.broker_message || brokerPayload?.brokerMessage || null,
+                    },
+                    occurredAt: audit.created_at,
+                };
+            }),
             ...fills.map((fill) => ({
                 source: 'fill', planId: fill.plan_id, eventType: 'fill', action: fill.side, outcome: fill.fill_type, reason: null,
                 detail: { symbol: fill.symbol, side: fill.side, qty: fill.qty, price: fill.price, source: fill.source, isBust: Boolean(fill.is_bust) },

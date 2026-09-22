@@ -13,6 +13,7 @@ const DEFAULT_LOCK_PATH = path.join(__dirname, '..', '..', 'run', 'alpaca-day-tr
 const DEFAULT_POLL_INTERVAL_MS = 60_000; // Section 8: every 60s while any plan/order/position is open
 const DEFAULT_IDLE_POLL_INTERVAL_MS = 300_000; // Section 8: a slower cadence while flat/closed -- tunable, Stage 4 material
 const TERMINAL_PLAN_STATES = ['closed', 'cancelled', 'error'];
+const EXIT_ACTIONS = ['flatten', 'submit_time_exit', 'buy_to_cover'];
 
 function workerError(code, message) {
     return Object.assign(new Error(message), { code });
@@ -64,6 +65,8 @@ function createWorker({
     wsApiKey,
     wsApiSecret,
     streamFactory = createTradeUpdatesStream,
+    exitPolicy,
+    sleep,
 } = {}) {
     let ready = false;
     let stopped = false;
@@ -139,10 +142,9 @@ function createWorker({
             log({ sessionDateError: error.message });
         }
 
-        if (monitorState.kill_switch) {
-            log({ skipped: 'kill_switch_active' });
-            return; // an operator must clear the switch before the monitor resumes managing plans
-        }
+        let pendingKillSwitch = false;
+        const activatingDecisions = [];
+        const sweepResults = [];
 
         const plans = (await store.listPlans(null)).filter((plan) => !TERMINAL_PLAN_STATES.includes(plan.state));
         let lastHealthCode = null;
@@ -178,9 +180,17 @@ function createWorker({
             const decision = decidePlanAction(observation);
             log({ planId: plan.id, symbol: plan.symbol, decision });
 
+            if (decision.activateKillSwitch) {
+                pendingKillSwitch = true;
+                activatingDecisions.push(decision);
+            }
+
+            const isRestrictedToExit = Boolean(monitorState.kill_switch) || pendingKillSwitch;
+            const isExitAction = EXIT_ACTIONS.includes(decision.action);
+
             const decisionOutcome = monitorState.mode === 'shadow'
                 ? 'shadow_observed_only'
-                : (decision.action === 'none' ? 'no_action_required' : 'action_pending');
+                : (decision.action === 'none' ? 'no_action_required' : (isRestrictedToExit && !isExitAction ? 'skipped_kill_switch_active' : 'action_pending'));
             if (decision.blockEntries) anyBlockEntries = true;
             if (decision.healthCode) { lastHealthCode = decision.healthCode; lastHealthReason = decision.reason; }
             const decisionSignature = JSON.stringify({
@@ -201,44 +211,85 @@ function createWorker({
             }
 
             if (monitorState.mode === 'paper_execute' && decision.action !== 'none') {
-                try {
-                    await executeManagementAction(decision, plan, { client, holderId, now: now() });
-                    await recordMonitorEvent({
-                        event_key: `monitor:${cycleId}:plan:${plan.id}:action`, plan_id: plan.id, event_type: 'monitor_action',
-                        action: decision.action, outcome: 'submitted', reason: decision.reason || null,
-                        detail: { cycle_id: cycleId }, occurred_at: occurredAt,
-                    });
-                } catch (error) {
-                    log({ planId: plan.id, symbol: plan.symbol, executionError: error.message });
-                    await recordMonitorEvent({
-                        event_key: `monitor:${cycleId}:plan:${plan.id}:action`, plan_id: plan.id, event_type: 'monitor_action',
-                        action: decision.action, outcome: 'failed', reason: error.code || 'execution_failed',
-                        detail: { cycle_id: cycleId, error: error.message }, occurred_at: occurredAt,
-                    });
+                if (isRestrictedToExit && !isExitAction) {
+                    log({ planId: plan.id, symbol: plan.symbol, skippedAction: decision.action, reason: 'kill_switch_active_or_pending' });
+                } else {
+                    try {
+                        const actionRes = await executeManagementAction(decision, plan, {
+                            client, holderId, now: now(), exitPolicy, sleep,
+                        });
+                        const actionOutcome = actionRes?.outcome || 'submitted';
+                        const flatVerified = actionRes?.flatVerified ?? null;
+                        if (isExitAction) {
+                            sweepResults.push({
+                                plan_id: plan.id,
+                                symbol: plan.symbol,
+                                action: decision.action,
+                                outcome: actionOutcome,
+                                flat_verified: flatVerified,
+                            });
+                        }
+                        await recordMonitorEvent({
+                            event_key: `monitor:${cycleId}:plan:${plan.id}:action`, plan_id: plan.id, event_type: 'monitor_action',
+                            action: decision.action, outcome: actionOutcome, reason: decision.reason || null,
+                            detail: {
+                                cycle_id: cycleId,
+                                flat_verified: flatVerified,
+                                ...(actionRes?.order ? { order_id: actionRes.order.id } : {}),
+                            }, occurred_at: occurredAt,
+                        });
+                    } catch (error) {
+                        log({ planId: plan.id, symbol: plan.symbol, executionError: error.message });
+                        if (isExitAction) {
+                            sweepResults.push({
+                                plan_id: plan.id,
+                                symbol: plan.symbol,
+                                action: decision.action,
+                                outcome: 'failed',
+                                flat_verified: null,
+                            });
+                        }
+                        await recordMonitorEvent({
+                            event_key: `monitor:${cycleId}:plan:${plan.id}:action`, plan_id: plan.id, event_type: 'monitor_action',
+                            action: decision.action, outcome: 'failed', reason: error.code || 'execution_failed',
+                            detail: {
+                                cycle_id: cycleId,
+                                flat_verified: null,
+                                error: error.message,
+                                broker_status: error.status ?? null,
+                                broker_code: error.brokerCode ?? null,
+                                broker_message: error.brokerMessage ?? null,
+                            }, occurred_at: occurredAt,
+                        });
+                    }
                 }
-            }
-            // mode 'shadow': decided and logged, never executed -- Section 10 Stage 2 requires
-            // zero submit/cancel/replace/flatten writes.
-
-            if (decision.activateKillSwitch) {
-                await store.updateMonitorState({ kill_switch: true });
-                await recordMonitorEvent({
-                    event_key: `monitor:${cycleId}:kill_switch:${plan.id}`, plan_id: plan.id, event_type: 'kill_switch',
-                    action: 'activate', outcome: 'activated', reason: decision.reason || 'monitor_anomaly',
-                    detail: { cycle_id: cycleId, symbol: plan.symbol }, occurred_at: occurredAt,
-                });
-                log({ planId: plan.id, killSwitchActivated: true });
-                // Stop processing further plans in *this* tick immediately: the switch exists
-                // to stop subsequent writes, not to be recorded after the fact while the rest
-                // of the batch still executes against a system already known to be unsafe.
-                break;
             }
         }
 
-        await store.updateMonitorState({
-            block_entries: anyBlockEntries,
-            ...(lastHealthCode ? { health_code: lastHealthCode, health_error: lastHealthReason } : {}),
-        });
+        // When kill_switch was ALREADY latched at tick start, do NOT write block_entries/health_code/health_error.
+        if (!monitorState.kill_switch) {
+            const monitorStatePatch = {
+                block_entries: anyBlockEntries,
+                ...(pendingKillSwitch ? { kill_switch: true } : {}),
+                ...(lastHealthCode ? { health_code: lastHealthCode, health_error: lastHealthReason } : {}),
+            };
+            await store.updateMonitorState(monitorStatePatch);
+        }
+
+        if (pendingKillSwitch && !monitorState.kill_switch) {
+            const firstReason = activatingDecisions[0]?.reason || 'safety_sweep_violation';
+            const healthCodes = Array.from(new Set(activatingDecisions.map((d) => d.healthCode).filter(Boolean)));
+            await recordMonitorEvent({
+                event_key: `monitor:${cycleId}:kill_switch`, plan_id: null, event_type: 'kill_switch',
+                action: 'activate', outcome: 'activated', reason: firstReason,
+                detail: {
+                    cycle_id: cycleId,
+                    health_codes: healthCodes,
+                    sweep: sweepResults,
+                }, occurred_at: occurredAt,
+            });
+            log({ killSwitchActivated: true, sweep: sweepResults });
+        }
     }
 
     function scheduleNext() {

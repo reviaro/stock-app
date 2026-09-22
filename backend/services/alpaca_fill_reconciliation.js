@@ -218,10 +218,19 @@ async function reconcileFills({ client, store: injectedStore = store }) {
     // fills fail assertNoOverfill must not stall every other plan's reconciliation, this pass
     // and every pass after it — it is moved to the terminal 'error' state instead, which both
     // stops the bad plan from being retried forever and lets the loop continue.
+    //
+    // Plans that remain open have their denormalized fill summary and derived state synced
+    // from canonical fills (syncPlanFillSummary). This provides self-healing: every pass
+    // recomputes every nonterminal plan from canonical fills, so plans with fills stored before
+    // this fix repair on the first pass with zero new activities. If the summary sync fails,
+    // we record an anomaly event and do NOT change the plan's state: a sync failure must never
+    // make a plan with a live position terminal, since terminal plans drop out of monitoring
+    // and free the symbol's one-nonterminal-plan slot.
     for (const plan of refreshedPlans) {
         if (['closed', 'cancelled', 'error'].includes(plan.state)) continue;
+        let closed = null;
         try {
-            await attemptCloseFromFills(plan, { client });
+            closed = await attemptCloseFromFills(plan, { client });
         } catch (closeError) {
             await injectedStore.updatePlan(plan.id, { state: 'error' });
             await injectedStore.appendEvent({
@@ -230,6 +239,28 @@ async function reconcileFills({ client, store: injectedStore = store }) {
                 reason: closeError.code || 'close_failed', detail: { symbol: plan.symbol, error: closeError.message },
                 occurred_at: new Date().toISOString(),
             });
+            continue;
+        }
+
+        if (!closed) {
+            try {
+                await injectedStore.syncPlanFillSummary(plan.id);
+            } catch (error) {
+                try {
+                    await injectedStore.appendEvent({
+                        event_key: `anomaly:plan_summary_sync:${plan.id}:${String(error.code || 'error')}`,
+                        plan_id: plan.id,
+                        event_type: 'anomaly',
+                        action: 'sync_plan_summary',
+                        outcome: 'failed',
+                        reason: error.code || 'sync_failed',
+                        detail: { symbol: plan.symbol, error: error.message },
+                        occurred_at: new Date().toISOString(),
+                    });
+                } catch (_) {
+                    // If appendEvent itself throws, swallow it (do not break the loop).
+                }
+            }
         }
     }
 }

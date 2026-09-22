@@ -684,7 +684,7 @@ async function seedActivePlan() {
             symbol: 'NVDA', setup: 's', catalyst: 'c', thesis: 't', invalidation: 'i',
             planned_entry_low: 100.50, planned_entry_high: 100.50, planned_stop: 98.00, planned_target: 104.00,
             planned_qty: 10, planned_risk_dollars: 25, planned_reward_risk: 1.4, planned_account_risk_pct: 0.00025,
-            exit_deadline: '2026-09-17T19:45:00.000Z',
+            exit_deadline: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
         },
         {
             idempotency_key: 'dt-nvda-entry-1', client_order_id: 'dt-nvda-entry-1', symbol: 'NVDA', side: 'buy',
@@ -1126,3 +1126,41 @@ test('GET /day-trading/journal returns analytics computed from closed plans', as
     assert.ok(Array.isArray(result.body.data.trades));
     assert.ok(Array.isArray(result.body.data.events));
 });
+
+test('J1: journal order_audit event detail includes brokerMessage parsed from broker_payload', async () => {
+    const plan = await seedActivePlan();
+    await store.createOrderAudit({
+        idempotency_key: `dt-timeexit-${plan.id}-a1`,
+        client_order_id: `dt-timeexit-${plan.id}-a1`,
+        symbol: plan.symbol,
+        side: 'sell',
+        qty: 10,
+        order_type: 'market',
+        time_in_force: 'day',
+        status: 'submission_rejected',
+        execution_epoch: 'day_trading',
+        order_class: 'simple',
+        leg_role: 'time_exit',
+        plan_id: plan.id,
+    });
+    await store.updateOrderAudit(`dt-timeexit-${plan.id}-a1`, {
+        status: 'submission_rejected',
+        broker_payload: { broker_message: 'insufficient qty available for order (requested: 10, available: 0)' },
+    });
+
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, '/api/alpaca-paper/day-trading/journal');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200);
+    const orderAuditEvent = result.body.data.events.find(
+        (e) => e.source === 'order_audit' && e.action === 'time_exit',
+    );
+    assert.ok(orderAuditEvent, 'must find order_audit event for time_exit');
+    assert.strictEqual(
+        orderAuditEvent.detail.brokerMessage,
+        'insufficient qty available for order (requested: 10, available: 0)',
+    );
+});
+

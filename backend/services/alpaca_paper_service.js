@@ -67,11 +67,39 @@ function createPaperClient({ env = process.env, fetchImpl = global.fetch, timeou
         });
         if (options.allowNotFound && response.status === 404) return notFound;
         if (!response.ok) {
-            const error = new Error(`Alpaca paper request failed (${response.status})`);
+            let brokerCode = null;
+            let brokerMessage = null;
+            if (typeof response.text === 'function') {
+                let rawText = '';
+                try {
+                    rawText = await response.text();
+                } catch (_e) {
+                    rawText = '';
+                }
+                if (rawText) {
+                    try {
+                        const parsed = JSON.parse(rawText);
+                        if (parsed && parsed.code != null) brokerCode = parsed.code;
+                        if (parsed && typeof parsed.message === 'string') brokerMessage = parsed.message;
+                    } catch (_e) {
+                        // non-JSON
+                    }
+                    if (brokerMessage == null && rawText.trim()) {
+                        brokerMessage = rawText.trim();
+                    }
+                }
+            }
+            if (brokerMessage && typeof brokerMessage === 'string' && brokerMessage.length > 500) {
+                brokerMessage = brokerMessage.slice(0, 500);
+            }
+
+            const error = new Error(`Alpaca paper request failed (${response.status})` + (brokerMessage ? `: ${brokerMessage}` : ''));
             error.status = response.status;
             error.code = response.status >= 400 && response.status < 500 && response.status !== 408
                 ? 'ALPACA_BROKER_REJECTED'
                 : 'ALPACA_BROKER_UNAVAILABLE';
+            error.brokerCode = brokerCode;
+            error.brokerMessage = brokerMessage;
             throw error;
         }
         // A cancel (DELETE) succeeds with 204 No Content; parsing a JSON body would throw.

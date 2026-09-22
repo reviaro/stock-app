@@ -202,3 +202,69 @@ test('a position the caller could not read cleanly this tick is flattened rather
     assert.strictEqual(decision.healthCode, 'REPAIR_UNPROVEN');
     assert.strictEqual(decision.blockEntries, true);
 });
+
+test('M1: exit_deadline on the PREVIOUS ET date, now at 09:35 ET, clock.is_open true, covered bracket -> submit_time_exit, healthCode CARRIED_POSITION', () => {
+    const decision = decidePlanAction(observation({
+        plan: { ...basePlan, exit_deadline: '2026-09-16T19:45:00.000Z' }, // yesterday ET
+        now: new Date('2026-09-17T13:35:00.000Z'), // 09:35 ET today
+        clock: { is_open: true, next_close: '2026-09-17T20:00:00.000Z' },
+        monitorState: { ...FRESH_MONITOR_STATE, last_rest_reconciliation_at: '2026-09-17T13:34:50.000Z' },
+    }));
+    assert.strictEqual(decision.action, 'submit_time_exit');
+    assert.strictEqual(decision.healthCode, 'CARRIED_POSITION');
+    assert.strictEqual(decision.blockEntries, true);
+    assert.strictEqual(decision.details.qty, 10);
+});
+
+test('M1b: same-day exit_deadline (15:45 ET) passed at 15:46 ET, market open, before the sweep window -> submit_time_exit with healthCode null', () => {
+    const decision = decidePlanAction(observation({
+        plan: { ...basePlan, exit_deadline: '2026-09-17T19:45:00.000Z' }, // 15:45 ET today
+        now: new Date('2026-09-17T19:46:00.000Z'), // 15:46 ET today
+        clock: { is_open: true, next_close: '2026-09-17T20:00:00.000Z' },
+        monitorState: { ...FRESH_MONITOR_STATE, last_rest_reconciliation_at: '2026-09-17T19:45:50.000Z' },
+    }));
+    assert.strictEqual(decision.action, 'submit_time_exit');
+    assert.strictEqual(decision.reason, 'plan exit deadline has passed with an open position');
+    assert.strictEqual(decision.healthCode, null);
+    assert.strictEqual(decision.blockEntries, true);
+    assert.strictEqual(decision.details.qty, 10);
+});
+
+test('M2: now > exit_deadline, clock.is_open false, uncovered position -> action none, CARRIED_POSITION_AWAITING_OPEN (NOT attach_protective_oco)', () => {
+    const decision = decidePlanAction(observation({
+        plan: { ...basePlan, exit_deadline: '2026-09-17T19:45:00.000Z' },
+        stopLeg: null,
+        targetLeg: null,
+        now: new Date('2026-09-17T20:30:00.000Z'), // market closed
+        clock: { is_open: false, next_close: '2026-09-18T20:00:00.000Z' },
+        monitorState: { ...FRESH_MONITOR_STATE, last_rest_reconciliation_at: '2026-09-17T20:29:50.000Z' },
+    }));
+    assert.strictEqual(decision.action, 'none');
+    assert.strictEqual(decision.healthCode, 'CARRIED_POSITION_AWAITING_OPEN');
+    assert.strictEqual(decision.blockEntries, true);
+});
+
+test('M3: inside the safety-sweep window with exit_deadline passed -> still the sweep flatten with activateKillSwitch', () => {
+    const decision = decidePlanAction(observation({
+        plan: { ...basePlan, exit_deadline: '2026-09-17T19:45:00.000Z' },
+        now: new Date('2026-09-17T19:56:00.000Z'), // 4 min before 20:00 close
+        clock: { is_open: true, next_close: '2026-09-17T20:00:00.000Z' },
+        monitorState: { ...FRESH_MONITOR_STATE, last_rest_reconciliation_at: '2026-09-17T19:55:50.000Z' },
+    }));
+    assert.strictEqual(decision.action, 'flatten');
+    assert.strictEqual(decision.activateKillSwitch, true);
+    assert.strictEqual(decision.healthCode, 'SAFETY_SWEEP_VIOLATION');
+});
+
+test('Finding 4: clock { next_close } without is_open, deadline passed -> action none, CARRIED_POSITION_AWAITING_OPEN', () => {
+    const decision = decidePlanAction(observation({
+        plan: { ...basePlan, exit_deadline: '2026-09-17T19:45:00.000Z' },
+        now: new Date('2026-09-17T20:30:00.000Z'),
+        clock: { next_close: '2026-09-18T20:00:00.000Z' }, // lacking is_open
+        monitorState: { ...FRESH_MONITOR_STATE, last_rest_reconciliation_at: '2026-09-17T20:29:50.000Z' },
+    }));
+    assert.strictEqual(decision.action, 'none');
+    assert.strictEqual(decision.healthCode, 'CARRIED_POSITION_AWAITING_OPEN');
+    assert.strictEqual(decision.blockEntries, true);
+});
+

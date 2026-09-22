@@ -31,6 +31,12 @@ function eventSymbol(event: AlpacaDayTradeJournalEvent): string | null {
   return typeof symbol === 'string' ? symbol : null
 }
 
+function eventBrokerMessage(event: AlpacaDayTradeJournalEvent): string | null {
+  const detail = event.detail as { broker_message?: unknown; brokerMessage?: unknown } | null
+  const message = detail?.broker_message ?? detail?.brokerMessage
+  return typeof message === 'string' && message.trim() ? message.trim() : null
+}
+
 type JournalSourceFilter = 'all' | 'semantic' | 'order_audit' | 'fill'
 
 const SOURCE_FILTER_LABELS: Record<JournalSourceFilter, string> = {
@@ -79,6 +85,11 @@ function JournalTimeline({ events }: { events: AlpacaDayTradeJournalEvent[] }) {
                   {event.outcome && <span className="font-medium">{event.outcome}</span>}
                 </div>
                 {event.reason && <p className="mt-1 text-muted-foreground">{event.reason}</p>}
+                {eventBrokerMessage(event) && (
+                  <p className="mt-1 text-destructive font-mono text-[11px]">
+                    Broker: {eventBrokerMessage(event)}
+                  </p>
+                )}
               </li>
             )
           })}

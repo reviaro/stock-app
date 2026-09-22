@@ -86,3 +86,80 @@ test('createSessionDateResolver refetches once the cache has expired', async () 
     await resolve(new Date('2026-09-18T14:00:02.000Z'));
     assert.strictEqual(calls, 2, 'a call after the TTL has elapsed must refetch');
 });
+
+function createFakeCalendarClient(entries) {
+    let calls = 0;
+    return {
+        get calls() { return calls; },
+        getCalendar: async ({ start, end }) => {
+            calls += 1;
+            return entries.filter((e) => (!start || e.date >= start) && (!end || e.date <= end));
+        },
+    };
+}
+
+test('C1 day roll: resolver with default 24h TTL refetches on new ET date and returns new session date', async () => {
+    const entries = [
+        { date: '2026-09-21', open: '09:30', close: '16:00' },
+        { date: '2026-09-22', open: '09:30', close: '16:00' },
+    ];
+    const client = createFakeCalendarClient(entries);
+    const resolve = createSessionDateResolver({ client });
+
+    const first = await resolve(new Date('2026-09-21T22:02:00Z'));
+    assert.strictEqual(first, '2026-09-21');
+
+    const second = await resolve(new Date('2026-09-22T13:31:00Z'));
+    assert.strictEqual(second, '2026-09-22');
+    assert.strictEqual(client.calls, 2);
+});
+
+test('C2 same ET day: two calls on the same ET date within the TTL -> one fetch', async () => {
+    const entries = [
+        { date: '2026-09-21', open: '09:30', close: '16:00' },
+        { date: '2026-09-22', open: '09:30', close: '16:00' },
+    ];
+    const client = createFakeCalendarClient(entries);
+    const resolve = createSessionDateResolver({ client });
+
+    const first = await resolve(new Date('2026-09-22T13:31:00Z'));
+    const second = await resolve(new Date('2026-09-22T15:00:00Z'));
+    assert.strictEqual(first, '2026-09-22');
+    assert.strictEqual(second, '2026-09-22');
+    assert.strictEqual(client.calls, 1);
+});
+
+test('C3 before the open: call at 01:00 ET after the 09-21 fetch -> refetches and returns 09-21, later at 09:31 ET does not refetch and returns 09-22', async () => {
+    const entries = [
+        { date: '2026-09-21', open: '09:30', close: '16:00' },
+        { date: '2026-09-22', open: '09:30', close: '16:00' },
+    ];
+    const client = createFakeCalendarClient(entries);
+    const resolve = createSessionDateResolver({ client });
+
+    const call1 = await resolve(new Date('2026-09-21T22:02:00Z'));
+    assert.strictEqual(call1, '2026-09-21');
+    assert.strictEqual(client.calls, 1);
+
+    const call2 = await resolve(new Date('2026-09-22T05:00:00Z'));
+    assert.strictEqual(call2, '2026-09-21');
+    assert.strictEqual(client.calls, 2);
+
+    const call3 = await resolve(new Date('2026-09-22T13:31:00Z'));
+    assert.strictEqual(call3, '2026-09-22');
+    assert.strictEqual(client.calls, 2);
+});
+
+test('C4 weekend: fetch on Saturday 2026-09-26, then another Saturday call -> exactly one fetch', async () => {
+    const entries = [
+        { date: '2026-09-25', open: '09:30', close: '16:00' },
+    ];
+    const client = createFakeCalendarClient(entries);
+    const resolve = createSessionDateResolver({ client });
+
+    const first = await resolve(new Date('2026-09-26T14:00:00Z'));
+    const second = await resolve(new Date('2026-09-26T18:00:00Z'));
+    assert.strictEqual(first, '2026-09-25');
+    assert.strictEqual(second, '2026-09-25');
+    assert.strictEqual(client.calls, 1);
+});

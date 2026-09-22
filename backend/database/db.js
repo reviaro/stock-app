@@ -2490,6 +2490,112 @@ function listAlpacaPaperFillsForPlan(planId) {
     });
 }
 
+function syncAlpacaDayTradePlanFillSummary(planId, derive) {
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        let finished = false;
+        const fail = (error) => {
+            if (finished) return;
+            finished = true;
+            sqlite.run('ROLLBACK', () => {
+                sqlite.close((closeErr) => reject(error || closeErr));
+            });
+        };
+        sqlite.serialize(() => {
+            sqlite.run('BEGIN IMMEDIATE', (beginErr) => {
+                if (beginErr) {
+                    finished = true;
+                    sqlite.close(() => reject(beginErr));
+                    return;
+                }
+                sqlite.get('SELECT * FROM alpaca_day_trade_plans WHERE id = ?', [Number(planId)], (planErr, plan) => {
+                    if (planErr) return fail(planErr);
+                    if (!plan) {
+                        return sqlite.run('ROLLBACK', (rollbackErr) => {
+                            if (rollbackErr) return fail(rollbackErr);
+                            finished = true;
+                            sqlite.close((closeErr) => closeErr ? reject(closeErr) : resolve({ changed: false, reason: 'not_found' }));
+                        });
+                    }
+                    if (TERMINAL_ALPACA_DAY_TRADE_PLAN_STATES.includes(plan.state)) {
+                        return sqlite.run('COMMIT', (commitErr) => {
+                            if (commitErr) return fail(commitErr);
+                            finished = true;
+                            sqlite.close((closeErr) => closeErr ? reject(closeErr) : resolve({ changed: false, reason: 'terminal' }));
+                        });
+                    }
+                    sqlite.all(
+                        'SELECT * FROM alpaca_paper_fills WHERE plan_id = ? ORDER BY executed_at ASC, id ASC',
+                        [Number(planId)],
+                        (fillsErr, fills) => {
+                            if (fillsErr) return fail(fillsErr);
+                            let derived;
+                            try {
+                                derived = derive(plan, fills || []);
+                            } catch (deriveErr) {
+                                return fail(deriveErr);
+                            }
+                            if (!derived) {
+                                return sqlite.run('COMMIT', (commitErr) => {
+                                    if (commitErr) return fail(commitErr);
+                                    finished = true;
+                                    sqlite.close((closeErr) => closeErr ? reject(closeErr) : resolve({ changed: false, reason: 'unchanged' }));
+                                });
+                            }
+                            const { patch, event } = derived;
+                            if (!patch || typeof patch !== 'object') {
+                                return fail(new Error('derive must return a patch object'));
+                            }
+                            if (TERMINAL_ALPACA_DAY_TRADE_PLAN_STATES.includes(patch.state)) {
+                                return fail(new Error('cannot move plan into terminal state via fill summary sync'));
+                            }
+                            sqlite.run(
+                                `UPDATE alpaca_day_trade_plans
+                                 SET state = ?, filled_entry_qty = ?, avg_entry_price = ?, filled_exit_qty = ?, avg_exit_price = ?, opened_at = COALESCE(opened_at, ?)
+                                 WHERE id = ? AND state NOT IN ('closed', 'cancelled', 'error')`,
+                                [
+                                    patch.state,
+                                    patch.filled_entry_qty,
+                                    patch.avg_entry_price,
+                                    patch.filled_exit_qty,
+                                    patch.avg_exit_price,
+                                    patch.opened_at,
+                                    Number(planId),
+                                ],
+                                function(updateErr) {
+                                    if (updateErr) return fail(updateErr);
+                                    const finishCommit = () => {
+                                        sqlite.run('COMMIT', (commitErr) => {
+                                            if (commitErr) return fail(commitErr);
+                                            finished = true;
+                                            sqlite.close((closeErr) => closeErr ? reject(closeErr) : resolve({ changed: true, previousState: plan.state, state: patch.state }));
+                                        });
+                                    };
+                                    if (event) {
+                                        let normalized;
+                                        try {
+                                            normalized = normalizeAlpacaDayTradeEvent(event);
+                                        } catch (normErr) {
+                                            return fail(normErr);
+                                        }
+                                        insertAlpacaDayTradeEventRow(sqlite, normalized, (eventErr) => {
+                                            if (eventErr) return fail(eventErr);
+                                            finishCommit();
+                                        });
+                                    } else {
+                                        finishCommit();
+                                    }
+                                },
+                            );
+                        },
+                    );
+                });
+            });
+        });
+    });
+}
+
+
 function getAlpacaMonitorState() {
     return new Promise((resolve, reject) => {
         const sqlite = getDb();
@@ -2762,6 +2868,7 @@ module.exports = {
     updateAlpacaDayTradePlan,
     createAlpacaPaperFill,
     listAlpacaPaperFillsForPlan,
+    syncAlpacaDayTradePlanFillSummary,
     appendAlpacaDayTradeEvent,
     listAlpacaDayTradeEvents,
     getAlpacaDayTradeEventByKey,
