@@ -7,6 +7,7 @@ import yfinance as yf
 import json
 import sys
 import argparse
+import math
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
@@ -366,6 +367,19 @@ def get_demo_canslim(symbol):
         }
     }
 
+def _drop_partial_bars(hist):
+    """Drop bars the provider returned without complete OHLC prices (e.g. volume but NaN prices).
+
+    A single NaN close would otherwise poison every later EMA/RSI value and any SMA window
+    containing it, and a NaN latest bar would become the reported price.
+    """
+    if hist is None or len(hist) == 0:
+        return hist
+    price_cols = [col for col in ('Open', 'High', 'Low', 'Close') if col in hist.columns]
+    if not price_cols:
+        return hist
+    return hist.dropna(subset=price_cols)
+
 def get_stock_info(symbol):
     """Get basic stock info and quote data"""
     # Try yfinance first
@@ -374,6 +388,7 @@ def get_stock_info(symbol):
         
         # Get current price from history
         hist = stock.history(period="5d", interval="1d", timeout=10)
+        hist = _drop_partial_bars(hist)
         
         price = 0
         change = 0
@@ -504,14 +519,38 @@ def get_history(symbol, period='1y', interval='1d'):
         hist = stock.history(period=period, interval=interval, timeout=10)
         
         data = []
+        # The provider occasionally returns partial bars (e.g. at market close or during settlement)
+        # with volume but missing/NaN OHLC; skip any bar without valid finite price values.
         for idx, row in hist.iterrows():
+            if not all(col in row for col in ('Open', 'High', 'Low', 'Close')):
+                continue
+            o, h, l, c = row['Open'], row['High'], row['Low'], row['Close']
+            if any(v is None or pd.isna(v) for v in (o, h, l, c)):
+                continue
+            try:
+                fo, fh, fl, fc = float(o), float(h), float(l), float(c)
+            except (TypeError, ValueError):
+                continue
+            if not (math.isfinite(fo) and math.isfinite(fh) and math.isfinite(fl) and math.isfinite(fc)):
+                continue
+
+            v_raw = row['Volume'] if 'Volume' in row else 0
+            if v_raw is None or pd.isna(v_raw):
+                vol = 0
+            else:
+                try:
+                    fv = float(v_raw)
+                    vol = int(fv) if math.isfinite(fv) else 0
+                except (TypeError, ValueError):
+                    vol = 0
+
             data.append({
                 'date': idx.isoformat(),
-                'open': round(float(row['Open']), 2),
-                'high': round(float(row['High']), 2),
-                'low': round(float(row['Low']), 2),
-                'close': round(float(row['Close']), 2),
-                'volume': int(row['Volume'])
+                'open': round(fo, 2),
+                'high': round(fh, 2),
+                'low': round(fl, 2),
+                'close': round(fc, 2),
+                'volume': vol
             })
         
         return {
@@ -771,6 +810,7 @@ def get_market_indexes():
             try:
                 ticker = yf.Ticker(symbol)
                 hist = ticker.history(period="5d", interval="1d", timeout=10)
+                hist = _drop_partial_bars(hist)
                 info = ticker.info
                 
                 price = 0
@@ -974,6 +1014,7 @@ def get_technical_indicators(symbol):
         stock = yf.Ticker(symbol)
         # Get enough data for all indicators (need 200+ days for SMA200)
         hist = stock.history(period="1y", interval="1d", timeout=10)
+        hist = _drop_partial_bars(hist)
         
         if hist is None or len(hist) < 30:
             return get_demo_technical(symbol)
@@ -1319,6 +1360,23 @@ def get_demo_technical(symbol):
         }
     }
 
+def _nan_safe_serialize(obj):
+    """Recursively convert any float that is NaN or infinite (including numpy types) to None."""
+    if isinstance(obj, dict):
+        return {k: _nan_safe_serialize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_nan_safe_serialize(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [_nan_safe_serialize(v) for v in obj]
+    if isinstance(obj, (float, np.floating)):
+        if not math.isfinite(float(obj)):
+            return None
+        return float(obj)
+    return obj
+
+def _nan_safe_dumps(obj):
+    return json.dumps(_nan_safe_serialize(obj), allow_nan=False)
+
 def main():
     # Read JSON from stdin
     try:
@@ -1369,7 +1427,7 @@ def main():
     else:
         result = {'status': 'error', 'error': f'Unknown action: {action}'}
     
-    print(json.dumps(result))
+    print(_nan_safe_dumps(result))
 
 if __name__ == '__main__':
     main()
