@@ -238,3 +238,212 @@ yf_wrapper.main()
         assert.strictEqual(entry.volume, 0);
     }
 });
+
+test('H8 market direction and sector performance ignore a latest non-finite Yahoo bar', () => {
+    const source = `
+import sys
+import pandas as pd
+
+sys.path.insert(0, 'python')
+import yf_wrapper
+
+idx = pd.date_range('2026-06-01', periods=70, tz='America/New_York')
+closes = [100.0] * 70
+closes[50] = 110.0
+closes[51] = 100.0
+closes[52] = 101.0
+closes[53] = 100.5
+closes[54] = 100.8
+closes[55] = 102.5
+for i in range(56, 69):
+    closes[i] = 102.0
+closes[69] = float('inf')
+rows = []
+for i, close in enumerate(closes):
+    rows.append({
+        'Open': close - 0.5,
+        'High': close + 1.0,
+        'Low': close - 1.0,
+        'Close': close,
+        'Volume': 2000 if i == 55 else 1000,
+    })
+frame = pd.DataFrame(rows, index=idx)
+
+class FakeTicker:
+    def history(self, **kwargs):
+        return frame.copy()
+
+yf_wrapper.yf.Ticker = lambda _symbol: FakeTicker()
+direction = yf_wrapper.detect_market_direction()
+sectors = yf_wrapper.get_sector_performance()
+print(yf_wrapper._nan_safe_dumps({'direction': direction, 'sectors': sectors}))
+`;
+    const parsed = runPython(source);
+    assert.strictEqual(parsed.direction.status, 'Confirmed Uptrend');
+    assert.strictEqual(parsed.direction.ftd_detected, true);
+    assert.strictEqual(parsed.sectors.status, 'success');
+    assert.strictEqual(parsed.sectors.data.length, 11);
+    for (const row of parsed.sectors.data) {
+        assert.ok(Number.isFinite(row.price), `${row.ticker} price must be finite`);
+        assert.ok(Number.isFinite(row.change1M), `${row.ticker} 1M return must be finite`);
+        assert.ok(Number.isFinite(row.change3M), `${row.ticker} 3M return must be finite`);
+        assert.ok(Number.isFinite(row.change6M), `${row.ticker} 6M return must be finite`);
+    }
+});
+
+test('H9 universe updater drops non-finite bars before storing weighted performance', () => {
+    const source = `
+import json
+import sys
+import math
+import contextlib
+import pandas as pd
+
+sys.path.insert(0, 'python')
+import universe_updater
+
+idx = pd.date_range('2025-09-01', periods=260, tz='America/New_York')
+rows = []
+for i in range(260):
+    close = 100.0 + i * 0.1
+    rows.append({'Open': close - 0.5, 'High': close + 1.0, 'Low': close - 1.0, 'Close': close, 'Volume': 1000 + i})
+rows[-1] = {'Open': float('inf'), 'High': float('inf'), 'Low': float('inf'), 'Close': float('inf'), 'Volume': float('inf')}
+frame = pd.DataFrame(rows, index=idx)
+
+class FakeTicker:
+    def history(self, **kwargs):
+        return frame.copy()
+
+class FakeCursor:
+    def __init__(self):
+        self.writes = []
+    def execute(self, sql, params):
+        self.writes.append(params)
+
+class FakeConnection:
+    def __init__(self):
+        self.cursor_obj = FakeCursor()
+    def cursor(self):
+        return self.cursor_obj
+    def commit(self):
+        pass
+    def close(self):
+        pass
+
+connection = FakeConnection()
+universe_updater.SP500_TOP100 = ['TEST']
+universe_updater.yf.Ticker = lambda _symbol: FakeTicker()
+universe_updater.sqlite3.connect = lambda _path: connection
+universe_updater.time.sleep = lambda _seconds: None
+with contextlib.redirect_stdout(sys.stderr):
+    universe_updater.update_universe_cache()
+score = connection.cursor_obj.writes[0][1] if connection.cursor_obj.writes else None
+print(json.dumps({
+    'write_count': len(connection.cursor_obj.writes),
+    'symbol': connection.cursor_obj.writes[0][0] if connection.cursor_obj.writes else None,
+    'score_is_finite': score is not None and math.isfinite(score),
+}))
+`;
+    const parsed = runPython(source);
+    assert.strictEqual(parsed.write_count, 1);
+    assert.strictEqual(parsed.symbol, 'TEST');
+    assert.strictEqual(parsed.score_is_finite, true);
+});
+
+test('H10 universe updater never stores an overflowed weighted score from extreme but finite prices', () => {
+    const source = `
+import json
+import sys
+import contextlib
+import pandas as pd
+
+sys.path.insert(0, 'python')
+import universe_updater
+
+idx = pd.date_range('2025-09-01', periods=260, tz='America/New_York')
+rows = []
+for i in range(260):
+    close = 1e-308
+    rows.append({'Open': close, 'High': close, 'Low': close, 'Close': close, 'Volume': 1000})
+rows[-1] = {'Open': 1e308, 'High': 1e308, 'Low': 1e308, 'Close': 1e308, 'Volume': 1000}
+frame = pd.DataFrame(rows, index=idx)
+
+class FakeTicker:
+    def history(self, **kwargs):
+        return frame.copy()
+
+class FakeCursor:
+    def __init__(self):
+        self.writes = []
+    def execute(self, sql, params):
+        self.writes.append(params)
+
+class FakeConnection:
+    def __init__(self):
+        self.cursor_obj = FakeCursor()
+    def cursor(self):
+        return self.cursor_obj
+    def commit(self):
+        pass
+    def close(self):
+        pass
+
+connection = FakeConnection()
+universe_updater.SP500_TOP100 = ['TEST']
+universe_updater.yf.Ticker = lambda _symbol: FakeTicker()
+universe_updater.sqlite3.connect = lambda _path: connection
+universe_updater.time.sleep = lambda _seconds: None
+with contextlib.redirect_stdout(sys.stderr):
+    universe_updater.update_universe_cache()
+print(json.dumps({'write_count': len(connection.cursor_obj.writes)}))
+`;
+    const parsed = runPython(source);
+    assert.strictEqual(parsed.write_count, 0);
+});
+
+test('H11 update_universe main action keeps progress logs off stdout and returns one strict JSON document', () => {
+    const source = `
+import sys
+import pandas as pd
+
+sys.path.insert(0, 'python')
+import universe_updater
+import yf_wrapper
+
+idx = pd.date_range('2025-09-01', periods=260, tz='America/New_York')
+rows = []
+for i in range(260):
+    close = 100.0 + i * 0.1
+    rows.append({'Open': close - 0.5, 'High': close + 1.0, 'Low': close - 1.0, 'Close': close, 'Volume': 1000 + i})
+frame = pd.DataFrame(rows, index=idx)
+
+class FakeTicker:
+    def history(self, **kwargs):
+        return frame.copy()
+
+class FakeCursor:
+    def __init__(self):
+        self.writes = []
+    def execute(self, sql, params):
+        self.writes.append(params)
+
+class FakeConnection:
+    def __init__(self):
+        self.cursor_obj = FakeCursor()
+    def cursor(self):
+        return self.cursor_obj
+    def commit(self):
+        pass
+    def close(self):
+        pass
+
+connection = FakeConnection()
+universe_updater.SP500_TOP100 = ['TEST']
+universe_updater.yf.Ticker = lambda _symbol: FakeTicker()
+universe_updater.sqlite3.connect = lambda _path: connection
+universe_updater.time.sleep = lambda _seconds: None
+yf_wrapper.main()
+`;
+    const parsed = runPython(source, { input: JSON.stringify({ action: 'update_universe' }) });
+    assert.deepStrictEqual(parsed, { status: 'success', message: 'Universe cache updated' });
+});

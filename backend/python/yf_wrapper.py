@@ -606,6 +606,7 @@ def detect_market_direction(index_symbol='^IXIC'):
     try:
         index = yf.Ticker(index_symbol)
         hist = index.history(period='6mo', interval='1d', timeout=10)
+        hist = _normalize_bars(hist)
 
         if hist is None or len(hist) < 60:
             return {'status': 'Uptrend Under Pressure', 'ftd_detected': False}
@@ -1228,6 +1229,7 @@ def get_sector_performance():
             try:
                 etf = yf.Ticker(ticker)
                 hist = etf.history(period='6mo')
+                hist = _normalize_bars(hist)
                 if hist.empty or len(hist) < 5:
                     continue
                 current = float(hist['Close'].iloc[-1])
