@@ -494,6 +494,105 @@ function initDb() {
             db.run('ALTER TABLE alpaca_monitor_state ADD COLUMN block_entries INTEGER NOT NULL DEFAULT 0 CHECK (block_entries IN (0, 1))', ignoreDuplicateColumnError);
             db.run(`INSERT OR IGNORE INTO alpaca_monitor_state (id, mode) VALUES (1, 'disabled')`);
 
+            // Alpaca Day Trading v2 strategy lab: isolated from every v1 table above. Alpaca is
+            // authoritative for broker state; these rows hold strategy intent, canonical fills,
+            // an immutable sanitized journal, and the singleton monitor latch.
+            db.run(`
+                CREATE TABLE IF NOT EXISTS alpaca_dt_v2_plans (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_order_id TEXT NOT NULL UNIQUE,
+                    symbol TEXT NOT NULL,
+                    setup TEXT NOT NULL,
+                    catalyst TEXT NOT NULL,
+                    thesis TEXT NOT NULL,
+                    invalidation TEXT NOT NULL,
+                    planned_qty INTEGER NOT NULL CHECK (planned_qty > 0),
+                    planned_entry_price REAL NOT NULL CHECK (planned_entry_price > 0),
+                    planned_stop REAL NOT NULL CHECK (planned_stop > 0),
+                    planned_target REAL NOT NULL CHECK (planned_target > 0),
+                    planned_risk_dollars REAL NOT NULL CHECK (planned_risk_dollars > 0),
+                    exit_deadline TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending_submission'
+                        CHECK (state IN ('pending_submission', 'submission_unknown', 'working', 'active', 'time_exit_pending', 'attention_required', 'closed', 'cancelled', 'rejected')),
+                    attention_code TEXT,
+                    parent_order_id TEXT,
+                    stop_order_id TEXT,
+                    target_order_id TEXT,
+                    exit_order_id TEXT,
+                    filled_entry_qty INTEGER NOT NULL DEFAULT 0 CHECK (filled_entry_qty >= 0),
+                    avg_entry_price REAL,
+                    filled_exit_qty INTEGER NOT NULL DEFAULT 0 CHECK (filled_exit_qty >= 0),
+                    avg_exit_price REAL,
+                    exit_reason TEXT CHECK (exit_reason IS NULL OR exit_reason IN ('take_profit', 'stop_loss', 'time_exit', 'operator_resolved')),
+                    realized_pnl REAL,
+                    realized_r REAL,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    opened_at TEXT,
+                    closed_at TEXT
+                )
+            `);
+            db.run(`
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_alpaca_dt_v2_plans_one_nonterminal
+                ON alpaca_dt_v2_plans(symbol)
+                WHERE state NOT IN ('closed', 'cancelled', 'rejected')
+            `);
+            db.run(`
+                CREATE TABLE IF NOT EXISTS alpaca_dt_v2_fills (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    execution_id TEXT NOT NULL UNIQUE,
+                    plan_id INTEGER REFERENCES alpaca_dt_v2_plans(id),
+                    order_id TEXT NOT NULL,
+                    order_client_id TEXT,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+                    qty INTEGER NOT NULL CHECK (qty > 0),
+                    price REAL NOT NULL CHECK (price > 0),
+                    role TEXT CHECK (role IS NULL OR role IN ('entry', 'bracket_exit', 'time_exit')),
+                    executed_at TEXT NOT NULL,
+                    source TEXT NOT NULL CHECK (source IN ('websocket', 'rest')),
+                    imported_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                )
+            `);
+            db.run('CREATE INDEX IF NOT EXISTS idx_alpaca_dt_v2_fills_plan ON alpaca_dt_v2_fills(plan_id, executed_at)');
+            db.run(`
+                CREATE TABLE IF NOT EXISTS alpaca_dt_v2_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_key TEXT NOT NULL UNIQUE,
+                    plan_id INTEGER REFERENCES alpaca_dt_v2_plans(id),
+                    event_type TEXT NOT NULL,
+                    action TEXT,
+                    outcome TEXT,
+                    reason_code TEXT,
+                    detail_json TEXT NOT NULL DEFAULT '{}',
+                    occurred_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                )
+            `);
+            db.run('CREATE INDEX IF NOT EXISTS idx_alpaca_dt_v2_events_timeline ON alpaca_dt_v2_events(occurred_at, id)');
+            db.run(`CREATE TRIGGER IF NOT EXISTS alpaca_dt_v2_events_no_update
+                BEFORE UPDATE ON alpaca_dt_v2_events BEGIN
+                    SELECT RAISE(ABORT, 'alpaca_dt_v2_events is immutable');
+                END`);
+            db.run(`CREATE TRIGGER IF NOT EXISTS alpaca_dt_v2_events_no_delete
+                BEFORE DELETE ON alpaca_dt_v2_events BEGIN
+                    SELECT RAISE(ABORT, 'alpaca_dt_v2_events is immutable');
+                END`);
+            db.run(`
+                CREATE TABLE IF NOT EXISTS alpaca_dt_v2_monitor_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    mode TEXT NOT NULL DEFAULT 'disabled' CHECK (mode IN ('disabled', 'shadow', 'paper_execute')),
+                    kill_switch INTEGER NOT NULL DEFAULT 0 CHECK (kill_switch IN (0, 1)),
+                    attention_required INTEGER NOT NULL DEFAULT 0 CHECK (attention_required IN (0, 1)),
+                    attention_code TEXT,
+                    last_reconciled_at TEXT,
+                    last_websocket_at TEXT,
+                    session_date TEXT,
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                )
+            `);
+            db.run(`INSERT OR IGNORE INTO alpaca_dt_v2_monitor_state (id, mode) VALUES (1, 'disabled')`);
+
             // Strategy Lab is an evidence registry only. These isolated tables contain
             // experiment definitions, versioned rules, and observed test/paper runs.
             db.run(`
@@ -614,7 +713,8 @@ function initDb() {
                 // serialized db.run fire-and-forget callbacks can swallow failures and
                 // let initDb resolve over a partially migrated database. The setup
                 // connection was closed above, so verify on a fresh connection.
-                const REQUIRED_TABLES = ['watchlist', 'simulator_sleeves', 'sim_transactions', 'sim_reinvestment_settings', 'sim_dividends', 'sim_trade_plans'];
+                const REQUIRED_TABLES = ['watchlist', 'simulator_sleeves', 'sim_transactions', 'sim_reinvestment_settings', 'sim_dividends', 'sim_trade_plans',
+                    'alpaca_dt_v2_plans', 'alpaca_dt_v2_fills', 'alpaca_dt_v2_events', 'alpaca_dt_v2_monitor_state'];
                 const verifyDb = getDb();
                 verifyDb.all(
                     `SELECT name FROM sqlite_master WHERE type = 'table'`,
