@@ -3,7 +3,13 @@ import sqlite3
 import pandas as pd
 import os
 import time
+import math
+import sys
 from datetime import datetime
+from yf_wrapper import _normalize_bars
+
+def _log(message):
+    print(message, file=sys.stderr, flush=True)
 
 # Top 100 S&P 500 tickers by market cap (approximate/manual list)
 # TODO: expand to full S&P 500 via Wikipedia scrape
@@ -39,12 +45,13 @@ def calculate_weighted_performance(closes):
         return None
         
     score = (2 * (p_now / p_63d)) + (p_now / p_126d) + (p_now / p_189d) + (p_now / p_252d)
-    return float(score)
+    score = float(score)
+    return score if math.isfinite(score) else None
 
 def update_universe_cache():
     DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'database', 'stocks.db')
     
-    print(f"[universe_updater] Starting cache update for {len(SP500_TOP100)} tickers...", flush=True)
+    _log(f"[universe_updater] Starting cache update for {len(SP500_TOP100)} tickers...")
     
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -57,19 +64,21 @@ def update_universe_cache():
                 # auto_adjust=True for dividend/split adjusted prices
                 stock = yf.Ticker(ticker)
                 hist = stock.history(period='1y', interval='1d', auto_adjust=True, timeout=10)
+                hist = _normalize_bars(hist)
                 
                 if len(hist) < 252:
                     # Try to get slightly more data if 1y is just short of 252 days due to holidays
                     hist = stock.history(period='2y', interval='1d', auto_adjust=True, timeout=10)
+                    hist = _normalize_bars(hist)
                 
                 if len(hist) < 252:
-                    print(f"[universe_updater] Skipping {ticker}: Insufficient data ({len(hist)} days)", flush=True)
+                    _log(f"[universe_updater] Skipping {ticker}: Insufficient data ({len(hist)} days)")
                     continue
                 
                 closes = hist['Close'].tolist()
                 weighted_score = calculate_weighted_performance(closes)
                 
-                if weighted_score is not None:
+                if weighted_score is not None and math.isfinite(weighted_score):
                     cursor.execute(
                         "INSERT OR REPLACE INTO universe_cache (symbol, weighted_score, updated_at) VALUES (?, ?, datetime('now'))",
                         (ticker, weighted_score)
@@ -80,14 +89,14 @@ def update_universe_cache():
                 time.sleep(0.1)
                 
             except Exception as e:
-                print(f"[universe_updater] Failed to update {ticker}: {str(e)}", flush=True)
+                _log(f"[universe_updater] Failed to update {ticker}: {str(e)}")
         
         conn.commit()
         conn.close()
-        print(f"[universe_updater] Updated {count}/{len(SP500_TOP100)} tickers", flush=True)
+        _log(f"[universe_updater] Updated {count}/{len(SP500_TOP100)} tickers")
         
     except Exception as e:
-        print(f"[universe_updater] Database error: {str(e)}", flush=True)
+        _log(f"[universe_updater] Database error: {str(e)}")
 
 if __name__ == "__main__":
     update_universe_cache()

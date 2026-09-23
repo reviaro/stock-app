@@ -7,6 +7,7 @@ import yfinance as yf
 import json
 import sys
 import argparse
+import math
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
@@ -366,6 +367,30 @@ def get_demo_canslim(symbol):
         }
     }
 
+OHLC_COLUMNS = ('Open', 'High', 'Low', 'Close')
+
+def _normalize_bars(hist):
+    """Return only bars with finite Open/High/Low/Close, and a finite integer Volume.
+
+    The provider occasionally returns partial bars (volume but NaN prices, or non-finite values).
+    One such bar would otherwise poison every later EMA/RSI value and any SMA window containing
+    it, become the reported latest price, or crash int(volume). All four OHLC columns are
+    required; a frame missing any of them yields no bars. Invalid or missing volume becomes 0.
+    """
+    if hist is None or len(hist) == 0:
+        return hist
+    if not all(col in hist.columns for col in OHLC_COLUMNS):
+        return hist.iloc[0:0]
+    bars = hist.copy()
+    for col in OHLC_COLUMNS:
+        bars[col] = pd.to_numeric(bars[col], errors='coerce')
+    finite = np.isfinite(bars[list(OHLC_COLUMNS)].to_numpy(dtype=float)).all(axis=1)
+    bars = bars[finite]
+    volume = pd.to_numeric(bars['Volume'], errors='coerce') if 'Volume' in bars.columns else pd.Series(0, index=bars.index)
+    volume = volume.where(np.isfinite(volume.to_numpy(dtype=float)), 0)
+    bars['Volume'] = volume.astype('int64')
+    return bars
+
 def get_stock_info(symbol):
     """Get basic stock info and quote data"""
     # Try yfinance first
@@ -374,6 +399,7 @@ def get_stock_info(symbol):
         
         # Get current price from history
         hist = stock.history(period="5d", interval="1d", timeout=10)
+        hist = _normalize_bars(hist)
         
         price = 0
         change = 0
@@ -503,6 +529,8 @@ def get_history(symbol, period='1y', interval='1d'):
         stock = yf.Ticker(symbol)
         hist = stock.history(period=period, interval=interval, timeout=10)
         
+        hist = _normalize_bars(hist)
+
         data = []
         for idx, row in hist.iterrows():
             data.append({
@@ -513,7 +541,7 @@ def get_history(symbol, period='1y', interval='1d'):
                 'close': round(float(row['Close']), 2),
                 'volume': int(row['Volume'])
             })
-        
+
         return {
             'status': 'success',
             'data': {
@@ -578,6 +606,7 @@ def detect_market_direction(index_symbol='^IXIC'):
     try:
         index = yf.Ticker(index_symbol)
         hist = index.history(period='6mo', interval='1d', timeout=10)
+        hist = _normalize_bars(hist)
 
         if hist is None or len(hist) < 60:
             return {'status': 'Uptrend Under Pressure', 'ftd_detected': False}
@@ -771,6 +800,7 @@ def get_market_indexes():
             try:
                 ticker = yf.Ticker(symbol)
                 hist = ticker.history(period="5d", interval="1d", timeout=10)
+                hist = _normalize_bars(hist)
                 info = ticker.info
                 
                 price = 0
@@ -974,6 +1004,7 @@ def get_technical_indicators(symbol):
         stock = yf.Ticker(symbol)
         # Get enough data for all indicators (need 200+ days for SMA200)
         hist = stock.history(period="1y", interval="1d", timeout=10)
+        hist = _normalize_bars(hist)
         
         if hist is None or len(hist) < 30:
             return get_demo_technical(symbol)
@@ -1198,6 +1229,7 @@ def get_sector_performance():
             try:
                 etf = yf.Ticker(ticker)
                 hist = etf.history(period='6mo')
+                hist = _normalize_bars(hist)
                 if hist.empty or len(hist) < 5:
                     continue
                 current = float(hist['Close'].iloc[-1])
@@ -1319,6 +1351,23 @@ def get_demo_technical(symbol):
         }
     }
 
+def _nan_safe_serialize(obj):
+    """Recursively convert any float that is NaN or infinite (including numpy types) to None."""
+    if isinstance(obj, dict):
+        return {k: _nan_safe_serialize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_nan_safe_serialize(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [_nan_safe_serialize(v) for v in obj]
+    if isinstance(obj, (float, np.floating)):
+        if not math.isfinite(float(obj)):
+            return None
+        return float(obj)
+    return obj
+
+def _nan_safe_dumps(obj):
+    return json.dumps(_nan_safe_serialize(obj), allow_nan=False)
+
 def main():
     # Read JSON from stdin
     try:
@@ -1369,7 +1418,7 @@ def main():
     else:
         result = {'status': 'error', 'error': f'Unknown action: {action}'}
     
-    print(json.dumps(result))
+    print(_nan_safe_dumps(result))
 
 if __name__ == '__main__':
     main()
