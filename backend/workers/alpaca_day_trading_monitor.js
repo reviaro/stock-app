@@ -18,6 +18,21 @@ function workerError(code, message) {
     return Object.assign(new Error(message), { code });
 }
 
+// v1 is retired (v2 strategy lab): this worker may still observe and journal historical plans,
+// but it must never place, cancel, or replace a broker order. Wrapping the client -- rather than
+// relying on the persisted v1 mode -- holds regardless of what mode production's DB row carries.
+const RETIRED_V1_MUTATIONS = ['submitOrder', 'cancelOrder', 'replaceOrder'];
+function retireV1BrokerMutations(client) {
+    return new Proxy(client, {
+        get(target, property, receiver) {
+            if (RETIRED_V1_MUTATIONS.includes(property)) {
+                return async () => { throw workerError('ALPACA_V1_RETIRED', `v1 Day Trading worker is read-only; ${property} refused`); };
+            }
+            return Reflect.get(target, property, receiver);
+        },
+    });
+}
+
 function isPidAlive(pid) {
     try {
         process.kill(pid, 0);
@@ -284,7 +299,7 @@ function createWorker({
             throw workerError('ALPACA_MONITOR_ALREADY_RUNNING', `another Day Trading monitor instance already holds ${lockPath}`);
         }
         try {
-            if (!client) client = createClient();
+            client = retireV1BrokerMutations(client || createClient());
             resolveSessionDate = createSessionDateResolver({ client });
             if (wsApiKey && wsApiSecret) {
                 stream = streamFactory({
@@ -334,7 +349,7 @@ function createWorker({
     return { start, stop, isReady: () => ready };
 }
 
-module.exports = { createWorker, acquireInstanceLock, DEFAULT_LOCK_PATH };
+module.exports = { createWorker, acquireInstanceLock, retireV1BrokerMutations, DEFAULT_LOCK_PATH };
 
 if (require.main === module) {
     const { createPaperClient } = require('../services/alpaca_paper_service');

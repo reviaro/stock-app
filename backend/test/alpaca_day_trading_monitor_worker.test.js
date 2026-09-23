@@ -489,7 +489,7 @@ test('shadow mode decides actions but never submits or cancels a broker order', 
     }
 });
 
-test('paper_execute mode actually submits the decided repair order', async () => {
+test('retired v1 worker never forwards a decided repair order to the broker, even in paper_execute', async () => {
     const lockPath = tempLockPath();
     await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: TEST_NOW().toISOString() });
     const { plan } = await store.createPlanWithEntry(
@@ -507,24 +507,24 @@ test('paper_execute mode actually submits the decided repair order', async () =>
     );
     await db.updateAlpacaDayTradePlan(plan.id, { entry_parent_broker_order_id: 'broker-parent-1' });
 
-    const submitted = [];
+    const mutations = [];
+    let positionReads = 0;
     const client = fakeClient({
-        getPosition: async () => ({ qty: 10, side: 'long' }),
+        getPosition: async () => { positionReads += 1; return { qty: 10, side: 'long' }; },
         getOrder: async () => ({ id: 'broker-parent-1', status: 'filled', qty: 10, filled_qty: 10, legs: null }),
-        submitOrder: async (order) => { submitted.push(order); return { id: 'x', status: 'accepted' }; },
+        submitOrder: async (order) => { mutations.push(['submit', order]); return { id: 'x', status: 'accepted' }; },
+        cancelOrder: async (id) => { mutations.push(['cancel', id]); return { canceled: true }; },
+        replaceOrder: async (id) => { mutations.push(['replace', id]); return null; },
     });
     const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
     try {
         await worker.start();
-        await new Promise((resolve, reject) => {
-            const start = Date.now();
-            (function check() {
-                if (submitted.length > 0) return resolve();
-                if (Date.now() - start > 3000) return reject(new Error('timed out waiting for a repair submission'));
-                setTimeout(check, 10);
-            }());
-        });
-        assert.strictEqual(submitted[0].client_order_id, `dt-repair-${plan.id}`);
+        const deadline = Date.now() + 60_000;
+        while (mutations.length === 0 && positionReads < 2 && Date.now() < deadline) {
+            await new Promise((resolve) => { setTimeout(resolve, 20); });
+        }
+        assert.ok(positionReads >= 1, 'the read-only v1 worker should still observe plans');
+        assert.deepStrictEqual(mutations, [], 'a retired v1 worker must never reach a broker mutation');
     } finally {
         await worker.stop();
         if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
@@ -571,48 +571,6 @@ test('an already-tripped kill switch suppresses the entire decide/execute loop f
     }
 });
 
-test('once one plan trips the kill switch mid-tick, a later plan in the same tick is not executed', async () => {
-    const lockPath = tempLockPath();
-    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: TEST_NOW().toISOString() });
-    // listPlans orders by id DESC (most recently created first), so the plan created *second*
-    // is the one the loop reaches first -- create the kill-switch-triggering plan last so it is
-    // processed before the plan that must end up skipped.
-    await seedPlan('NVDA', 'dt-nvda-entry-1');
-    await seedPlan('SHRT', 'dt-shrt-entry-1');
-
-    const submitted = [];
-    const client = fakeClient({
-        getPosition: async (symbol) => (symbol === 'SHRT' ? { qty: -10, side: 'short' } : { qty: 10, side: 'long' }),
-        getOrder: async (id) => ({ id, status: 'filled', qty: 10, filled_qty: 10, legs: null }),
-        submitOrder: async (order) => { submitted.push(order); return { id: 'x', status: 'accepted' }; },
-    });
-    const worker = createWorker({ client, lockPath, pollIntervalMs: 20, idlePollIntervalMs: 20, now: TEST_NOW });
-    try {
-        await worker.start();
-        await new Promise((resolve, reject) => {
-            const start = Date.now();
-            (function check() {
-                if (submitted.length > 0) return resolve();
-                if (Date.now() - start > 3000) return reject(new Error('timed out waiting for the buy-to-cover submission'));
-                setTimeout(check, 10);
-            }());
-        });
-        assert.strictEqual(submitted.length, 1, 'the plan after the kill-switch trip must not also be executed in the same tick');
-        assert.strictEqual(submitted[0].client_order_id.startsWith('dt-cover-'), true);
-
-        let state = await store.getMonitorState();
-        const stateDeadline = Date.now() + 10_000;
-        while (!state.kill_switch && Date.now() < stateDeadline) {
-            await new Promise((resolve) => { setTimeout(resolve, 20); });
-            state = await store.getMonitorState();
-        }
-        assert.strictEqual(state.kill_switch, 1); // SQLite stores this as an integer, not a JS boolean
-    } finally {
-        await worker.stop();
-        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
-    }
-});
-
 // Regression for a real bug: a semantic-event append is an audit row, not a lease. Gating the
 // decide/execute loop on its insert-or-ignore outcome (or letting a rejection from it escape
 // the per-plan loop) previously meant a repeated event_key -- most realistically produced by a
@@ -620,79 +578,6 @@ test('once one plan trips the kill switch mid-tick, a later plan in the same tic
 // the tick*: a later plan's own repair action, and even a pending kill-switch activation, along
 // with the terminal block_entries write that lets it self-heal. None of that may depend on
 // whether the plan's own decision event happened to write successfully.
-test('a semantic-event append failure for one plan does not suppress a later plan\'s management action or the terminal block_entries write', async () => {
-    const lockPath = tempLockPath();
-    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: TEST_NOW().toISOString() });
-    // listPlans orders by id DESC, so the plan created *second* (BBB) is processed *first*.
-    const planA = await seedPlan('AAA', 'dt-aaa-append-fail');
-    const planB = await seedPlan('BBB', 'dt-bbb-append-fail');
-
-    const submittedSymbols = [];
-    // Once a plan's repair order is submitted its legs become "discovered" -- like a real
-    // attach succeeding -- so the loop converges in one tick instead of resubmitting forever,
-    // which would otherwise hammer the db at the 20ms poll interval for the length of this test.
-    const coveredOrderIds = new Set();
-    const client = fakeClient({
-        getPosition: async () => ({ qty: 10, side: 'long' }), // uncovered -> attach_protective_oco for both, no kill switch
-        getOrder: async (id) => ({
-            id, status: 'filled', qty: 10, filled_qty: 10,
-            legs: coveredOrderIds.has(id)
-                ? [{ id: `${id}-stop`, type: 'stop', side: 'sell', qty: 10, filled_qty: 0, status: 'held' },
-                    { id: `${id}-target`, type: 'limit', side: 'sell', qty: 10, filled_qty: 0, status: 'held' }]
-                : null,
-        }),
-        submitOrder: async (order) => {
-            submittedSymbols.push(order.symbol);
-            coveredOrderIds.add(`broker-parent-${order.symbol}`);
-            return { id: `x-${order.symbol}`, status: 'accepted' };
-        },
-    });
-
-    const originalAppendEvent = store.appendEvent;
-    let injected = false;
-    // Simulates the real conflict shape (same event_key, diverged payload) landing on
-    // whichever plan the loop reaches first (BBB), without touching any other append.
-    store.appendEvent = (event) => {
-        if (!injected && event.event_type === 'monitor_decision' && event.plan_id === planB.id) {
-            injected = true;
-            return Promise.reject(Object.assign(new Error('simulated event key payload conflict'), { code: 'ALPACA_EVENT_KEY_CONFLICT' }));
-        }
-        return originalAppendEvent(event);
-    };
-
-    // A slower poll interval than this file's usual 20ms -- two plans both perpetually needing
-    // repair until the assertions below patch them covered means every tick writes several
-    // events for both, and this test doesn't need tick-tight timing to prove its point.
-    const worker = createWorker({ client, lockPath, pollIntervalMs: 50, idlePollIntervalMs: 50, now: TEST_NOW });
-    try {
-        await worker.start();
-        const submitDeadline = Date.now() + 5_000;
-        while (!(submittedSymbols.includes('AAA') && submittedSymbols.includes('BBB')) && Date.now() < submitDeadline) {
-            await new Promise((resolve) => { setTimeout(resolve, 50); });
-        }
-        assert.ok(injected, 'the injected failure must actually have fired for this assertion to mean anything');
-        assert.ok(submittedSymbols.includes('BBB'), 'the plan whose own decision-event append failed must still have its action executed');
-        assert.ok(submittedSymbols.includes('AAA'), 'a later plan in the same tick must still be managed after an earlier plan\'s decision-event append failed');
-        // Also directly persist discovery (the same two fields the real discoverProtectiveLegs
-        // path writes), same as the block_entries self-heal test above -- buildObservation reads
-        // these columns, not just the live getOrder legs, to decide a plan is covered.
-        await db.updateAlpacaDayTradePlan(planA.id, { protective_stop_broker_order_id: 'stop-aaa', protective_target_broker_order_id: 'target-aaa' });
-        await db.updateAlpacaDayTradePlan(planB.id, { protective_stop_broker_order_id: 'stop-bbb', protective_target_broker_order_id: 'target-bbb' });
-
-        let state = await store.getMonitorState();
-        const healDeadline = Date.now() + 5_000;
-        while (state.block_entries !== 0 && Date.now() < healDeadline) {
-            await new Promise((resolve) => { setTimeout(resolve, 50); });
-            state = await store.getMonitorState();
-        }
-        assert.strictEqual(state.block_entries, 0, 'the terminal block_entries write must still self-heal after a mid-tick decision-event append failure');
-    } finally {
-        store.appendEvent = originalAppendEvent;
-        await worker.stop();
-        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
-    }
-});
-
 test('stop() shuts down cleanly and releases the instance lock for the next start', async () => {
     const lockPath = tempLockPath();
     await store.updateMonitorState({ mode: 'disabled' });
