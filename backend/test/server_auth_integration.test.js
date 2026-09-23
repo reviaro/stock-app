@@ -72,7 +72,7 @@ test('server leaves auth session public while protecting dashboard APIs', async 
     }
 });
 
-test('dedicated Alpaca Day Trading bearer reaching a retired v1 scoped route gets ALPACA_V1_RETIRED', async () => {
+test('dedicated Alpaca Day Trading bearer is denied the retired v1 scoped routes', async () => {
     const token = 'day-trading-agent-token-at-least-32-characters';
     const auth = createAuth({
         username: 'dashboard-user',
@@ -102,8 +102,8 @@ test('dedicated Alpaca Day Trading bearer reaching a retired v1 scoped route get
                 },
                 body: { account_id: 999 },
             });
-            assert.equal(response.status, 410, path);
-            assert.equal(response.body.code, 'ALPACA_V1_RETIRED', path);
+            assert.equal(response.status, 403, path);
+            assert.equal(response.body.code, 'CAPABILITY_DENIED', path);
         }
     } finally {
         await new Promise((resolve) => server.close(resolve));

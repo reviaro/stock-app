@@ -1,6 +1,7 @@
 const express = require('express');
 const { getPaperConfiguration, getPaperAccountSummary, getPaperReconciliationSnapshot, submitPaperOrder, reconcilePaperOrderAudits, resolveMissingPaperOrderAudit } = require('../services/alpaca_paper_service');
 const dayTradeStore = require('../services/alpaca_day_trade_store');
+const dayTradeV2Store = require('../services/alpaca_day_trade_v2_store');
 
 const router = express.Router();
 
@@ -77,8 +78,8 @@ router.post('/orders', async (req, res) => {
     // exposure with no plan, no risk tracking, and no native bracket protection (Safety
     // Invariant #2) — refused before any other check, including the token check below, and
     // before any broker request.
-    const monitorState = await dayTradeStore.getMonitorState();
-    if (monitorState?.mode === 'paper_execute') {
+    const [monitorState, v2State] = await Promise.all([dayTradeStore.getMonitorState(), dayTradeV2Store.getMonitorState()]);
+    if (monitorState?.mode === 'paper_execute' || v2State?.mode === 'paper_execute') {
         return res.status(403).json({ status: 'error', error: 'raw Alpaca paper order entry is disabled while Day Trading owns this account' });
     }
     const orderEntryToken = process.env.ALPACA_PAPER_ORDER_ENTRY_TOKEN;
