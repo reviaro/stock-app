@@ -179,3 +179,127 @@ export interface AlpacaDayTradeJournal {
   trades: AlpacaDayTradePlan[]
   events: AlpacaDayTradeJournalEvent[]
 }
+
+// ---- v2 strategy lab (sanitized reader shapes: no broker/client/order ids by contract) ----
+
+export type AlpacaV2Mode = 'disabled' | 'shadow' | 'paper_execute'
+
+export interface AlpacaV2Status {
+  mode: AlpacaV2Mode
+  killSwitch: boolean
+  attentionRequired: boolean
+  attentionCode: string | null
+  lastReconciledAt: string | null
+  lastWebsocketAt: string | null
+  sessionDate: string | null
+  heartbeatFresh: boolean
+  openPlanCount: number
+  attentionPlanCount: number
+}
+
+export interface AlpacaV2Position {
+  symbol: string
+  qty: number | null
+  side: 'long' | 'short'
+  avgEntryPrice: number | null
+  currentPrice: number | null
+  marketValue: number | null
+  unrealizedPnl: number | null
+  planId: number | null
+}
+
+export interface AlpacaV2OpenOrder {
+  symbol: string
+  side: 'buy' | 'sell'
+  type: string | null
+  qty: number | null
+  filledQty: number | null
+  status: string | null
+  limitPrice: number | null
+  stopPrice: number | null
+  planOwned: boolean
+}
+
+export interface AlpacaV2Snapshot {
+  account: { cash: number | null; equity: number | null; status: string | null }
+  clock: { isOpen: boolean; nextOpen: string | null; nextClose: string | null }
+  positions: AlpacaV2Position[]
+  openOrders: AlpacaV2OpenOrder[]
+  limits: Record<string, number | string>
+}
+
+export interface AlpacaV2Plan {
+  id: number
+  symbol: string
+  setup: string
+  catalyst: string
+  thesis: string
+  invalidation: string
+  plannedQty: number
+  plannedEntryPrice: number
+  plannedStop: number
+  plannedTarget: number
+  plannedRiskDollars: number
+  exitDeadline: string
+  state: string
+  attentionCode: string | null
+  filledEntryQty: number
+  avgEntryPrice: number | null
+  filledExitQty: number
+  avgExitPrice: number | null
+  exitReason: string | null
+  realizedPnl: number | null
+  realizedR: number | null
+  createdAt: string
+  openedAt: string | null
+  closedAt: string | null
+}
+
+export interface AlpacaV2Event {
+  planId: number | null
+  type: string
+  action: string | null
+  outcome: string | null
+  reasonCode: string | null
+  detail: Record<string, string | number | boolean | null>
+  occurredAt: string
+}
+
+export interface AlpacaV2GroupStats {
+  count: number
+  winRate: number | null
+  realizedPnl: number | null
+  expectancyDollars: number | null
+  expectancyR: number | null
+}
+
+export interface AlpacaV2Analytics {
+  closedTradeCount: number
+  wins: number
+  losses: number
+  winRate: number | null
+  grossProfit: number | null
+  grossLoss: number | null
+  profitFactor: number | null
+  averageWin: number | null
+  averageLoss: number | null
+  expectancyDollars: number | null
+  expectancyR: number | null
+  realizedPnl: number | null
+  maxConsecutiveLosses: number
+  averageHoldMinutes: number | null
+  bySetup: Record<string, AlpacaV2GroupStats>
+  byCatalyst: Record<string, AlpacaV2GroupStats>
+  byWindow: Record<string, AlpacaV2GroupStats>
+  bySessionDate: Record<string, AlpacaV2GroupStats>
+  noTrade: { count: number; byReason: Record<string, number> }
+  attention: { count: number; byCode: Record<string, number> }
+  excludedOperatorResolved: number
+  sample: { size: number; preliminary: boolean; note: string }
+}
+
+export interface AlpacaV2Journal {
+  analytics: AlpacaV2Analytics
+  trades: AlpacaV2Plan[]
+  events: AlpacaV2Event[]
+}
