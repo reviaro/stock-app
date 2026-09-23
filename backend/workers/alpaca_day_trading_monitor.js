@@ -4,7 +4,7 @@ const path = require('path');
 const store = require('../services/alpaca_day_trade_store');
 const { reconcileFills, buildObservation, recordWebSocketFill } = require('../services/alpaca_fill_reconciliation');
 const { decidePlanAction, DEFAULT_MONITOR_POLICY } = require('../services/alpaca_day_trade_monitor');
-const { executeManagementAction } = require('../services/alpaca_day_trade_repair_execution');
+const { executeManagementAction, NON_EXECUTABLE_BROKER_STATUSES, resolveTerminalDescendant } = require('../services/alpaca_day_trade_repair_execution');
 const { createSessionDateResolver } = require('../services/alpaca_trading_calendar');
 const { createTradeUpdatesStream } = require('../services/alpaca_trade_updates_stream');
 const { TRADE_UPDATES_URL } = require('../services/alpaca_paper_service');
@@ -13,6 +13,7 @@ const DEFAULT_LOCK_PATH = path.join(__dirname, '..', '..', 'run', 'alpaca-day-tr
 const DEFAULT_POLL_INTERVAL_MS = 60_000; // Section 8: every 60s while any plan/order/position is open
 const DEFAULT_IDLE_POLL_INTERVAL_MS = 300_000; // Section 8: a slower cadence while flat/closed -- tunable, Stage 4 material
 const TERMINAL_PLAN_STATES = ['closed', 'cancelled', 'error'];
+const RISK_REDUCING_ACTIONS = ['flatten', 'submit_time_exit', 'buy_to_cover', 'cancel_unfilled_remainder', 'attach_protective_oco'];
 const EXIT_ACTIONS = ['flatten', 'submit_time_exit', 'buy_to_cover'];
 
 function workerError(code, message) {
@@ -60,6 +61,7 @@ function createWorker({
     idlePollIntervalMs = DEFAULT_IDLE_POLL_INTERVAL_MS,
     policy = DEFAULT_MONITOR_POLICY,
     now = () => new Date(),
+    leaseClock = () => new Date(),
     log = () => {},
     wsUrl = TRADE_UPDATES_URL,
     wsApiKey,
@@ -181,16 +183,36 @@ function createWorker({
             log({ planId: plan.id, symbol: plan.symbol, decision });
 
             if (decision.activateKillSwitch) {
+                if (!monitorState.kill_switch && !pendingKillSwitch) {
+                    await store.updateMonitorState({ kill_switch: true, block_entries: true });
+                    await recordMonitorEvent({
+                        event_key: `monitor:${cycleId}:kill_switch`,
+                        plan_id: null,
+                        event_type: 'kill_switch',
+                        action: 'activate',
+                        outcome: 'activated',
+                        reason: decision.reason || 'safety_sweep_violation',
+                        detail: {
+                            cycle_id: cycleId,
+                            health_code: decision.healthCode || null,
+                            trigger_plan_id: plan.id,
+                            symbol: plan.symbol,
+                        },
+                        occurred_at: occurredAt,
+                    });
+                    log({ killSwitchActivated: true, triggerPlanId: plan.id, symbol: plan.symbol, reason: decision.reason });
+                }
                 pendingKillSwitch = true;
                 activatingDecisions.push(decision);
             }
 
-            const isRestrictedToExit = Boolean(monitorState.kill_switch) || pendingKillSwitch;
+            const isKillSwitchActive = Boolean(monitorState.kill_switch) || pendingKillSwitch;
+            const isRiskReducing = RISK_REDUCING_ACTIONS.includes(decision.action);
             const isExitAction = EXIT_ACTIONS.includes(decision.action);
 
             const decisionOutcome = monitorState.mode === 'shadow'
                 ? 'shadow_observed_only'
-                : (decision.action === 'none' ? 'no_action_required' : (isRestrictedToExit && !isExitAction ? 'skipped_kill_switch_active' : 'action_pending'));
+                : (decision.action === 'none' ? 'no_action_required' : (isKillSwitchActive && !isRiskReducing ? 'skipped_kill_switch_active' : 'action_pending'));
             if (decision.blockEntries) anyBlockEntries = true;
             if (decision.healthCode) { lastHealthCode = decision.healthCode; lastHealthReason = decision.reason; }
             const decisionSignature = JSON.stringify({
@@ -210,17 +232,76 @@ function createWorker({
                 });
             }
 
-            if (monitorState.mode === 'paper_execute' && decision.action !== 'none') {
-                if (isRestrictedToExit && !isExitAction) {
-                    log({ planId: plan.id, symbol: plan.symbol, skippedAction: decision.action, reason: 'kill_switch_active_or_pending' });
-                } else {
+            if (monitorState.mode === 'paper_execute') {
+                if (isKillSwitchActive) {
+                    const entryOrderId = observation.entryOrder?.id || plan.entry_parent_broker_order_id;
+                    let hasActiveEntry = Boolean(entryOrderId) && observation.entryOrder && !NON_EXECUTABLE_BROKER_STATUSES.includes(observation.entryOrder.status);
+                    if (hasActiveEntry && entryOrderId) {
+                        try {
+                            const chainRes = await resolveTerminalDescendant(entryOrderId, client);
+                            hasActiveEntry = !chainRes.isNonExecutable;
+                        } catch (chainErr) {
+                            hasActiveEntry = true;
+                            log({ planId: plan.id, symbol: plan.symbol, resolveEntryChainError: chainErr.message });
+                        }
+                    }
+                    if (hasActiveEntry && !isExitAction) {
+                        let cancelOutcome = 'cancel_requested';
+                        const cancelDetail = {
+                            cycle_id: cycleId,
+                        };
+                        try {
+                            const res = await executeManagementAction(
+                                { action: 'cancel_unfilled_remainder', reason: 'kill_switch_entry_cancel' },
+                                { ...plan, entry_parent_broker_order_id: entryOrderId },
+                                { client, holderId, now: now(), nowFn: leaseClock },
+                            );
+                            if (res?.result?.canceled === false && res?.result?.reason === 'not_cancelable') {
+                                cancelOutcome = 'not_cancelable';
+                            }
+                        } catch (cancelErr) {
+                            cancelOutcome = 'failed';
+                            cancelDetail.error = cancelErr.message;
+                            cancelDetail.broker_status = cancelErr.status ?? null;
+                            cancelDetail.broker_code = cancelErr.brokerCode ?? null;
+                            cancelDetail.broker_message = cancelErr.brokerMessage ?? null;
+                            log({ planId: plan.id, symbol: plan.symbol, cancelEntryError: cancelErr.message, ...(cancelErr.brokerBodyRaw ? { brokerBodyRaw: cancelErr.brokerBodyRaw } : {}) });
+                        }
+                        sweepResults.push({
+                            plan_id: plan.id,
+                            symbol: plan.symbol,
+                            action: 'cancel_unfilled_remainder',
+                            outcome: cancelOutcome,
+                            flat_verified: null,
+                        });
+                        await recordMonitorEvent({
+                            event_key: `monitor:${cycleId}:plan:${plan.id}:cancel_entry`,
+                            plan_id: plan.id,
+                            event_type: 'monitor_action',
+                            action: 'cancel_unfilled_remainder',
+                            outcome: cancelOutcome,
+                            reason: 'kill_switch_entry_cancel',
+                            detail: cancelDetail,
+                            occurred_at: occurredAt,
+                        });
+                        continue;
+                    }
+                    if (!isRiskReducing) {
+                        if (decision.action !== 'none') {
+                            log({ planId: plan.id, symbol: plan.symbol, skippedAction: decision.action, reason: 'kill_switch_active_or_pending' });
+                        }
+                        continue;
+                    }
+                }
+
+                if (decision.action !== 'none') {
                     try {
                         const actionRes = await executeManagementAction(decision, plan, {
-                            client, holderId, now: now(), exitPolicy, sleep,
+                            client, holderId, now: now(), nowFn: leaseClock, exitPolicy, sleep,
                         });
                         const actionOutcome = actionRes?.outcome || 'submitted';
                         const flatVerified = actionRes?.flatVerified ?? null;
-                        if (isExitAction) {
+                        if (isRiskReducing) {
                             sweepResults.push({
                                 plan_id: plan.id,
                                 symbol: plan.symbol,
@@ -235,12 +316,11 @@ function createWorker({
                             detail: {
                                 cycle_id: cycleId,
                                 flat_verified: flatVerified,
-                                ...(actionRes?.order ? { order_id: actionRes.order.id } : {}),
                             }, occurred_at: occurredAt,
                         });
                     } catch (error) {
-                        log({ planId: plan.id, symbol: plan.symbol, executionError: error.message });
-                        if (isExitAction) {
+                        log({ planId: plan.id, symbol: plan.symbol, executionError: error.message, ...(error.brokerBodyRaw ? { brokerBodyRaw: error.brokerBodyRaw } : {}) });
+                        if (isRiskReducing) {
                             sweepResults.push({
                                 plan_id: plan.id,
                                 symbol: plan.symbol,
@@ -266,38 +346,51 @@ function createWorker({
             }
         }
 
-        // When kill_switch was ALREADY latched at tick start, do NOT write block_entries/health_code/health_error.
-        if (!monitorState.kill_switch) {
+        // When kill_switch was ALREADY latched at tick start, or was tripped this tick:
+        // do NOT write block_entries/health_code/health_error here.
+        if (!monitorState.kill_switch && !pendingKillSwitch) {
             const monitorStatePatch = {
                 block_entries: anyBlockEntries,
-                ...(pendingKillSwitch ? { kill_switch: true } : {}),
                 ...(lastHealthCode ? { health_code: lastHealthCode, health_error: lastHealthReason } : {}),
             };
             await store.updateMonitorState(monitorStatePatch);
         }
 
-        if (pendingKillSwitch && !monitorState.kill_switch) {
-            const firstReason = activatingDecisions[0]?.reason || 'safety_sweep_violation';
-            const healthCodes = Array.from(new Set(activatingDecisions.map((d) => d.healthCode).filter(Boolean)));
+        if (sweepResults.length > 0) {
             await recordMonitorEvent({
-                event_key: `monitor:${cycleId}:kill_switch`, plan_id: null, event_type: 'kill_switch',
-                action: 'activate', outcome: 'activated', reason: firstReason,
+                event_key: `monitor:${cycleId}:kill_switch_sweep`,
+                plan_id: null,
+                event_type: 'kill_switch',
+                action: 'sweep_summary',
+                outcome: 'recorded',
+                reason: 'safety_sweep_completed',
                 detail: {
                     cycle_id: cycleId,
-                    health_codes: healthCodes,
                     sweep: sweepResults,
-                }, occurred_at: occurredAt,
+                },
+                occurred_at: occurredAt,
             });
-            log({ killSwitchActivated: true, sweep: sweepResults });
+            log({ sweepSummary: true, sweep: sweepResults });
         }
     }
 
     function scheduleNext() {
         if (stopped) return;
         timer = setTimeout(() => {
-            currentTick = runTick()
-                .catch((error) => { log({ tickError: error.message }); })
-                .then(() => { scheduleNext(); });
+            const nextTick = Promise.resolve(currentTick)
+                .catch(() => {})
+                .then(async () => {
+                    if (stopped) return;
+                    try {
+                        await runTick();
+                    } catch (error) {
+                        log({ tickError: error.message });
+                    }
+                })
+                .then(() => {
+                    scheduleNext();
+                });
+            currentTick = nextTick;
         }, pollIntervalMs);
     }
 
@@ -377,12 +470,22 @@ function createWorker({
         // after, so a systemd-restarted second instance never has two live sockets open for
         // the same account at once.
         if (stream) stream.close();
-        // Graceful shutdown leaves broker-native protective orders intact (systemd hardening,
-        // Section 8): this never cancels or flattens anything on the way out.
         if (lock) lock.release();
     }
 
-    return { start, stop, isReady: () => ready };
+    async function runTickNow() {
+        if (!ready || stopped) {
+            throw new Error('worker is not running');
+        }
+        const prevTick = Promise.resolve(currentTick).catch(() => {});
+        currentTick = prevTick.then(() => {
+            if (stopped) throw new Error('worker is not running');
+            return runTick();
+        });
+        return currentTick;
+    }
+
+    return { start, stop, isReady: () => ready, runTickNow };
 }
 
 module.exports = { createWorker, acquireInstanceLock, DEFAULT_LOCK_PATH };

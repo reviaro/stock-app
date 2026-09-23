@@ -10,6 +10,7 @@ const MARKET_DATA_BASE_URL = 'https://data.alpaca.markets';
 const TRADE_UPDATES_URL = 'wss://paper-api.alpaca.markets/stream';
 const db = require('../database/db');
 const { validatePaperOrder } = require('./alpaca_order_policy');
+const { sanitizeBrokerMessage } = require('./alpaca_broker_error');
 
 function getPaperCredentials(env = process.env) {
     return {
@@ -68,9 +69,9 @@ function createPaperClient({ env = process.env, fetchImpl = global.fetch, timeou
         if (options.allowNotFound && response.status === 404) return notFound;
         if (!response.ok) {
             let brokerCode = null;
-            let brokerMessage = null;
+            let rawMsg = null;
+            let rawText = '';
             if (typeof response.text === 'function') {
-                let rawText = '';
                 try {
                     rawText = await response.text();
                 } catch (_e) {
@@ -79,27 +80,38 @@ function createPaperClient({ env = process.env, fetchImpl = global.fetch, timeou
                 if (rawText) {
                     try {
                         const parsed = JSON.parse(rawText);
-                        if (parsed && parsed.code != null) brokerCode = parsed.code;
-                        if (parsed && typeof parsed.message === 'string') brokerMessage = parsed.message;
+                        if (parsed && parsed.code != null) {
+                            if (typeof parsed.code === 'number' && Number.isFinite(parsed.code)) {
+                                brokerCode = parsed.code;
+                            } else if (typeof parsed.code === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(parsed.code.trim())) {
+                                brokerCode = parsed.code.trim();
+                            }
+                        }
+                        if (parsed && typeof parsed.message === 'string') rawMsg = parsed.message;
                     } catch (_e) {
                         // non-JSON
                     }
-                    if (brokerMessage == null && rawText.trim()) {
-                        brokerMessage = rawText.trim();
+                    if (rawMsg == null && rawText.trim()) {
+                        rawMsg = rawText.trim();
                     }
                 }
             }
-            if (brokerMessage && typeof brokerMessage === 'string' && brokerMessage.length > 500) {
-                brokerMessage = brokerMessage.slice(0, 500);
-            }
-
-            const error = new Error(`Alpaca paper request failed (${response.status})` + (brokerMessage ? `: ${brokerMessage}` : ''));
+            const sanitized = sanitizeBrokerMessage(rawMsg);
+            const error = new Error(`Alpaca paper request failed (${response.status})` + (sanitized ? `: ${sanitized}` : ''));
             error.status = response.status;
             error.code = response.status >= 400 && response.status < 500 && response.status !== 408
                 ? 'ALPACA_BROKER_REJECTED'
                 : 'ALPACA_BROKER_UNAVAILABLE';
             error.brokerCode = brokerCode;
-            error.brokerMessage = brokerMessage;
+            error.brokerMessage = sanitized;
+            if (rawText) {
+                Object.defineProperty(error, 'brokerBodyRaw', {
+                    value: rawText,
+                    enumerable: false,
+                    writable: true,
+                    configurable: true,
+                });
+            }
             throw error;
         }
         // A cancel (DELETE) succeeds with 204 No Content; parsing a JSON body would throw.

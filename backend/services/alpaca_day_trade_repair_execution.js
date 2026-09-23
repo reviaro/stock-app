@@ -1,10 +1,16 @@
 const store = require('./alpaca_day_trade_store');
 
+// Alpaca status classifications:
+// NON_EXECUTABLE_BROKER_STATUSES: the ONLY statuses that prove a broker order can no longer execute.
+// Used by exit-sequence C2 (skip cancel) and C3 (verification).
+// stopped = trade guaranteed but not yet occurred; suspended = not currently eligible, may resume;
+// done_for_day = may trade next session; replaced = successor order exists.
+const NON_EXECUTABLE_BROKER_STATUSES = ['filled', 'canceled', 'expired', 'rejected'];
+
+// LOCAL_AUDIT_FINAL_STATUSES: used for management-audit attempt numbering / live-order replay decisions.
+const LOCAL_AUDIT_FINAL_STATUSES = [...NON_EXECUTABLE_BROKER_STATUSES, 'submission_rejected', 'submission_not_found'];
+
 const UNRESOLVED_ORDER_STATUSES = ['pending_submission', 'submission_unknown', 'submission_failed'];
-const FINAL_STATUSES = [
-    'filled', 'canceled', 'expired', 'rejected', 'replaced', 'done_for_day',
-    'stopped', 'suspended', 'submission_rejected', 'submission_not_found',
-];
 
 function executionError(code, message) {
     return Object.assign(new Error(message), { code });
@@ -67,12 +73,22 @@ function intentMatchesExistingAudit(order, audit) {
 
 // B2b: Resolves ambiguous audits by querying the broker by client order ID instead of blocking indefinitely.
 async function resolveAmbiguousAudits({ client, now = new Date() }) {
-    if (!client || typeof client.getOrderByClientOrderId !== 'function') return;
+    if (!client || typeof client.getOrderByClientOrderId !== 'function') return [];
     const allAudits = await store.listOrderAudits();
     const ambiguous = allAudits.filter(
         (a) => a.execution_epoch === 'day_trading' && UNRESOLVED_ORDER_STATUSES.includes(a.status),
     );
+    const diagnostics = [];
     for (const audit of ambiguous) {
+        const diag = {
+            idempotency_key: audit.idempotency_key,
+            plan_id: audit.plan_id != null ? Number(audit.plan_id) : null,
+            resolved: false,
+            reason: null,
+            status: null,
+            brokerCode: null,
+            brokerMessage: null,
+        };
         try {
             const lookup = await client.getOrderByClientOrderId(audit.idempotency_key);
             if (lookup && lookup.found && lookup.order) {
@@ -84,6 +100,9 @@ async function resolveAmbiguousAudits({ client, now = new Date() }) {
                 });
                 audit.status = brokerStatus;
                 audit.broker_order_id = lookup.order.id || audit.broker_order_id || null;
+                diag.resolved = true;
+                diag.reason = 'resolved';
+                diag.status = lookup.order.status || null;
             } else if (lookup && !lookup.found) {
                 const createdAt = audit.created_at ? new Date(audit.created_at) : null;
                 if (createdAt && now.getTime() - createdAt.getTime() > 60_000) {
@@ -92,20 +111,35 @@ async function resolveAmbiguousAudits({ client, now = new Date() }) {
                         broker_payload: { status: 'submission_not_found' },
                     });
                     audit.status = 'submission_not_found';
+                    diag.resolved = true;
+                    diag.reason = 'marked_not_found';
+                } else {
+                    diag.resolved = false;
+                    diag.reason = 'within_ambiguity_window';
                 }
+            } else {
+                diag.resolved = false;
+                diag.reason = 'within_ambiguity_window';
             }
-        } catch (_err) {
-            // Broker lookup throw leaves audit as is
+        } catch (err) {
+            diag.resolved = false;
+            diag.reason = 'lookup_failed';
+            diag.status = err.status ?? null;
+            diag.brokerCode = err.brokerCode ?? null;
+            diag.brokerMessage = err.brokerMessage ?? null;
         }
+        diagnostics.push(diag);
     }
+    return diagnostics;
 }
 
 // B4: Inner submission function that assumes the submission lease is already held.
 async function submitManagementOrderUnlocked({
-    action, base, legRole, order, plan, client, now = new Date(),
+    action, base, legRole, order, plan, client, now = new Date(), nowFn, renewalHook,
 }) {
+    const currentNow = nowFn ? nowFn() : now;
     // B2b: Attempt to resolve ambiguous audits across day_trading execution epoch
-    await resolveAmbiguousAudits({ client, now });
+    const diagnostics = await resolveAmbiguousAudits({ client, now: currentNow });
 
     const allAudits = await store.listOrderAudits();
     const dtAudits = allAudits.filter((a) => a.execution_epoch === 'day_trading');
@@ -114,12 +148,33 @@ async function submitManagementOrderUnlocked({
     const isExitAction = ['flatten', 'submit_time_exit', 'buy_to_cover'].includes(action);
     const unresolved = dtAudits.filter((a) => UNRESOLVED_ORDER_STATUSES.includes(a.status));
     if (isExitAction) {
-        if (unresolved.some((a) => Number(a.plan_id) === plan.id)) {
-            throw executionError('ALPACA_RECONCILIATION_REQUIRED', 'an unresolved Day Trading order audit exists for this plan and must be reconciled before another submission');
+        const blockingAudits = unresolved.filter((a) => Number(a.plan_id) === plan.id);
+        if (blockingAudits.length > 0) {
+            const blockingKeys = new Set(blockingAudits.map((a) => a.idempotency_key));
+            const blockingDiags = (diagnostics || []).filter((d) => blockingKeys.has(d.idempotency_key));
+            const firstFailed = blockingDiags.find((d) => d.reason === 'lookup_failed');
+            const err = executionError('ALPACA_RECONCILIATION_REQUIRED', 'an unresolved Day Trading order audit exists for this plan and must be reconciled before another submission');
+            err.details = blockingDiags;
+            if (firstFailed) {
+                if (firstFailed.status != null) err.status = firstFailed.status;
+                if (firstFailed.brokerCode != null) err.brokerCode = firstFailed.brokerCode;
+                if (firstFailed.brokerMessage != null) err.brokerMessage = firstFailed.brokerMessage;
+            }
+            throw err;
         }
     } else {
         if (unresolved.length > 0) {
-            throw executionError('ALPACA_RECONCILIATION_REQUIRED', 'an unresolved Day Trading order audit exists and must be reconciled before another submission');
+            const blockingKeys = new Set(unresolved.map((a) => a.idempotency_key));
+            const blockingDiags = (diagnostics || []).filter((d) => blockingKeys.has(d.idempotency_key));
+            const firstFailed = blockingDiags.find((d) => d.reason === 'lookup_failed');
+            const err = executionError('ALPACA_RECONCILIATION_REQUIRED', 'an unresolved Day Trading order audit exists and must be reconciled before another submission');
+            err.details = blockingDiags;
+            if (firstFailed) {
+                if (firstFailed.status != null) err.status = firstFailed.status;
+                if (firstFailed.brokerCode != null) err.brokerCode = firstFailed.brokerCode;
+                if (firstFailed.brokerMessage != null) err.brokerMessage = firstFailed.brokerMessage;
+            }
+            throw err;
         }
     }
 
@@ -129,14 +184,19 @@ async function submitManagementOrderUnlocked({
         (a) => Number(a.plan_id) === plan.id && baseRegex.test(a.idempotency_key),
     );
 
-    // EXIT BASES ARE ONE FAMILY: for 'flatten' and 'submit_time_exit', the live-order check
-    // considers BOTH dt-timeexit and dt-flatten audits of the plan.
+    // EXIT BASES ARE ONE FAMILY: for 'flatten', 'submit_time_exit', and 'buy_to_cover', the live-order check
+    // considers dt-timeexit, dt-flatten, and dt-cover audits of the plan.
     let familyAudits;
-    if (['flatten', 'submit_time_exit'].includes(action)) {
+    if (['flatten', 'submit_time_exit', 'buy_to_cover'].includes(action)) {
         const flattenRegex = new RegExp(`^dt-flatten-${plan.id}(-a(\\d+))?$`);
         const timeexitRegex = new RegExp(`^dt-timeexit-${plan.id}(-a(\\d+))?$`);
+        const coverRegex = new RegExp(`^dt-cover-${plan.id}(-a(\\d+))?$`);
         familyAudits = dtAudits.filter(
-            (a) => Number(a.plan_id) === plan.id && (flattenRegex.test(a.idempotency_key) || timeexitRegex.test(a.idempotency_key)),
+            (a) => Number(a.plan_id) === plan.id && (
+                flattenRegex.test(a.idempotency_key) ||
+                timeexitRegex.test(a.idempotency_key) ||
+                coverRegex.test(a.idempotency_key)
+            ),
         );
     } else {
         familyAudits = planBaseAudits;
@@ -148,15 +208,25 @@ async function submitManagementOrderUnlocked({
 
     if (latestFamilyAudit) {
         // Refresh latest audit status if not final and broker_order_id exists
-        if (latestFamilyAudit.broker_order_id && !FINAL_STATUSES.includes(latestFamilyAudit.status)) {
-            const freshBrokerOrder = await client.getOrder(latestFamilyAudit.broker_order_id);
-            const freshStatus = String(freshBrokerOrder?.status || '').toLowerCase();
-            if (freshStatus && freshStatus !== latestFamilyAudit.status) {
+        if (latestFamilyAudit.broker_order_id && !LOCAL_AUDIT_FINAL_STATUSES.includes(latestFamilyAudit.status)) {
+            let chainRes;
+            try {
+                chainRes = await resolveTerminalDescendant(latestFamilyAudit.broker_order_id, client);
+            } catch (err) {
+                const reqErr = executionError('ALPACA_RECONCILIATION_REQUIRED', `failed to resolve terminal descendant for audit ${latestFamilyAudit.idempotency_key}: ${err.message}`);
+                reqErr.diagnostics = { orderId: latestFamilyAudit.broker_order_id, error: err.message };
+                throw reqErr;
+            }
+            const freshStatus = chainRes.terminalStatus;
+            const freshId = chainRes.terminalId;
+            if (freshStatus && (freshStatus !== latestFamilyAudit.status || freshId !== latestFamilyAudit.broker_order_id)) {
                 await store.updateOrderAudit(latestFamilyAudit.idempotency_key, {
                     status: freshStatus,
-                    broker_payload: { status: freshStatus },
+                    broker_order_id: freshId,
+                    broker_payload: { status: freshStatus, replaced_by_chain_length: chainRes.hops },
                 });
                 latestFamilyAudit.status = freshStatus;
+                latestFamilyAudit.broker_order_id = freshId;
             }
         }
 
@@ -164,9 +234,9 @@ async function submitManagementOrderUnlocked({
             throw executionError('ALPACA_RECONCILIATION_REQUIRED', `management order ${latestFamilyAudit.idempotency_key} is unresolved and must be reconciled before retrying`);
         }
 
-        if (!FINAL_STATUSES.includes(latestFamilyAudit.status)) {
+        if (!LOCAL_AUDIT_FINAL_STATUSES.includes(latestFamilyAudit.status)) {
             // Live order already open. For the EXIT FAMILY only, a live exit order is replayed REGARDLESS of qty.
-            const isExitFamily = ['flatten', 'submit_time_exit'].includes(action);
+            const isExitFamily = ['flatten', 'submit_time_exit', 'buy_to_cover'].includes(action);
             if (isExitFamily) {
                 if (latestFamilyAudit.symbol !== order.symbol || latestFamilyAudit.side !== order.side) {
                     throw executionError('ALPACA_IDEMPOTENCY_KEY_CONFLICT', `client order id ${latestFamilyAudit.idempotency_key} was already used for a different order`);
@@ -215,6 +285,10 @@ async function submitManagementOrderUnlocked({
         plan_id: plan.id,
     });
 
+    if (typeof renewalHook === 'function') {
+        await renewalHook();
+    }
+
     try {
         const brokerOrder = { ...order, client_order_id: key };
         const brokerResult = await client.submitOrder(brokerOrder);
@@ -247,32 +321,175 @@ async function submitManagementOrderUnlocked({
 
 // Lease wrapper for submitManagementOrder
 async function submitManagementOrder({
-    action, base, legRole, order, plan, client, holderId, leaseDurationMs = 30_000, now = new Date(),
+    action, base, legRole, order, plan, client, holderId, leaseDurationMs = 30_000, now = new Date(), nowFn: userNowFn,
 }) {
-    const lease = await store.acquireSubmissionLease({ holderId, leaseDurationMs, now });
+    const nowFn = userNowFn || (() => new Date());
+    const lease = await store.acquireSubmissionLease({ holderId, leaseDurationMs, now: nowFn() });
     if (!lease.acquired) {
         throw executionError('ALPACA_LEASE_UNAVAILABLE', 'the durable Day Trading submission lease is held by another process');
     }
 
+    const renewalHook = async () => {
+        const res = await store.renewSubmissionLease({ holderId, leaseDurationMs, now: nowFn() });
+        if (!res?.renewed) {
+            throw executionError('ALPACA_LEASE_LOST', 'submission lease lost before submitOrder');
+        }
+    };
+
     try {
         return await submitManagementOrderUnlocked({
-            action, base, legRole, order, plan, client, now,
+            action, base, legRole, order, plan, client, nowFn, renewalHook,
         });
     } finally {
         await store.releaseSubmissionLease({ holderId });
     }
 }
 
-// C: Exit sequence for 'flatten' and 'submit_time_exit'.
+// Scoped resolution of ambiguous audits for this plan (any leg_role)
+async function resolvePlanAudits({ planId, client, nowFn }) {
+    if (!client || typeof client.getOrderByClientOrderId !== 'function') return;
+    const allAudits = await store.listOrderAudits();
+    const planAmbiguousAudits = allAudits.filter(
+        (a) => Number(a.plan_id) === planId && a.execution_epoch === 'day_trading' &&
+            UNRESOLVED_ORDER_STATUSES.includes(a.status),
+    );
+
+    for (const audit of planAmbiguousAudits) {
+        let lookup;
+        try {
+            lookup = await client.getOrderByClientOrderId(audit.idempotency_key);
+        } catch (lookupErr) {
+            const err = executionError('ALPACA_RECONCILIATION_REQUIRED', `reconciliation lookup failed for audit ${audit.idempotency_key}: ${lookupErr.message}`);
+            err.status = lookupErr.status ?? null;
+            err.brokerCode = lookupErr.brokerCode ?? null;
+            err.brokerMessage = lookupErr.brokerMessage ?? null;
+            err.diagnostics = {
+                status: lookupErr.status ?? null,
+                brokerCode: lookupErr.brokerCode ?? null,
+                brokerMessage: lookupErr.brokerMessage ?? null,
+            };
+            err.details = [{
+                idempotency_key: audit.idempotency_key,
+                plan_id: planId,
+                resolved: false,
+                reason: 'lookup_failed',
+                status: lookupErr.status ?? null,
+                brokerCode: lookupErr.brokerCode ?? null,
+                brokerMessage: lookupErr.brokerMessage ?? null,
+            }];
+            throw err;
+        }
+
+        if (lookup && lookup.found && lookup.order) {
+            const brokerStatus = String(lookup.order.status || '').toLowerCase();
+            const brokerOrderId = lookup.order.id || audit.broker_order_id || null;
+            await store.updateOrderAudit(audit.idempotency_key, {
+                status: brokerStatus,
+                broker_order_id: brokerOrderId,
+                broker_payload: { status: brokerStatus },
+            });
+            audit.status = brokerStatus;
+            audit.broker_order_id = brokerOrderId;
+        } else if (lookup && !lookup.found) {
+            const createdAt = audit.created_at ? new Date(audit.created_at) : null;
+            const nowTime = nowFn().getTime();
+            if (createdAt && nowTime - createdAt.getTime() > 60_000) {
+                await store.updateOrderAudit(audit.idempotency_key, {
+                    status: 'submission_not_found',
+                    broker_payload: { status: 'submission_not_found' },
+                });
+                audit.status = 'submission_not_found';
+            } else {
+                const err = executionError('ALPACA_RECONCILIATION_REQUIRED', `order audit ${audit.idempotency_key} not found at broker but within ambiguity window`);
+                err.diagnostics = { reason: 'within_ambiguity_window' };
+                err.details = [{
+                    idempotency_key: audit.idempotency_key,
+                    plan_id: planId,
+                    resolved: false,
+                    reason: 'within_ambiguity_window',
+                    status: null,
+                    brokerCode: null,
+                    brokerMessage: null,
+                }];
+                throw err;
+            }
+        }
+    }
+}
+
+async function resolveTerminalDescendant(orderId, client) {
+    const chain = [];
+    const orders = new Map();
+    const visited = new Set();
+    let currentId = orderId;
+    let hops = 0;
+
+    while (currentId) {
+        if (visited.has(currentId)) {
+            const err = executionError(
+                'ALPACA_REPLACEMENT_CHAIN_UNRESOLVED',
+                `replacement chain cycle detected: ${[...chain, currentId].join(' -> ')}`,
+            );
+            err.chain = chain;
+            throw err;
+        }
+        visited.add(currentId);
+        chain.push(currentId);
+
+        let order;
+        try {
+            order = await client.getOrder(currentId);
+        } catch (readErr) {
+            readErr.chain = chain;
+            throw readErr;
+        }
+        orders.set(currentId, order);
+
+        const status = String(order?.status || '').toLowerCase();
+        if (status === 'replaced') {
+            if (!order?.replaced_by) {
+                const err = executionError(
+                    'ALPACA_REPLACEMENT_CHAIN_UNRESOLVED',
+                    `order ${currentId} status is replaced but replaced_by is missing`,
+                );
+                err.chain = chain;
+                throw err;
+            }
+            if (hops >= 5) {
+                const err = executionError(
+                    'ALPACA_REPLACEMENT_CHAIN_UNRESOLVED',
+                    `replacement chain exceeded max depth of 5 hops: ${chain.join(' -> ')} -> ${order.replaced_by}`,
+                );
+                err.chain = chain;
+                throw err;
+            }
+            hops += 1;
+            currentId = order.replaced_by;
+        } else {
+            return {
+                chain,
+                orders,
+                terminalOrder: order,
+                terminalId: currentId,
+                terminalStatus: status,
+                isNonExecutable: NON_EXECUTABLE_BROKER_STATUSES.includes(status),
+                hops,
+            };
+        }
+    }
+}
+
+// C: Exit sequence for 'flatten', 'submit_time_exit', and 'buy_to_cover'.
 // Incident Rationale (2026-09-22):
 // Open bracket protective legs (stop/target) reserve shares on the broker side, causing Alpaca
 // to reject market sell orders with HTTP 403 "insufficient qty available". The exit sequence
 // cancels all protective bracket/OCO legs first, verifies they reach a terminal state, refreshes
 // the true broker position, submits the market sell for the fresh quantity, and verifies flat.
 async function executeExitSequence(decision, plan, {
-    client, holderId, leaseDurationMs = 60_000, now = new Date(),
+    client, holderId, leaseDurationMs = 60_000, now = new Date(), nowFn: userNowFn,
     exitPolicy: userExitPolicy, sleep: userSleep,
 }) {
+    const nowFn = userNowFn || (() => new Date());
     const exitPolicy = {
         legTerminalTimeoutMs: 10_000,
         flatVerifyTimeoutMs: 10_000,
@@ -281,62 +498,103 @@ async function executeExitSequence(decision, plan, {
     };
     const sleep = userSleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 
-    const lease = await store.acquireSubmissionLease({ holderId, leaseDurationMs, now });
+    const lease = await store.acquireSubmissionLease({ holderId, leaseDurationMs, now: nowFn() });
     if (!lease.acquired) {
         throw executionError('ALPACA_LEASE_UNAVAILABLE', 'the durable Day Trading submission lease is held by another process');
     }
 
+    const renewLeaseOrThrow = async (stage) => {
+        const res = await store.renewSubmissionLease({ holderId, leaseDurationMs, now: nowFn() });
+        if (!res?.renewed) {
+            throw executionError('ALPACA_LEASE_LOST', `submission lease lost during exit sequence (${stage})`);
+        }
+    };
+
     try {
+        // C: Resolve ALL same-plan ambiguity before collecting orders or checking live orders
+        await resolvePlanAudits({ planId: plan.id, client, nowFn });
+
+        // RE-READ the plan's audits and use that fresh snapshot for everything after
         const planAudits = (await store.listOrderAudits()).filter(
             (a) => a.execution_epoch === 'day_trading' && Number(a.plan_id) === plan.id,
         );
 
-        // Check if an exit order in this plan's family is already live
+        const exitSide = decision.action === 'buy_to_cover' ? 'buy' : 'sell';
+
+        // Treat ALL of the plan's exit audits (dt-timeexit, dt-flatten, dt-cover) as one family
         const flattenRegex = new RegExp(`^dt-flatten-${plan.id}(-a(\\d+))?$`);
         const timeexitRegex = new RegExp(`^dt-timeexit-${plan.id}(-a(\\d+))?$`);
-        const familyAudits = planAudits.filter(
-            (a) => flattenRegex.test(a.idempotency_key) || timeexitRegex.test(a.idempotency_key),
+        const coverRegex = new RegExp(`^dt-cover-${plan.id}(-a(\\d+))?$`);
+        const exitFamilyAudits = planAudits.filter((a) =>
+            flattenRegex.test(a.idempotency_key) || timeexitRegex.test(a.idempotency_key) || coverRegex.test(a.idempotency_key),
         );
-        familyAudits.sort((a, b) => b.id - a.id);
-        const latestFamilyAudit = familyAudits[0];
-        if (latestFamilyAudit) {
-            if (latestFamilyAudit.broker_order_id && !FINAL_STATUSES.includes(latestFamilyAudit.status)) {
-                const freshBrokerOrder = await client.getOrder(latestFamilyAudit.broker_order_id);
-                const freshStatus = String(freshBrokerOrder?.status || '').toLowerCase();
-                if (freshStatus && freshStatus !== latestFamilyAudit.status) {
-                    await store.updateOrderAudit(latestFamilyAudit.idempotency_key, {
-                        status: freshStatus,
-                        broker_payload: { status: freshStatus },
+
+        // N3: Wherever a management/exit audit's status is refreshed from the broker,
+        // use resolveTerminalDescendant(audit.broker_order_id): persist the TERMINAL descendant's
+        // status (and its id in broker_payload as { status, replaced_by_chain_length } — do not
+        // store extra broker ids in persisted payload beyond the existing broker_order_id column,
+        // which should be updated to the terminal descendant's id).
+        // Chain unresolved/unreadable -> throw ALPACA_RECONCILIATION_REQUIRED (fail closed).
+        for (const audit of exitFamilyAudits) {
+            if (audit.broker_order_id && !LOCAL_AUDIT_FINAL_STATUSES.includes(audit.status)) {
+                let chainRes;
+                try {
+                    chainRes = await resolveTerminalDescendant(audit.broker_order_id, client);
+                } catch (err) {
+                    const reqErr = executionError('ALPACA_RECONCILIATION_REQUIRED', `failed to resolve terminal descendant for audit ${audit.idempotency_key}: ${err.message}`);
+                    reqErr.diagnostics = { orderId: audit.broker_order_id, error: err.message };
+                    throw reqErr;
+                }
+                const termStatus = chainRes.terminalStatus;
+                const termId = chainRes.terminalId;
+                if (termStatus && (termStatus !== audit.status || termId !== audit.broker_order_id)) {
+                    await store.updateOrderAudit(audit.idempotency_key, {
+                        status: termStatus,
+                        broker_order_id: termId,
+                        broker_payload: { status: termStatus, replaced_by_chain_length: chainRes.hops },
                     });
-                    latestFamilyAudit.status = freshStatus;
+                    audit.status = termStatus;
+                    audit.broker_order_id = termId;
                 }
             }
-            if (UNRESOLVED_ORDER_STATUSES.includes(latestFamilyAudit.status)) {
+            if (UNRESOLVED_ORDER_STATUSES.includes(audit.status)) {
                 throw executionError('ALPACA_RECONCILIATION_REQUIRED', `an unresolved Day Trading order audit exists for this plan and must be reconciled before another submission`);
             }
-            if (!FINAL_STATUSES.includes(latestFamilyAudit.status)) {
-                // Live exit-family order is replayed regardless of qty (it was sized to the position when submitted;
-                // the legs were already cancelled). Run the C6 flat-verification poll.
-                const flatDeadline = Date.now() + exitPolicy.flatVerifyTimeoutMs;
-                let flat = false;
-                while (true) {
-                    const currentPos = await client.getPosition(plan.symbol);
-                    const currentQty = currentPos ? Number(currentPos.qty) : 0;
-                    if (!currentPos || currentQty === 0) {
-                        flat = true;
-                        break;
-                    }
-                    if (Date.now() >= flatDeadline) break;
-                    await sleep(exitPolicy.pollIntervalMs);
+        }
+
+        // Find every live (not LOCAL_AUDIT_FINAL, after refresh) exit-family order of the plan.
+        const liveExitAudits = exitFamilyAudits.filter((a) => !LOCAL_AUDIT_FINAL_STATUSES.includes(a.status));
+        liveExitAudits.sort((a, b) => b.id - a.id);
+
+        const sameSideLive = liveExitAudits.filter((a) => a.side === exitSide);
+        const oppositeSideLive = liveExitAudits.filter((a) => a.side !== exitSide);
+
+        // A live order on the SAME side as this action (sell for flatten/submit_time_exit, buy for buy_to_cover)
+        // -> replay it (regardless of qty) + flat verification, as today.
+        // Replay only if there is exactly one live same-side order and NO opposite-side live orders;
+        // if more than one is live, include all but the newest in the cancel set.
+        if (sameSideLive.length === 1 && oppositeSideLive.length === 0) {
+            const singleLiveAudit = sameSideLive[0];
+            const flatDeadline = Date.now() + exitPolicy.flatVerifyTimeoutMs;
+            let flat = false;
+            while (true) {
+                const currentPos = await client.getPosition(plan.symbol);
+                const currentQty = currentPos ? Number(currentPos.qty) : 0;
+                if (!currentPos || currentQty === 0) {
+                    flat = true;
+                    break;
                 }
-                return {
-                    action: decision.action,
-                    outcome: flat ? 'flat_verified' : 'replayed_live_order',
-                    flatVerified: flat,
-                    replayed: true,
-                    order: latestFamilyAudit,
-                };
+                if (Date.now() >= flatDeadline) break;
+                await sleep(exitPolicy.pollIntervalMs);
+                await renewLeaseOrThrow('replayed_flat_verify_poll');
             }
+            return {
+                action: decision.action,
+                outcome: flat ? 'flat_verified' : 'replayed_live_order',
+                flatVerified: flat,
+                replayed: true,
+                order: singleLiveAudit,
+            };
         }
 
         // C1. Collect protective order IDs to cancel (Day-Trading owned only)
@@ -374,56 +632,99 @@ async function executeExitSequence(decision, plan, {
             }
         }
 
-        // Exclude this plan's own exit audits (time_exit / emergency_flatten)
-        const exitOrderIds = new Set(
-            planAudits
-                .filter((a) => ['time_exit', 'emergency_flatten'].includes(a.leg_role) && a.broker_order_id)
-                .map((a) => a.broker_order_id),
-        );
-        for (const id of exitOrderIds) {
-            targetIdsSet.delete(id);
+        // N2: A live order on the OPPOSITE side -> must be cancelled and verified non-executable
+        // (add it to the C2/C3 set; remove it from the exclusion list) BEFORE the position refresh.
+        for (const oppAudit of oppositeSideLive) {
+            if (oppAudit.broker_order_id) {
+                targetIdsSet.add(oppAudit.broker_order_id);
+            }
         }
 
-        const targetIds = Array.from(targetIdsSet).filter(Boolean);
+        // N2: If more than one same-side order is live, include all but the newest in the cancel set.
+        if (sameSideLive.length > 1) {
+            for (const surplusAudit of sameSideLive.slice(1)) {
+                if (surplusAudit.broker_order_id) {
+                    targetIdsSet.add(surplusAudit.broker_order_id);
+                }
+            }
+        }
+
+        // N2: Only same-side live exit orders are excluded from cancellation.
+        const excludedOrderIds = new Set();
+        if (sameSideLive.length > 0 && sameSideLive[0].broker_order_id) {
+            excludedOrderIds.add(sameSideLive[0].broker_order_id);
+        }
+        for (const id of excludedOrderIds) {
+            targetIdsSet.delete(id);
+        }
+        await renewLeaseOrThrow('discovery');
 
         // C2. Fetch each order; if final skip, else cancelOrder
-        for (const id of targetIds) {
-            let order;
-            try {
-                order = await client.getOrder(id);
-            } catch (err) {
-                if (err.status === 404) continue;
-                throw err;
-            }
-            const s = String(order?.status || '').toLowerCase();
-            if (FINAL_STATUSES.includes(s)) continue;
+        const processed = new Set();
+        while (true) {
+            const currentIds = Array.from(targetIdsSet).filter((id) => !processed.has(id));
+            if (currentIds.length === 0) break;
+            for (const id of currentIds) {
+                processed.add(id);
+                let chainRes = null;
+                try {
+                    chainRes = await resolveTerminalDescendant(id, client);
+                } catch (err) {
+                    if (Array.isArray(err.chain)) {
+                        for (const cid of err.chain) targetIdsSet.add(cid);
+                    }
+                }
+                if (chainRes) {
+                    for (const cid of chainRes.chain) targetIdsSet.add(cid);
+                }
 
-            try {
-                const cancelRes = await client.cancelOrder(id);
-                if (cancelRes && cancelRes.canceled === false && cancelRes.reason === 'not_found') {
-                    continue;
+                await renewLeaseOrThrow('cancel_poll');
+                const order = chainRes?.orders?.get(id);
+                const s = String(order?.status || '').toLowerCase();
+                if (NON_EXECUTABLE_BROKER_STATUSES.includes(s)) continue;
+
+                await renewLeaseOrThrow('cancel_order');
+                try {
+                    const cancelRes = await client.cancelOrder(id);
+                    if (cancelRes && cancelRes.canceled === false && cancelRes.reason === 'not_found') {
+                        continue;
+                    }
+                } catch (err) {
+                    if (err.status === 422 || err.status === 404) {
+                        continue;
+                    }
+                    throw err;
                 }
-            } catch (err) {
-                if (err.status === 422 || err.status === 404) {
-                    continue;
-                }
-                throw err;
             }
         }
 
         // C3. Poll until all target orders reach a terminal status
         const legDeadline = Date.now() + exitPolicy.legTerminalTimeoutMs;
+        const terminalIds = new Set();
         while (true) {
             const nonFinal = [];
-            for (const id of targetIds) {
+            for (const id of Array.from(targetIdsSet)) {
+                if (terminalIds.has(id)) continue;
+                let chainRes;
                 try {
-                    const order = await client.getOrder(id);
-                    const s = String(order?.status || '').toLowerCase();
-                    if (!FINAL_STATUSES.includes(s)) {
-                        nonFinal.push({ id, status: s });
-                    }
+                    chainRes = await resolveTerminalDescendant(id, client);
                 } catch (err) {
-                    if (err.status !== 404) throw err;
+                    if (Array.isArray(err.chain)) {
+                        for (const cid of err.chain) targetIdsSet.add(cid);
+                    }
+                    const statusDesc = err.status === 404 ? 'not_found_404' : (err.code || err.message || 'unresolved');
+                    nonFinal.push({ id, status: statusDesc });
+                    await renewLeaseOrThrow('leg_terminal_poll');
+                    continue;
+                }
+                for (const cid of chainRes.chain) {
+                    targetIdsSet.add(cid);
+                }
+                await renewLeaseOrThrow('leg_terminal_poll');
+                if (chainRes.isNonExecutable) {
+                    terminalIds.add(id);
+                } else {
+                    nonFinal.push({ id, status: chainRes.terminalStatus || 'unknown' });
                 }
             }
             if (nonFinal.length === 0) break;
@@ -440,15 +741,32 @@ async function executeExitSequence(decision, plan, {
         if (!pos || qty === 0) {
             return { action: decision.action, outcome: 'already_flat', flatVerified: true };
         }
-        if (pos.side === 'short' || qty < 0) {
-            throw executionError('ALPACA_EXIT_UNEXPECTED_SHORT', `position for ${plan.symbol} is unexpectedly short (${qty})`);
+        if (exitSide === 'buy') {
+            if (pos.side === 'long' || qty > 0) {
+                throw executionError('ALPACA_EXIT_UNEXPECTED_LONG', `position for ${plan.symbol} is unexpectedly long (${qty})`);
+            }
+        } else {
+            if (pos.side === 'short' || qty < 0) {
+                throw executionError('ALPACA_EXIT_UNEXPECTED_SHORT', `position for ${plan.symbol} is unexpectedly short (${qty})`);
+            }
         }
-        assertWholeShareQty(qty);
+        const absQty = Math.abs(qty);
+        assertWholeShareQty(absQty);
 
-        // C5. Submit market sell with refreshed quantity
-        const base = decision.action === 'submit_time_exit' ? 'dt-timeexit' : 'dt-flatten';
-        const legRole = decision.action === 'submit_time_exit' ? 'time_exit' : 'emergency_flatten';
-        const order = { symbol: plan.symbol, side: 'sell', qty, type: 'market', time_in_force: 'day' };
+        // C5. Submit market order with refreshed quantity
+        let base;
+        let legRole;
+        if (decision.action === 'buy_to_cover') {
+            base = 'dt-cover';
+            legRole = 'emergency_flatten';
+        } else if (decision.action === 'submit_time_exit') {
+            base = 'dt-timeexit';
+            legRole = 'time_exit';
+        } else {
+            base = 'dt-flatten';
+            legRole = 'emergency_flatten';
+        }
+        const order = { symbol: plan.symbol, side: exitSide, qty: absQty, type: 'market', time_in_force: 'day' };
 
         const submitResult = await submitManagementOrderUnlocked({
             action: decision.action,
@@ -457,7 +775,8 @@ async function executeExitSequence(decision, plan, {
             order,
             plan,
             client,
-            now,
+            nowFn,
+            renewalHook: async () => renewLeaseOrThrow('submit_order'),
         });
 
         // C6. Verify flat
@@ -472,6 +791,7 @@ async function executeExitSequence(decision, plan, {
             }
             if (Date.now() >= flatDeadline) break;
             await sleep(exitPolicy.pollIntervalMs);
+            await renewLeaseOrThrow('flat_verify_poll');
         }
 
         const isReplay = Boolean(submitResult.replayed);
@@ -492,7 +812,8 @@ async function executeExitSequence(decision, plan, {
 // new audit row of its own, but it still goes through the same lease to serialize with other
 // management actions on this account.
 async function executeManagementAction(decision, plan, deps) {
-    const { client, holderId, leaseDurationMs = 30_000, now = new Date() } = deps;
+    const { client, holderId, leaseDurationMs = 30_000, now = new Date(), nowFn: userNowFn } = deps;
+    const nowFn = userNowFn || (() => new Date());
     if (decision.action === 'none') {
         return { skipped: true };
     }
@@ -500,27 +821,49 @@ async function executeManagementAction(decision, plan, deps) {
         assertWholeShareQty(decision.details.qty);
     }
     if (decision.action === 'cancel_unfilled_remainder') {
-        const lease = await store.acquireSubmissionLease({ holderId, leaseDurationMs, now });
+        const lease = await store.acquireSubmissionLease({ holderId, leaseDurationMs, now: nowFn() });
         if (!lease.acquired) {
             throw executionError('ALPACA_LEASE_UNAVAILABLE', 'the durable Day Trading submission lease is held by another process');
         }
         try {
-            try {
-                const result = await client.cancelOrder(plan.entry_parent_broker_order_id);
-                return { action: decision.action, result };
-            } catch (error) {
-                if (error.status === 422) {
-                    return { action: decision.action, result: { canceled: false, reason: 'not_cancelable' } };
+            const entryOrderId = plan.entry_parent_broker_order_id;
+            const chainRes = await resolveTerminalDescendant(entryOrderId, client);
+            const canceled_ids = [];
+            for (const id of chainRes.chain) {
+                const order = chainRes.orders.get(id);
+                const s = String(order?.status || '').toLowerCase();
+                if (NON_EXECUTABLE_BROKER_STATUSES.includes(s)) {
+                    continue;
                 }
-                throw error;
+                const res = await store.renewSubmissionLease({ holderId, leaseDurationMs, now: nowFn() });
+                if (!res?.renewed) {
+                    throw executionError('ALPACA_LEASE_LOST', 'submission lease lost before cancelOrder');
+                }
+                try {
+                    await client.cancelOrder(id);
+                    canceled_ids.push(id);
+                } catch (err) {
+                    if (err.status === 422 || err.status === 404) {
+                        canceled_ids.push(id);
+                    } else {
+                        throw err;
+                    }
+                }
             }
+            return {
+                action: decision.action,
+                result: {
+                    canceled_ids,
+                    chain: chainRes.chain,
+                },
+            };
         } finally {
             await store.releaseSubmissionLease({ holderId });
         }
     }
 
-    if (decision.action === 'flatten' || decision.action === 'submit_time_exit') {
-        return executeExitSequence(decision, plan, deps);
+    if (decision.action === 'flatten' || decision.action === 'submit_time_exit' || decision.action === 'buy_to_cover') {
+        return executeExitSequence(decision, plan, { ...deps, nowFn });
     }
 
     const qty = decision.details?.qty;
@@ -538,10 +881,6 @@ async function executeManagementAction(decision, plan, deps) {
             take_profit: { limit_price: plan.planned_target },
             stop_loss: { stop_price: plan.planned_stop },
         };
-    } else if (decision.action === 'buy_to_cover') {
-        base = 'dt-cover';
-        legRole = 'emergency_flatten';
-        order = { symbol: plan.symbol, side: 'buy', qty, type: 'market', time_in_force: 'day' };
     } else {
         throw executionError('ALPACA_UNKNOWN_MANAGEMENT_ACTION', `no order construction exists for action ${decision.action}`);
     }
@@ -555,8 +894,14 @@ async function executeManagementAction(decision, plan, deps) {
         client,
         holderId,
         leaseDurationMs,
-        now,
+        nowFn,
     });
 }
 
-module.exports = { executeManagementAction };
+module.exports = {
+    executeManagementAction,
+    executeExitSequence,
+    resolveTerminalDescendant,
+    NON_EXECUTABLE_BROKER_STATUSES,
+    LOCAL_AUDIT_FINAL_STATUSES,
+};

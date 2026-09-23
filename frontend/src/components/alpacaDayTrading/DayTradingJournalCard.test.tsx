@@ -85,5 +85,20 @@ describe('DayTradingJournalCard', () => {
     const allBrokerMentions = screen.queryAllByText(/Broker:/i)
     expect(allBrokerMentions).toHaveLength(1)
   })
-})
 
+  it('G-4: renders Broker <code>: <message> when brokerCode is present', () => {
+    const eventWithBrokerCode = {
+      source: 'order_audit', eventKey: 'audit:1', planId: 3, eventType: 'order', action: 'time_exit',
+      outcome: 'submission_rejected', reason: null,
+      detail: { symbol: 'MRNA', brokerCode: 40310000, brokerMessage: 'insufficient qty' },
+      occurredAt: '2026-09-22T19:46:00.000Z',
+    }
+
+    journal.current = { analytics, trades: [], events: [eventWithBrokerCode] }
+    journal.isLoading = false
+    journal.isError = false
+    render(<DayTradingJournalCard />)
+
+    expect(screen.getByText('Broker 40310000: insufficient qty')).toBeInTheDocument()
+  })
+})

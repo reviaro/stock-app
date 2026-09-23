@@ -31,6 +31,12 @@ function eventSymbol(event: AlpacaDayTradeJournalEvent): string | null {
   return typeof symbol === 'string' ? symbol : null
 }
 
+function eventBrokerCode(event: AlpacaDayTradeJournalEvent): number | string | null {
+  const detail = event.detail as { broker_code?: unknown; brokerCode?: unknown } | null
+  const code = detail?.broker_code ?? detail?.brokerCode
+  return (typeof code === 'number' || typeof code === 'string') && code ? code : null
+}
+
 function eventBrokerMessage(event: AlpacaDayTradeJournalEvent): string | null {
   const detail = event.detail as { broker_message?: unknown; brokerMessage?: unknown } | null
   const message = detail?.broker_message ?? detail?.brokerMessage
@@ -87,7 +93,9 @@ function JournalTimeline({ events }: { events: AlpacaDayTradeJournalEvent[] }) {
                 {event.reason && <p className="mt-1 text-muted-foreground">{event.reason}</p>}
                 {eventBrokerMessage(event) && (
                   <p className="mt-1 text-destructive font-mono text-[11px]">
-                    Broker: {eventBrokerMessage(event)}
+                    {eventBrokerCode(event)
+                      ? `Broker ${eventBrokerCode(event)}: ${eventBrokerMessage(event)}`
+                      : `Broker: ${eventBrokerMessage(event)}`}
                   </p>
                 )}
               </li>

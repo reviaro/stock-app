@@ -6,6 +6,7 @@ const { DEFAULT_DAY_TRADE_POLICY } = require('../services/alpaca_day_trade_order
 const { reconcileFills, buildObservation } = require('../services/alpaca_fill_reconciliation');
 const { decidePlanAction, DEFAULT_MONITOR_POLICY } = require('../services/alpaca_day_trade_monitor');
 const { computeDayTradeJournalAnalytics, computeDailyRealizedPnl } = require('../services/alpaca_day_trade_journal');
+const { sanitizeBrokerMessage } = require('../services/alpaca_broker_error');
 
 const VALID_MODES = ['disabled', 'shadow', 'paper_execute'];
 const TERMINAL_PLAN_STATES = ['closed', 'cancelled', 'error'];
@@ -577,11 +578,17 @@ router.get('/journal', async (_req, res) => {
         ]);
         const fills = (await Promise.all(plans.map((plan) => store.listFillsForPlan(plan.id)))).flat();
         const events = [
-            ...semanticEvents.map((event) => ({
-                source: 'semantic', eventKey: event.event_key, planId: event.plan_id, eventType: event.event_type,
-                action: event.action, outcome: event.outcome, reason: event.reason,
-                detail: JSON.parse(event.detail_json || '{}'), occurredAt: event.occurred_at,
-            })),
+            ...semanticEvents.map((event) => {
+                const detail = JSON.parse(event.detail_json || '{}');
+                if (detail && typeof detail.broker_message === 'string') {
+                    detail.broker_message = sanitizeBrokerMessage(detail.broker_message);
+                }
+                return {
+                    source: 'semantic', eventKey: event.event_key, planId: event.plan_id, eventType: event.event_type,
+                    action: event.action, outcome: event.outcome, reason: event.reason,
+                    detail, occurredAt: event.occurred_at,
+                };
+            }),
             ...orderAudits.filter((audit) => audit.execution_epoch === 'day_trading').map((audit) => {
                 let brokerPayload = null;
                 if (audit.broker_payload) {
@@ -591,6 +598,8 @@ router.get('/journal', async (_req, res) => {
                             : audit.broker_payload;
                     } catch (_) {}
                 }
+                const rawBrokerMessage = brokerPayload?.broker_message || brokerPayload?.brokerMessage || null;
+                const brokerMessage = rawBrokerMessage ? sanitizeBrokerMessage(rawBrokerMessage) : null;
                 return {
                     source: 'order_audit', planId: audit.plan_id, eventType: 'order', action: audit.leg_role,
                     outcome: audit.status, reason: null,
@@ -600,7 +609,8 @@ router.get('/journal', async (_req, res) => {
                         qty: audit.qty,
                         orderType: audit.order_type,
                         legRole: audit.leg_role,
-                        brokerMessage: brokerPayload?.broker_message || brokerPayload?.brokerMessage || null,
+                        brokerCode: brokerPayload?.broker_code || brokerPayload?.brokerCode || null,
+                        brokerMessage,
                     },
                     occurredAt: audit.created_at,
                 };

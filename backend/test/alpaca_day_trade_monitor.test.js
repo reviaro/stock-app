@@ -267,4 +267,3 @@ test('Finding 4: clock { next_close } without is_open, deadline passed -> action
     assert.strictEqual(decision.healthCode, 'CARRIED_POSITION_AWAITING_OPEN');
     assert.strictEqual(decision.blockEntries, true);
 });
-

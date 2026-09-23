@@ -2343,7 +2343,7 @@ function createAlpacaPaperFill(fill) {
 
 const ALPACA_EVENT_PRIVATE_KEYS = new Set([
     'token', 'api_key', 'api_secret', 'account_id', 'broker_order_id', 'client_order_id',
-    'broker_payload', 'raw_payload', 'request_payload', 'idempotency_key',
+    'order_id', 'broker_payload', 'raw_payload', 'request_payload', 'idempotency_key',
 ]);
 
 function sanitizeAlpacaEventDetail(value) {
@@ -2665,6 +2665,30 @@ function acquireAlpacaMonitorSubmissionLease({ holderId, leaseDurationMs, now })
     });
 }
 
+function renewAlpacaMonitorSubmissionLease({ holderId, leaseDurationMs, now }) {
+    const holder = String(holderId || '').trim();
+    if (!holder) return Promise.reject(new Error('a holder id is required to renew the submission lease'));
+    const nowDate = new Date(now);
+    if (!Number.isFinite(Number(leaseDurationMs)) || Number(leaseDurationMs) <= 0 || Number.isNaN(nowDate.getTime())) {
+        return Promise.reject(new Error('a valid lease duration and current time are required'));
+    }
+    const expiresAt = new Date(nowDate.getTime() + Number(leaseDurationMs)).toISOString();
+    return new Promise((resolve, reject) => {
+        const sqlite = getDb();
+        sqlite.run(
+            `UPDATE alpaca_monitor_state
+             SET submission_lease_expires_at = ?, updated_at = datetime('now')
+             WHERE id = 1 AND submission_lease_holder = ? AND submission_lease_expires_at >= ?`,
+            [expiresAt, holder, nowDate.toISOString()],
+            function(err) {
+                sqlite.close();
+                if (err) return reject(err);
+                resolve({ renewed: this.changes === 1, expiresAt });
+            },
+        );
+    });
+}
+
 // Only the current holder can release its own lease — a slow caller whose lease already
 // expired and was reclaimed by someone else must not be able to clear the new holder's claim.
 function releaseAlpacaMonitorSubmissionLease({ holderId }) {
@@ -2876,6 +2900,7 @@ module.exports = {
     getAlpacaMonitorState,
     updateAlpacaMonitorState,
     acquireAlpacaMonitorSubmissionLease,
+    renewAlpacaMonitorSubmissionLease,
     releaseAlpacaMonitorSubmissionLease,
     createStrategyExperiment,
     listStrategyExperiments,

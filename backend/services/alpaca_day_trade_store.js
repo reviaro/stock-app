@@ -105,6 +105,10 @@ function acquireSubmissionLease({ holderId, leaseDurationMs, now }) {
     return db.acquireAlpacaMonitorSubmissionLease({ holderId, leaseDurationMs, now });
 }
 
+function renewSubmissionLease({ holderId, leaseDurationMs, now }) {
+    return db.renewAlpacaMonitorSubmissionLease({ holderId, leaseDurationMs, now });
+}
+
 function releaseSubmissionLease({ holderId }) {
     return db.releaseAlpacaMonitorSubmissionLease({ holderId });
 }
@@ -240,6 +244,7 @@ module.exports = {
     getMonitorState,
     updateMonitorState,
     acquireSubmissionLease,
+    renewSubmissionLease,
     releaseSubmissionLease,
     createOrderAudit,
     getOrderAuditByIdempotencyKey,

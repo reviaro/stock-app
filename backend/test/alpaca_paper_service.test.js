@@ -549,3 +549,42 @@ test('P2: non-JSON error body sets trimmed brokerMessage, and body read failure 
     );
 });
 
+test('G-2 paper service: a 403 body whose message contains an order UUID and account id -> error.message and error.brokerMessage are redacted; error.brokerBodyRaw holds the raw text and does not appear in JSON.stringify(error) or Object.keys(error)', async () => {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+
+    const rawPayload = JSON.stringify({
+        code: 40310000,
+        message: 'order 12345678-1234-1234-1234-123456789abc for account PA3ABCD12345 is forbidden',
+    });
+
+    const client = createPaperClient({
+        fetchImpl: async () => ({
+            ok: false,
+            status: 403,
+            text: async () => rawPayload,
+        }),
+    });
+
+    await assert.rejects(
+        () => client.getAccount(),
+        (err) => {
+            assert.strictEqual(err.status, 403);
+            assert.strictEqual(err.brokerCode, 40310000);
+            assert.strictEqual(
+                err.brokerMessage,
+                'order [id] for account [redacted] is forbidden',
+            );
+            assert.strictEqual(
+                err.message,
+                'Alpaca paper request failed (403): order [id] for account [redacted] is forbidden',
+            );
+            assert.strictEqual(err.brokerBodyRaw, rawPayload);
+            assert.strictEqual(Object.keys(err).includes('brokerBodyRaw'), false);
+            assert.strictEqual(JSON.stringify(err).includes('12345678-1234-1234-1234-123456789abc'), false);
+            assert.strictEqual(JSON.stringify(err).includes('brokerBodyRaw'), false);
+            return true;
+        },
+    );
+});
