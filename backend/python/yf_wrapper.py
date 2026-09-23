@@ -367,18 +367,29 @@ def get_demo_canslim(symbol):
         }
     }
 
-def _drop_partial_bars(hist):
-    """Drop bars the provider returned without complete OHLC prices (e.g. volume but NaN prices).
+OHLC_COLUMNS = ('Open', 'High', 'Low', 'Close')
 
-    A single NaN close would otherwise poison every later EMA/RSI value and any SMA window
-    containing it, and a NaN latest bar would become the reported price.
+def _normalize_bars(hist):
+    """Return only bars with finite Open/High/Low/Close, and a finite integer Volume.
+
+    The provider occasionally returns partial bars (volume but NaN prices, or non-finite values).
+    One such bar would otherwise poison every later EMA/RSI value and any SMA window containing
+    it, become the reported latest price, or crash int(volume). All four OHLC columns are
+    required; a frame missing any of them yields no bars. Invalid or missing volume becomes 0.
     """
     if hist is None or len(hist) == 0:
         return hist
-    price_cols = [col for col in ('Open', 'High', 'Low', 'Close') if col in hist.columns]
-    if not price_cols:
-        return hist
-    return hist.dropna(subset=price_cols)
+    if not all(col in hist.columns for col in OHLC_COLUMNS):
+        return hist.iloc[0:0]
+    bars = hist.copy()
+    for col in OHLC_COLUMNS:
+        bars[col] = pd.to_numeric(bars[col], errors='coerce')
+    finite = np.isfinite(bars[list(OHLC_COLUMNS)].to_numpy(dtype=float)).all(axis=1)
+    bars = bars[finite]
+    volume = pd.to_numeric(bars['Volume'], errors='coerce') if 'Volume' in bars.columns else pd.Series(0, index=bars.index)
+    volume = volume.where(np.isfinite(volume.to_numpy(dtype=float)), 0)
+    bars['Volume'] = volume.astype('int64')
+    return bars
 
 def get_stock_info(symbol):
     """Get basic stock info and quote data"""
@@ -388,7 +399,7 @@ def get_stock_info(symbol):
         
         # Get current price from history
         hist = stock.history(period="5d", interval="1d", timeout=10)
-        hist = _drop_partial_bars(hist)
+        hist = _normalize_bars(hist)
         
         price = 0
         change = 0
@@ -518,41 +529,19 @@ def get_history(symbol, period='1y', interval='1d'):
         stock = yf.Ticker(symbol)
         hist = stock.history(period=period, interval=interval, timeout=10)
         
+        hist = _normalize_bars(hist)
+
         data = []
-        # The provider occasionally returns partial bars (e.g. at market close or during settlement)
-        # with volume but missing/NaN OHLC; skip any bar without valid finite price values.
         for idx, row in hist.iterrows():
-            if not all(col in row for col in ('Open', 'High', 'Low', 'Close')):
-                continue
-            o, h, l, c = row['Open'], row['High'], row['Low'], row['Close']
-            if any(v is None or pd.isna(v) for v in (o, h, l, c)):
-                continue
-            try:
-                fo, fh, fl, fc = float(o), float(h), float(l), float(c)
-            except (TypeError, ValueError):
-                continue
-            if not (math.isfinite(fo) and math.isfinite(fh) and math.isfinite(fl) and math.isfinite(fc)):
-                continue
-
-            v_raw = row['Volume'] if 'Volume' in row else 0
-            if v_raw is None or pd.isna(v_raw):
-                vol = 0
-            else:
-                try:
-                    fv = float(v_raw)
-                    vol = int(fv) if math.isfinite(fv) else 0
-                except (TypeError, ValueError):
-                    vol = 0
-
             data.append({
                 'date': idx.isoformat(),
-                'open': round(fo, 2),
-                'high': round(fh, 2),
-                'low': round(fl, 2),
-                'close': round(fc, 2),
-                'volume': vol
+                'open': round(float(row['Open']), 2),
+                'high': round(float(row['High']), 2),
+                'low': round(float(row['Low']), 2),
+                'close': round(float(row['Close']), 2),
+                'volume': int(row['Volume'])
             })
-        
+
         return {
             'status': 'success',
             'data': {
@@ -810,7 +799,7 @@ def get_market_indexes():
             try:
                 ticker = yf.Ticker(symbol)
                 hist = ticker.history(period="5d", interval="1d", timeout=10)
-                hist = _drop_partial_bars(hist)
+                hist = _normalize_bars(hist)
                 info = ticker.info
                 
                 price = 0
@@ -1014,7 +1003,7 @@ def get_technical_indicators(symbol):
         stock = yf.Ticker(symbol)
         # Get enough data for all indicators (need 200+ days for SMA200)
         hist = stock.history(period="1y", interval="1d", timeout=10)
-        hist = _drop_partial_bars(hist)
+        hist = _normalize_bars(hist)
         
         if hist is None or len(hist) < 30:
             return get_demo_technical(symbol)

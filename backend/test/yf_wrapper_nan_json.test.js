@@ -175,3 +175,66 @@ yf_wrapper.main()
         assert.ok(Number.isFinite(value), `${label} must be a finite number, got ${value}`);
     }
 });
+
+test('H6 _normalize_bars requires finite values in all four OHLC columns and normalizes invalid volume to 0', () => {
+    const source = `
+import json
+import sys
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, 'python')
+import yf_wrapper
+
+idx = pd.date_range('2026-09-20', periods=5, tz='America/New_York')
+frame = pd.DataFrame([
+    {'Open': 100.0, 'High': 101.0, 'Low': 99.0, 'Close': 100.5, 'Volume': 1000},
+    {'Open': float('inf'), 'High': 101.0, 'Low': 99.0, 'Close': 100.5, 'Volume': 1000},
+    {'Open': 100.0, 'High': 101.0, 'Low': -float('inf'), 'Close': 100.5, 'Volume': 1000},
+    {'Open': 100.0, 'High': 101.0, 'Low': 99.0, 'Close': 100.5, 'Volume': float('nan')},
+    {'Open': 100.0, 'High': 101.0, 'Low': 99.0, 'Close': 100.5, 'Volume': float('inf')},
+], index=idx)
+bars = yf_wrapper._normalize_bars(frame)
+missing = yf_wrapper._normalize_bars(frame.drop(columns=['Low']))
+print(json.dumps({
+    'rows': len(bars),
+    'volumes': [int(v) for v in bars['Volume']],
+    'missing_rows': len(missing),
+}))
+`;
+    const parsed = runPython(source);
+    assert.deepStrictEqual(parsed, { rows: 3, volumes: [1000, 0, 0], missing_rows: 0 });
+});
+
+test('H7 stock info and market indexes survive a latest bar with valid OHLC but NaN/infinite volume', () => {
+    const source = `
+import sys
+import pandas as pd
+
+sys.path.insert(0, 'python')
+import yf_wrapper
+
+class FakeTicker:
+    info = {'shortName': 'Test', 'longName': 'Test'}
+    def history(self, **kwargs):
+        idx = pd.date_range('2026-09-18', periods=3, tz='America/New_York')
+        return pd.DataFrame([
+            {'Open': 100.0, 'High': 101.0, 'Low': 99.0, 'Close': 100.0, 'Volume': 1000},
+            {'Open': 100.0, 'High': 102.0, 'Low': 99.5, 'Close': 101.0, 'Volume': float('inf')},
+            {'Open': 101.0, 'High': 103.0, 'Low': 100.0, 'Close': 102.0, 'Volume': float('nan')},
+        ], index=idx)
+
+yf_wrapper.yf.Ticker = lambda _symbol: FakeTicker()
+yf_wrapper.main()
+`;
+    const info = runPython(source, { input: JSON.stringify({ action: 'info', symbol: 'SPY' }) });
+    assert.strictEqual(info.status, 'success');
+    assert.strictEqual(info.data.price, 102);
+    const indexes = runPython(source, { input: JSON.stringify({ action: 'indexes' }) });
+    assert.strictEqual(indexes.status, 'success');
+    for (const entry of Object.values(indexes.data)) {
+        assert.strictEqual(entry.error, undefined, `index ${entry.symbol} must not error: ${entry.error}`);
+        assert.strictEqual(entry.price, 102);
+        assert.strictEqual(entry.volume, 0);
+    }
+});
