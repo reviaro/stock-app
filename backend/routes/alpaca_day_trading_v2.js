@@ -11,6 +11,7 @@ const defaultStore = require('../services/alpaca_day_trade_v2_store');
 const { createPaperClient } = require('../services/alpaca_paper_service');
 const { createV2Execution, ENTRY_HEARTBEAT_MAX_AGE_MS } = require('../services/alpaca_day_trade_v2_execution');
 const { timeExitClientOrderId, DEFAULT_V2_POLICY } = require('../services/alpaca_day_trade_v2_policy');
+const { computeV2Analytics } = require('../services/alpaca_day_trade_v2_analytics');
 
 const MODES = ['disabled', 'shadow', 'paper_execute'];
 const UNRESOLVED_STATES = ['attention_required', 'submission_unknown', 'pending_submission'];
@@ -381,7 +382,9 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
     router.get('/journal', async (_req, res) => {
         try {
             const [plans, events] = await Promise.all([store.listPlans(), store.listEvents()]);
-            return res.json({ status: 'success', data: { trades: plans.map(sanitizePlan), events: events.map(sanitizeEvent) } });
+            return res.json({ status: 'success', data: {
+                analytics: computeV2Analytics({ plans, events }), trades: plans.map(sanitizePlan), events: events.map(sanitizeEvent),
+            } });
         } catch (err) {
             return respondError(res, err);
         }
