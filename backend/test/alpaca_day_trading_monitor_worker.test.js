@@ -1483,7 +1483,7 @@ test('T3 latched switch, entry parent \'canceled\' with filled_qty 6, position 6
     }
 });
 
-test('T4 latched switch, entry parent still \'partially_filled\' -> this tick cancels the entry only (no OCO); next tick with the parent now \'canceled\' -> OCO for the filled qty', { timeout: 30_000 }, async () => {
+test('T4 latched switch, entry parent still \'partially_filled\' -> the same tick cancels and verifies the entry, then protects the filled qty; the next tick does not duplicate the OCO', { timeout: 30_000 }, async () => {
     const lockPath = tempLockPath();
     const testNow = () => new Date('2026-09-17T14:30:00.000Z');
     await store.updateMonitorState({
@@ -1518,19 +1518,17 @@ test('T4 latched switch, entry parent still \'partially_filled\' -> this tick ca
         // Tick 1: parent is partially_filled
         await worker.runTickNow();
 
+        // Tick 1: the entry is cancelled, proven non-executable, and the 6 filled shares are
+        // protected in the same pass (not left uncovered until the next tick).
         assert.ok(client.calls.cancelOrder.includes('parent-t4'), 'tick 1 must cancel entry');
-        assert.strictEqual(client.calls.submitOrder.length, 0, 'tick 1 must submit NO OCO');
-
-        // Tick 2: parent order is now canceled at broker
-        const parentOrder = client.ordersMap.get('parent-t4');
-        parentOrder.status = 'canceled';
-
-        await worker.runTickNow();
-
-        // Tick 2: OCO must now be submitted
-        assert.strictEqual(client.calls.submitOrder.length, 1, 'tick 2 must submit OCO');
-        assert.strictEqual(client.calls.submitOrder[0].qty, 6, 'tick 2 OCO for filled qty 6');
+        assert.strictEqual(client.ordersMap.get('parent-t4').status, 'canceled');
+        assert.strictEqual(client.calls.submitOrder.length, 1, 'tick 1 must protect the filled qty');
+        assert.strictEqual(client.calls.submitOrder[0].qty, 6, 'OCO for filled qty 6');
         assert.strictEqual(client.calls.submitOrder[0].order_class, 'oco');
+
+        // Tick 2: the live OCO is replayed, never duplicated.
+        await worker.runTickNow();
+        assert.strictEqual(client.calls.submitOrder.length, 1, 'tick 2 must not submit a second OCO');
     } finally {
         await worker.stop();
         if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
@@ -1628,6 +1626,84 @@ test('N4-t: latched switch, 6 shares filled, no protective legs, entry parent A 
         assert.strictEqual(submitted.symbol, 'AMD');
         assert.strictEqual(submitted.qty, 6, 'OCO qty must be exactly 6');
         assert.strictEqual(submitted.order_class, 'oco');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('B2 a kill switch triggered by a later plan still sweeps a plan processed earlier in the same tick', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const sweepNow = () => new Date('2026-09-17T19:56:00.000Z');
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: sweepNow().toISOString(), kill_switch: false, block_entries: false });
+    // Plans are listed newest first: the trigger (older id) is evaluated AFTER the plan with the
+    // live entry, which is exactly the order the old single-pass loop got wrong.
+    const trigger = await seedPlan('TRGR', 'dt-trgr-entry-b2');
+    await db.updateAlpacaDayTradePlan(trigger.id, { protective_stop_broker_order_id: 'stop-trgr-b2' });
+    const liveEntryPlan = await seedPlan('LIVE', 'dt-live-entry-b2');
+
+    const client = createWorkerStatefulClient({
+        orders: [
+            { id: 'stop-trgr-b2', symbol: 'TRGR', side: 'sell', status: 'held', qty: 10 },
+            { id: 'broker-parent-LIVE', symbol: 'LIVE', side: 'buy', status: 'accepted', qty: 10, filled_qty: 0, legs: [] },
+        ],
+        positions: { TRGR: { qty: 10, side: 'long' }, LIVE: null },
+    });
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: sweepNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        assert.strictEqual(Boolean((await store.getMonitorState()).kill_switch), true);
+        assert.ok(client.calls.cancelOrder.includes('broker-parent-LIVE'), 'the earlier plan\'s live entry must be cancelled in the same tick');
+        assert.strictEqual(client.ordersMap.get('broker-parent-LIVE').status, 'canceled');
+        const cancelEvent = (await store.listEvents(liveEntryPlan.id))
+            .find((e) => e.event_type === 'monitor_action' && e.action === 'cancel_unfilled_remainder');
+        assert.ok(cancelEvent, 'the sweep must journal the entry cancellation');
+        assert.strictEqual(cancelEvent.outcome, 'cancel_verified');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('B4 a partial entry cancelled under the kill switch is verified and its filled shares protected in the same tick', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const midSession = () => new Date('2026-09-17T15:00:00.000Z');
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: midSession().toISOString(), kill_switch: true, block_entries: true });
+    const plan = await seedPlan('PART', 'dt-part-entry-b4');
+
+    const client = createWorkerStatefulClient({
+        orders: [
+            { id: 'broker-parent-PART', symbol: 'PART', side: 'buy', status: 'partially_filled', qty: 10, filled_qty: 6, legs: [], submitted_at: '2026-09-17T14:59:00.000Z' },
+        ],
+        positions: { PART: { qty: 6, side: 'long' } },
+    });
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: midSession,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        assert.strictEqual(client.ordersMap.get('broker-parent-PART').status, 'canceled');
+        const protection = client.calls.submitOrder.filter((o) => o.symbol === 'PART');
+        assert.strictEqual(protection.length, 1, 'the remaining 6 shares must be protected in the same tick');
+        assert.strictEqual(protection[0].order_class, 'oco');
+        assert.strictEqual(protection[0].qty, 6);
+        const actions = (await store.listEvents(plan.id)).filter((e) => e.event_type === 'monitor_action').map((e) => e.action);
+        assert.deepStrictEqual(actions, ['cancel_unfilled_remainder', 'attach_protective_oco']);
+        assert.strictEqual(Boolean((await store.getMonitorState()).kill_switch), true);
     } finally {
         await worker.stop();
         if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);

@@ -15,7 +15,13 @@ before(async () => {
     await db.initDb();
 });
 after(() => { if (fs.existsSync(TEST_DB)) fs.unlinkSync(TEST_DB); });
-beforeEach(async () => {});
+beforeEach(async () => {
+    // executeDayTradeEntry re-checks the route's gates inside the lease; open them by default.
+    await store.updateMonitorState({
+        mode: 'paper_execute', kill_switch: false, block_entries: false,
+        last_rest_reconciliation_at: new Date().toISOString(),
+    });
+});
 
 test('semantic events are immutable and idempotent only for the same canonical payload', async () => {
     const input = {

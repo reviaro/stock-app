@@ -112,11 +112,23 @@ test('cancel_unfilled_remainder cancels the entry parent order directly, idempot
 // throws ALPACA_BROKER_REJECTED for exactly this status, since the generic legacy path treats
 // any non-404 cancel failure as worth surfacing. The Day Trading repair action must not inherit
 // that: this exact race is the routine case its own poll-based design expects every tick.
-test('cancel_unfilled_remainder treats a 422 (order already reached a terminal state) as a benign non-cancelable outcome, not a thrown error', async () => {
+test('cancel_unfilled_remainder: a 422 proves nothing — verified only when the order really is terminal, fail closed otherwise', async () => {
     const plan = await seedPlan();
-    const client = fakeClient({ cancelError: Object.assign(new Error('Alpaca paper request failed (422)'), { status: 422, code: 'ALPACA_BROKER_REJECTED' }) });
-    const result = await executeManagementAction({ action: 'cancel_unfilled_remainder' }, plan, { client, holderId: 'test' });
-    assert.deepStrictEqual(result, { action: 'cancel_unfilled_remainder', result: { canceled_ids: ['broker-parent-1'], chain: ['broker-parent-1'] } });
+    const cancelError = Object.assign(new Error('Alpaca paper request failed (422)'), { status: 422, code: 'ALPACA_BROKER_REJECTED' });
+    const deps = { holderId: 'test', exitPolicy: { legTerminalTimeoutMs: 20, pollIntervalMs: 1 }, sleep: async () => {} };
+
+    // 422 because the order already reached a terminal state -> verified.
+    const raced = fakeClient({ cancelError });
+    raced.ordersMap.get('broker-parent-1').status = 'filled';
+    const result = await executeManagementAction({ action: 'cancel_unfilled_remainder' }, plan, { client: raced, ...deps });
+    assert.strictEqual(result.verified, true);
+
+    // 422 while the order is still live -> must not be reported as cancelled.
+    const live = fakeClient({ cancelError });
+    await assert.rejects(
+        () => executeManagementAction({ action: 'cancel_unfilled_remainder' }, plan, { client: live, ...deps }),
+        (err) => err.code === 'ALPACA_ENTRY_CANCEL_UNVERIFIED',
+    );
 });
 
 test('cancel_unfilled_remainder still surfaces a genuinely ambiguous broker failure during cancel, rather than swallowing it', async () => {
@@ -220,16 +232,23 @@ test('a matching replay of the same management action does not post a second tim
     const plan = await seedPlan();
     const client = fakeClient();
     await executeManagementAction({ action: 'flatten', details: { qty: 10 } }, plan, { client, holderId: 'test', exitPolicy: fastExitPolicy, sleep: fastSleep });
+    // The first call's flat check cancels its own still-"accepted" fake order; make it live again
+    // so the second call exercises the replay path.
+    const exitOrder = [...client.ordersMap.values()].find((o) => o.id !== 'broker-parent-1');
+    exitOrder.status = 'accepted';
     const second = await executeManagementAction({ action: 'flatten', details: { qty: 10 } }, plan, { client, holderId: 'test', exitPolicy: fastExitPolicy, sleep: fastSleep });
 
     assert.strictEqual(client.calls.submitOrder.length, 1);
     assert.strictEqual(second.replayed, true);
+    assert.strictEqual(second.flatVerified, true);
 });
 
 test('a replay with different quantity under dt-cover replays live order regardless of qty', async () => {
     const plan = await seedPlan();
     const client = fakeClient({ position: { qty: -10, side: 'short' } });
     await executeManagementAction({ action: 'buy_to_cover', details: { qty: 10 } }, plan, { client, holderId: 'test', exitPolicy: fastExitPolicy, sleep: fastSleep });
+    const coverOrder = [...client.ordersMap.values()].find((o) => o.id !== 'broker-parent-1');
+    coverOrder.status = 'accepted';
     const second = await executeManagementAction({ action: 'buy_to_cover', details: { qty: 4 } }, plan, { client, holderId: 'test', exitPolicy: fastExitPolicy, sleep: fastSleep });
 
     assert.strictEqual(client.calls.submitOrder.length, 1);
@@ -449,6 +468,11 @@ test('R3: a leg fills during cancellation leaving a smaller position -> sell use
     assert.strictEqual(client.calls.submitOrder.length, 1);
     assert.strictEqual(client.calls.submitOrder[0].qty, 4, 'must use refreshed qty 4, not decision qty 10');
 
+    // Separate plan: the first half's filled exit order is unknown to client2's broker, and an
+    // unreadable plan-owned order correctly blocks a "flat" claim.
+    await db.updateAlpacaDayTradePlan(plan.id, { state: 'closed', closed_at: new Date().toISOString() });
+    const plan2 = await seedPlan({ symbol: 'NVDA' }, { idempotency_key: 'dt-nvda-entry-r3b', client_order_id: 'dt-nvda-entry-r3b' });
+    await db.updateAlpacaDayTradePlan(plan2.id, { protective_target_broker_order_id: 'target-filling' });
     const client2 = createStatefulClient({
         orders: [
             { id: 'target-filling', symbol: 'NVDA', side: 'sell', status: 'held', qty: 10 },
@@ -462,7 +486,7 @@ test('R3: a leg fills during cancellation leaving a smaller position -> sell use
     };
     const result2 = await executeManagementAction(
         { action: 'submit_time_exit', details: { qty: 10 } },
-        { ...plan, protective_target_broker_order_id: 'target-filling' },
+        { ...plan2, protective_target_broker_order_id: 'target-filling' },
         { client: client2, holderId: 'test', exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 }, sleep: async () => {} },
     );
     assert.strictEqual(result2.outcome, 'already_flat');
@@ -1986,4 +2010,86 @@ test('N3-t: exit audit A replaced -> B canceled, position still open -> As audit
     const newAttempt = client.calls.submitOrder.find((o) => o.client_order_id === `dt-flatten-${plan.id}-a2`);
     assert.ok(newAttempt, 'a new attempt -a2 must be submitted');
     assert.strictEqual(newAttempt.qty, 10);
+});
+
+test('B3 position at zero is not reported flat while a plan-owned exit order can still execute', async () => {
+    const plan = await seedPlan();
+    const key = `dt-timeexit-${plan.id}-a1`;
+    await store.createOrderAudit({
+        idempotency_key: key, client_order_id: key, symbol: 'NVDA', side: 'sell', qty: 10,
+        order_type: 'market', time_in_force: 'day', status: 'pending_submission',
+        execution_epoch: 'day_trading', order_class: 'simple', leg_role: 'time_exit', plan_id: plan.id,
+    });
+    await store.updateOrderAudit(key, { status: 'accepted', broker_order_id: 'exit-live-1', broker_payload: { status: 'accepted' } });
+    const policy = { exitPolicy: { legTerminalTimeoutMs: 20, flatVerifyTimeoutMs: 20, pollIntervalMs: 1 }, sleep: async () => {} };
+
+    // (a) the stale live exit is cancelled and proven non-executable before "flat" is reported.
+    const client = createStatefulClient({
+        orders: [{ id: 'exit-live-1', client_order_id: key, symbol: 'NVDA', side: 'sell', status: 'accepted', qty: 10 }],
+        positions: { NVDA: null },
+    });
+    const result = await executeManagementAction({ action: 'flatten', details: { qty: 10 } }, plan, { client, holderId: 'test', ...policy });
+    assert.ok(client.calls.cancelOrder.includes('exit-live-1'), 'the live exit must be cancelled');
+    assert.strictEqual(client.ordersMap.get('exit-live-1').status, 'canceled');
+    assert.strictEqual(result.flatVerified, true);
+    assert.strictEqual(client.calls.submitOrder.length, 0);
+
+    // (b) if it cannot be proven non-executable, the result must NOT claim flat.
+    await store.updateOrderAudit(key, { status: 'accepted', broker_order_id: 'exit-live-1', broker_payload: { status: 'accepted' } });
+    const stuck = createStatefulClient({
+        orders: [{ id: 'exit-live-1', client_order_id: key, symbol: 'NVDA', side: 'sell', status: 'accepted', qty: 10 }],
+        positions: { NVDA: null },
+    });
+    stuck.cancelOrder = async (id) => { stuck.calls.cancelOrder.push(id); return { canceled: false, reason: 'stuck' }; };
+    const stuckResult = await executeManagementAction({ action: 'flatten', details: { qty: 10 } }, plan, { client: stuck, holderId: 'test', ...policy });
+    assert.strictEqual(stuckResult.flatVerified, false);
+    assert.strictEqual(stuckResult.outcome, 'flat_with_live_orders');
+});
+
+test('B4 partial-entry cancellation follows the replacement chain and is verified, not assumed from a 422/404', async () => {
+    const plan = await seedPlan();
+    const client = createStatefulClient({
+        orders: [
+            { id: 'broker-parent-1', symbol: 'NVDA', side: 'buy', status: 'replaced', replaced_by: 'entry-2', qty: 10 },
+            { id: 'entry-2', symbol: 'NVDA', side: 'buy', status: 'partially_filled', qty: 10, filled_qty: 6 },
+        ],
+        positions: { NVDA: { qty: 6, side: 'long' } },
+    });
+    // The broker answers the cancel with 422 while the order is still executable; it only becomes
+    // canceled a few polls later.
+    let polls = 0;
+    const getOrder = client.getOrder;
+    client.getOrder = async (id, options) => {
+        if (id === 'entry-2') {
+            polls += 1;
+            if (polls >= 4) client.ordersMap.get('entry-2').status = 'canceled';
+        }
+        return getOrder(id, options);
+    };
+    client.cancelOrder = async (id) => {
+        client.calls.cancelOrder.push(id);
+        const err = new Error('Alpaca paper request failed (422): order is not cancelable');
+        err.status = 422;
+        throw err;
+    };
+    const deps = { client, holderId: 'test', exitPolicy: { legTerminalTimeoutMs: 1000, pollIntervalMs: 1 }, sleep: async () => {} };
+
+    const result = await executeManagementAction({ action: 'cancel_unfilled_remainder' }, plan, deps);
+    assert.strictEqual(result.verified, true);
+    assert.ok(client.calls.cancelOrder.includes('entry-2'), 'the executable successor must be cancelled');
+    assert.strictEqual(client.ordersMap.get('entry-2').status, 'canceled');
+    assert.ok(polls >= 4, 'must keep verifying until the successor is proven non-executable');
+
+    // Never becomes non-executable -> fails closed instead of reporting success.
+    const stuck = createStatefulClient({
+        orders: [{ id: 'broker-parent-1', symbol: 'NVDA', side: 'buy', status: 'partially_filled', qty: 10, filled_qty: 6 }],
+        positions: { NVDA: { qty: 6, side: 'long' } },
+    });
+    stuck.cancelOrder = async (id) => { stuck.calls.cancelOrder.push(id); return { canceled: false, reason: 'not_found' }; };
+    await assert.rejects(
+        () => executeManagementAction({ action: 'cancel_unfilled_remainder' }, plan, {
+            client: stuck, holderId: 'test', exitPolicy: { legTerminalTimeoutMs: 20, pollIntervalMs: 1 }, sleep: async () => {},
+        }),
+        (err) => err.code === 'ALPACA_ENTRY_CANCEL_UNVERIFIED',
+    );
 });

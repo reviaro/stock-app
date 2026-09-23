@@ -175,41 +175,48 @@ function createWorker({
             if (!activePlanIds.has(id)) lastDecisionSignature.delete(id);
         }
 
+        // Phase 1: evaluate every plan before acting on any of them. A kill switch triggered by a
+        // later plan must still cover plans earlier in the list (e.g. one with a live entry).
+        const evaluations = new Map();
         for (const plan of plans) {
             const observation = await buildObservation(plan, {
                 client, policy, now, log,
             });
             const decision = decidePlanAction(observation);
             log({ planId: plan.id, symbol: plan.symbol, decision });
+            evaluations.set(plan.id, { plan, observation, decision });
+            if (decision.activateKillSwitch) activatingDecisions.push({ plan, decision });
+        }
 
-            if (decision.activateKillSwitch) {
-                if (!monitorState.kill_switch && !pendingKillSwitch) {
-                    await store.updateMonitorState({ kill_switch: true, block_entries: true });
-                    await recordMonitorEvent({
-                        event_key: `monitor:${cycleId}:kill_switch`,
-                        plan_id: null,
-                        event_type: 'kill_switch',
-                        action: 'activate',
-                        outcome: 'activated',
-                        reason: decision.reason || 'safety_sweep_violation',
-                        detail: {
-                            cycle_id: cycleId,
-                            health_code: decision.healthCode || null,
-                            trigger_plan_id: plan.id,
-                            symbol: plan.symbol,
-                        },
-                        occurred_at: occurredAt,
-                    });
-                    log({ killSwitchActivated: true, triggerPlanId: plan.id, symbol: plan.symbol, reason: decision.reason });
-                }
-                pendingKillSwitch = true;
-                activatingDecisions.push(decision);
+        // Phase 2: persist the switch (and the entry block) before any broker action runs.
+        if (activatingDecisions.length > 0) {
+            pendingKillSwitch = true;
+            if (!monitorState.kill_switch) {
+                const { plan: triggerPlan, decision: triggerDecision } = activatingDecisions[0];
+                await store.updateMonitorState({ kill_switch: true, block_entries: true });
+                await recordMonitorEvent({
+                    event_key: `monitor:${cycleId}:kill_switch`,
+                    plan_id: null,
+                    event_type: 'kill_switch',
+                    action: 'activate',
+                    outcome: 'activated',
+                    reason: triggerDecision.reason || 'safety_sweep_violation',
+                    detail: {
+                        cycle_id: cycleId,
+                        health_code: triggerDecision.healthCode || null,
+                        trigger_plan_id: triggerPlan.id,
+                        symbol: triggerPlan.symbol,
+                    },
+                    occurred_at: occurredAt,
+                });
+                log({ killSwitchActivated: true, triggerPlanId: triggerPlan.id, symbol: triggerPlan.symbol, reason: triggerDecision.reason });
             }
+        }
+        const isKillSwitchActive = Boolean(monitorState.kill_switch) || pendingKillSwitch;
 
-            const isKillSwitchActive = Boolean(monitorState.kill_switch) || pendingKillSwitch;
+        // Phase 3: journal the decisions (transition-only, as before).
+        for (const { plan, decision } of evaluations.values()) {
             const isRiskReducing = RISK_REDUCING_ACTIONS.includes(decision.action);
-            const isExitAction = EXIT_ACTIONS.includes(decision.action);
-
             const decisionOutcome = monitorState.mode === 'shadow'
                 ? 'shadow_observed_only'
                 : (decision.action === 'none' ? 'no_action_required' : (isKillSwitchActive && !isRiskReducing ? 'skipped_kill_switch_active' : 'action_pending'));
@@ -231,116 +238,110 @@ function createWorker({
                     }, occurred_at: occurredAt,
                 });
             }
+        }
 
-            if (monitorState.mode === 'paper_execute') {
-                if (isKillSwitchActive) {
-                    const entryOrderId = observation.entryOrder?.id || plan.entry_parent_broker_order_id;
-                    let hasActiveEntry = Boolean(entryOrderId) && observation.entryOrder && !NON_EXECUTABLE_BROKER_STATUSES.includes(observation.entryOrder.status);
-                    if (hasActiveEntry && entryOrderId) {
-                        try {
-                            const chainRes = await resolveTerminalDescendant(entryOrderId, client);
-                            hasActiveEntry = !chainRes.isNonExecutable;
-                        } catch (chainErr) {
-                            hasActiveEntry = true;
-                            log({ planId: plan.id, symbol: plan.symbol, resolveEntryChainError: chainErr.message });
-                        }
+        // Runs one management action and journals its outcome. `sweep` marks kill-switch
+        // risk-reduction so only those appear in the sweep summary.
+        async function runAction(plan, decision, { sweep, eventSuffix = 'action' }) {
+            try {
+                const actionRes = await executeManagementAction(decision, plan, {
+                    client, holderId, now: now(), nowFn: leaseClock, exitPolicy, sleep,
+                });
+                const actionOutcome = actionRes?.outcome || (actionRes?.verified ? 'cancel_verified' : 'submitted');
+                const flatVerified = actionRes?.flatVerified ?? null;
+                if (sweep) {
+                    sweepResults.push({
+                        plan_id: plan.id, symbol: plan.symbol, action: decision.action, outcome: actionOutcome, flat_verified: flatVerified,
+                    });
+                }
+                await recordMonitorEvent({
+                    event_key: `monitor:${cycleId}:plan:${plan.id}:${eventSuffix}`, plan_id: plan.id, event_type: 'monitor_action',
+                    action: decision.action, outcome: actionOutcome, reason: decision.reason || null,
+                    detail: { cycle_id: cycleId, flat_verified: flatVerified }, occurred_at: occurredAt,
+                });
+                return { ok: true, result: actionRes };
+            } catch (error) {
+                log({ planId: plan.id, symbol: plan.symbol, executionError: error.message, ...(error.brokerBodyRaw ? { brokerBodyRaw: error.brokerBodyRaw } : {}) });
+                if (sweep) {
+                    sweepResults.push({
+                        plan_id: plan.id, symbol: plan.symbol, action: decision.action, outcome: 'failed', flat_verified: null,
+                    });
+                }
+                await recordMonitorEvent({
+                    event_key: `monitor:${cycleId}:plan:${plan.id}:${eventSuffix}`, plan_id: plan.id, event_type: 'monitor_action',
+                    action: decision.action, outcome: 'failed', reason: error.code || 'execution_failed',
+                    detail: {
+                        cycle_id: cycleId,
+                        flat_verified: null,
+                        error: error.message,
+                        broker_status: error.status ?? null,
+                        broker_code: error.brokerCode ?? null,
+                        broker_message: error.brokerMessage ?? null,
+                    }, occurred_at: occurredAt,
+                });
+                return { ok: false, error };
+            }
+        }
+
+        // After an entry remainder is verified non-executable, protect or flatten whatever
+        // position it left in the same pass instead of leaving it uncovered until the next tick.
+        async function protectAfterEntryCancel(plan, { sweep }) {
+            const freshPlan = (await store.getPlan(plan.id)) || plan;
+            const freshObservation = await buildObservation(freshPlan, { client, policy, now, log });
+            const followUp = decidePlanAction(freshObservation);
+            if (!RISK_REDUCING_ACTIONS.includes(followUp.action) || followUp.action === 'cancel_unfilled_remainder') return;
+            await runAction(freshPlan, followUp, { sweep, eventSuffix: 'post_cancel_action' });
+        }
+
+        async function entryStillExecutable(plan, observation) {
+            const entryOrderId = observation.entryOrder?.id || plan.entry_parent_broker_order_id;
+            if (!entryOrderId || !observation.entryOrder) return false;
+            if (NON_EXECUTABLE_BROKER_STATUSES.includes(observation.entryOrder.status)) return false;
+            try {
+                const chainRes = await resolveTerminalDescendant(entryOrderId, client);
+                return !chainRes.isNonExecutable;
+            } catch (chainErr) {
+                log({ planId: plan.id, symbol: plan.symbol, resolveEntryChainError: chainErr.message });
+                return true; // unreadable chain: assume it can still buy
+            }
+        }
+
+        // Phase 4: act.
+        if (monitorState.mode === 'paper_execute') {
+            if (isKillSwitchActive) {
+                // Account-wide risk reduction over EVERY nonterminal plan, re-listed after the switch
+                // was persisted so an entry that slipped in during evaluation is covered too.
+                const sweepPlans = (await store.listPlans(null)).filter((plan) => !TERMINAL_PLAN_STATES.includes(plan.state));
+                for (const listedPlan of sweepPlans) {
+                    let evaluation = evaluations.get(listedPlan.id);
+                    if (!evaluation) {
+                        const observation = await buildObservation(listedPlan, { client, policy, now, log });
+                        evaluation = { plan: listedPlan, observation, decision: decidePlanAction(observation) };
                     }
-                    if (hasActiveEntry && !isExitAction) {
-                        let cancelOutcome = 'cancel_requested';
-                        const cancelDetail = {
-                            cycle_id: cycleId,
-                        };
-                        try {
-                            const res = await executeManagementAction(
-                                { action: 'cancel_unfilled_remainder', reason: 'kill_switch_entry_cancel' },
-                                { ...plan, entry_parent_broker_order_id: entryOrderId },
-                                { client, holderId, now: now(), nowFn: leaseClock },
-                            );
-                            if (res?.result?.canceled === false && res?.result?.reason === 'not_cancelable') {
-                                cancelOutcome = 'not_cancelable';
-                            }
-                        } catch (cancelErr) {
-                            cancelOutcome = 'failed';
-                            cancelDetail.error = cancelErr.message;
-                            cancelDetail.broker_status = cancelErr.status ?? null;
-                            cancelDetail.broker_code = cancelErr.brokerCode ?? null;
-                            cancelDetail.broker_message = cancelErr.brokerMessage ?? null;
-                            log({ planId: plan.id, symbol: plan.symbol, cancelEntryError: cancelErr.message, ...(cancelErr.brokerBodyRaw ? { brokerBodyRaw: cancelErr.brokerBodyRaw } : {}) });
-                        }
-                        sweepResults.push({
-                            plan_id: plan.id,
-                            symbol: plan.symbol,
-                            action: 'cancel_unfilled_remainder',
-                            outcome: cancelOutcome,
-                            flat_verified: null,
-                        });
-                        await recordMonitorEvent({
-                            event_key: `monitor:${cycleId}:plan:${plan.id}:cancel_entry`,
-                            plan_id: plan.id,
-                            event_type: 'monitor_action',
-                            action: 'cancel_unfilled_remainder',
-                            outcome: cancelOutcome,
-                            reason: 'kill_switch_entry_cancel',
-                            detail: cancelDetail,
-                            occurred_at: occurredAt,
-                        });
+                    const plan = { ...evaluation.plan, ...listedPlan };
+                    const { observation, decision } = evaluation;
+                    if (!EXIT_ACTIONS.includes(decision.action) && await entryStillExecutable(plan, observation)) {
+                        const entryOrderId = observation.entryOrder?.id || plan.entry_parent_broker_order_id;
+                        const cancelled = await runAction(
+                            { ...plan, entry_parent_broker_order_id: entryOrderId },
+                            { action: 'cancel_unfilled_remainder', reason: 'kill_switch_entry_cancel' },
+                            { sweep: true, eventSuffix: 'cancel_entry' },
+                        );
+                        if (cancelled.ok) await protectAfterEntryCancel(plan, { sweep: true });
                         continue;
                     }
-                    if (!isRiskReducing) {
-                        if (decision.action !== 'none') {
-                            log({ planId: plan.id, symbol: plan.symbol, skippedAction: decision.action, reason: 'kill_switch_active_or_pending' });
-                        }
-                        continue;
+                    if (RISK_REDUCING_ACTIONS.includes(decision.action)) {
+                        await runAction(plan, decision, { sweep: true });
+                    } else if (decision.action !== 'none') {
+                        log({ planId: plan.id, symbol: plan.symbol, skippedAction: decision.action, reason: 'kill_switch_active_or_pending' });
                     }
                 }
-
-                if (decision.action !== 'none') {
-                    try {
-                        const actionRes = await executeManagementAction(decision, plan, {
-                            client, holderId, now: now(), nowFn: leaseClock, exitPolicy, sleep,
-                        });
-                        const actionOutcome = actionRes?.outcome || 'submitted';
-                        const flatVerified = actionRes?.flatVerified ?? null;
-                        if (isRiskReducing) {
-                            sweepResults.push({
-                                plan_id: plan.id,
-                                symbol: plan.symbol,
-                                action: decision.action,
-                                outcome: actionOutcome,
-                                flat_verified: flatVerified,
-                            });
-                        }
-                        await recordMonitorEvent({
-                            event_key: `monitor:${cycleId}:plan:${plan.id}:action`, plan_id: plan.id, event_type: 'monitor_action',
-                            action: decision.action, outcome: actionOutcome, reason: decision.reason || null,
-                            detail: {
-                                cycle_id: cycleId,
-                                flat_verified: flatVerified,
-                            }, occurred_at: occurredAt,
-                        });
-                    } catch (error) {
-                        log({ planId: plan.id, symbol: plan.symbol, executionError: error.message, ...(error.brokerBodyRaw ? { brokerBodyRaw: error.brokerBodyRaw } : {}) });
-                        if (isRiskReducing) {
-                            sweepResults.push({
-                                plan_id: plan.id,
-                                symbol: plan.symbol,
-                                action: decision.action,
-                                outcome: 'failed',
-                                flat_verified: null,
-                            });
-                        }
-                        await recordMonitorEvent({
-                            event_key: `monitor:${cycleId}:plan:${plan.id}:action`, plan_id: plan.id, event_type: 'monitor_action',
-                            action: decision.action, outcome: 'failed', reason: error.code || 'execution_failed',
-                            detail: {
-                                cycle_id: cycleId,
-                                flat_verified: null,
-                                error: error.message,
-                                broker_status: error.status ?? null,
-                                broker_code: error.brokerCode ?? null,
-                                broker_message: error.brokerMessage ?? null,
-                            }, occurred_at: occurredAt,
-                        });
+            } else {
+                for (const { plan, decision } of evaluations.values()) {
+                    if (decision.action === 'none') continue;
+                    const outcome = await runAction(plan, decision, { sweep: false });
+                    if (outcome.ok && decision.action === 'cancel_unfilled_remainder') {
+                        await protectAfterEntryCancel(plan, { sweep: false });
                     }
                 }
             }

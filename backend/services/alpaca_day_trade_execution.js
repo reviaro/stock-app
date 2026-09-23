@@ -2,6 +2,7 @@ const store = require('./alpaca_day_trade_store');
 const { getProvenQuote } = require('./alpaca_market_data');
 const { buildDayTradeBracketOrder, DEFAULT_DAY_TRADE_POLICY } = require('./alpaca_day_trade_order_policy');
 const { computeDailyRealizedPnl } = require('./alpaca_day_trade_journal');
+const { DEFAULT_MONITOR_POLICY } = require('./alpaca_day_trade_monitor');
 
 const UNRESOLVED_ORDER_STATUSES = ['pending_submission', 'submission_unknown', 'submission_failed'];
 const TERMINAL_ORDER_STATUSES = ['filled', 'canceled', 'rejected', 'expired', 'suspended', 'stopped', 'submission_rejected', 'submission_not_found'];
@@ -68,6 +69,28 @@ function intentMatchesExistingAudit(intent, audit) {
         && Number(audit.take_profit_price) === Number(intent.target_price);
 }
 
+// The route checks these gates before calling in, but the kill switch / block_entries can be
+// set by the monitor while this request waits for the lease or fetches broker data. Re-read the
+// durable state inside the lease, right before anything is persisted or sent to the broker, with
+// the same codes and thresholds the route uses.
+async function assertEntryGatesOpen() {
+    const state = await store.getMonitorState();
+    if (state?.kill_switch) {
+        throw executionError('ALPACA_KILL_SWITCH_ACTIVE', 'the Day Trading kill switch is active; new entries are refused until it is cleared');
+    }
+    if (state?.mode !== 'paper_execute') {
+        throw executionError('ALPACA_ENTRIES_DISABLED', 'Day Trading entries are currently disabled');
+    }
+    if (state.block_entries) {
+        throw executionError('ALPACA_ENTRIES_BLOCKED', 'a Day Trading plan currently requires attention; new entries are refused');
+    }
+    const lastTick = state.last_rest_reconciliation_at;
+    const tickAgeMs = lastTick ? Date.now() - new Date(lastTick).getTime() : Infinity;
+    if (!(tickAgeMs <= DEFAULT_MONITOR_POLICY.staleReconciliationMs)) {
+        throw executionError('ALPACA_MONITOR_STALE', 'the Day Trading monitor has not confirmed account state recently enough to trust');
+    }
+}
+
 // The one function through which every Day Trading entry submission passes (plan Section 7
 // steps 12-16). A durable, cross-process lease (Safety Invariant #10) serializes attempts from
 // the web server and the standalone monitor worker; a plan+entry-order row is persisted before
@@ -121,6 +144,10 @@ async function executeDayTradeEntry({
             return { replayed: true, plan, order: existing };
         }
 
+        // Replays above never reach the broker; a new submission must see the gates open now that
+        // the lease is held.
+        await assertEntryGatesOpen();
+
         const allAudits = await store.listOrderAudits();
         const dtAudits = allAudits.filter((audit) => audit.execution_epoch === 'day_trading');
         if (dtAudits.some((audit) => UNRESOLVED_ORDER_STATUSES.includes(audit.status))) {
@@ -152,6 +179,10 @@ async function executeDayTradeEntry({
             intent, quote, clock, asset, riskContext, policy, now, account: { ...account, cash: cashAfterCommitments },
         });
         const { order, entryPrice, stopPrice, targetPrice, plannedRiskDollars, plannedRewardRisk } = built;
+
+        // Second check, as late as possible: the broker reads and quote fetch above can take
+        // seconds, during which the monitor may have latched the kill switch.
+        await assertEntryGatesOpen();
 
         const { plan, order: auditRow } = await store.createPlanWithEntry(
             {

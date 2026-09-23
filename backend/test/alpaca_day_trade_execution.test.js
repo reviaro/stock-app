@@ -30,6 +30,11 @@ beforeEach(async () => {
             (err) => { sqlite.close(); err ? reject(err) : resolve(); },
         );
     }));
+    // executeDayTradeEntry re-checks the route's gates inside the lease; open them by default.
+    await store.updateMonitorState({
+        mode: 'paper_execute', kill_switch: false, block_entries: false,
+        last_rest_reconciliation_at: new Date().toISOString(),
+    });
 });
 
 function baseIntent(overrides = {}) {
@@ -321,4 +326,28 @@ test('never writes to the simulator transaction ledger', async () => {
     await execute({ client: fakeClient() });
     const after = await db.listTransactions();
     assert.deepStrictEqual(after, before);
+});
+
+test('B1 kill switch latched while the entry waits for or holds the lease blocks it before any plan or broker order', async () => {
+    // (a) latched while the request waited for the lease: refused before any broker read.
+    await store.updateMonitorState({ kill_switch: true, block_entries: true });
+    const waitingClient = fakeClient();
+    let brokerReads = 0;
+    waitingClient.getAccount = async () => { brokerReads += 1; return {}; };
+    await assert.rejects(() => execute({ client: waitingClient }), (err) => err.code === 'ALPACA_KILL_SWITCH_ACTIVE');
+    assert.strictEqual(brokerReads, 0);
+    assert.strictEqual(waitingClient.calls.submitOrder.length, 0);
+
+    // (b) latched by the monitor after the lease was acquired, during the broker reads.
+    await store.updateMonitorState({ kill_switch: false, block_entries: false });
+    const client = fakeClient();
+    const getAccount = client.getAccount;
+    client.getAccount = async () => {
+        await store.updateMonitorState({ kill_switch: true, block_entries: true });
+        return getAccount();
+    };
+    await assert.rejects(() => execute({ client }), (err) => err.code === 'ALPACA_KILL_SWITCH_ACTIVE');
+    assert.strictEqual(client.calls.submitOrder.length, 0);
+    assert.strictEqual((await store.listPlans(null)).length, 0);
+    assert.strictEqual((await store.listOrderAudits()).length, 0);
 });

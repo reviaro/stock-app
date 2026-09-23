@@ -479,6 +479,73 @@ async function resolveTerminalDescendant(orderId, client) {
     }
 }
 
+// Every broker order this plan owns: its bracket legs, the entry parent, and every Day Trading
+// audit's order (entry, repair OCO, exits) plus the legs of each. Discovery 404s only mean
+// "legs unknown"; the known id itself stays in the set and must still be proven.
+async function collectPlanOwnedOrderIds(plan, client) {
+    const ids = new Set();
+    if (plan.protective_stop_broker_order_id) ids.add(plan.protective_stop_broker_order_id);
+    if (plan.protective_target_broker_order_id) ids.add(plan.protective_target_broker_order_id);
+    const audits = (await store.listOrderAudits()).filter(
+        (a) => a.execution_epoch === 'day_trading' && Number(a.plan_id) === Number(plan.id) && a.broker_order_id,
+    );
+    const parents = [plan.entry_parent_broker_order_id, ...audits.map((a) => a.broker_order_id)].filter(Boolean);
+    for (const id of parents) {
+        ids.add(id);
+        try {
+            const order = await client.getOrder(id, { nested: true });
+            for (const leg of (Array.isArray(order?.legs) ? order.legs : [])) {
+                if (leg?.id) ids.add(leg.id);
+            }
+        } catch (err) {
+            if (err.status !== 404) throw err;
+        }
+    }
+    return ids;
+}
+
+// A zero position is not "safely flat" while any plan-owned order can still execute: a live
+// exit or stale leg could later open an unintended short or long. Cancel whatever is still
+// executable (following replacement chains) and require proof of non-executability for all of
+// them, bounded by legTerminalTimeoutMs. Unreadable orders count as live (fail closed).
+async function ensurePlanOrdersNonExecutable({ plan, client, renewLease, sleep, exitPolicy }) {
+    const ids = await collectPlanOwnedOrderIds(plan, client);
+    const cancelRequested = new Set();
+    const deadline = Date.now() + exitPolicy.legTerminalTimeoutMs;
+    while (true) {
+        const live = [];
+        let cancelledThisRound = false;
+        for (const id of ids) {
+            let chainRes;
+            try {
+                chainRes = await resolveTerminalDescendant(id, client);
+            } catch (err) {
+                live.push({ id, status: err.status === 404 ? 'not_found_404' : (err.code || 'unresolved') });
+                continue;
+            }
+            if (chainRes.isNonExecutable) continue;
+            live.push({ id, status: chainRes.terminalStatus || 'unknown' });
+            for (const cid of chainRes.chain) {
+                const status = String(chainRes.orders.get(cid)?.status || '').toLowerCase();
+                if (NON_EXECUTABLE_BROKER_STATUSES.includes(status) || cancelRequested.has(cid)) continue;
+                await renewLease('verify_flat_cancel');
+                try {
+                    await client.cancelOrder(cid);
+                } catch (err) {
+                    if (err.status !== 422 && err.status !== 404) throw err;
+                }
+                cancelRequested.add(cid);
+                cancelledThisRound = true;
+            }
+        }
+        if (live.length === 0) return { ok: true, live: [] };
+        // A cancel issued this round is always re-verified at least once before giving up.
+        if (!cancelledThisRound && Date.now() >= deadline) return { ok: false, live };
+        await sleep(exitPolicy.pollIntervalMs);
+        await renewLease('verify_flat_poll');
+    }
+}
+
 // C: Exit sequence for 'flatten', 'submit_time_exit', and 'buy_to_cover'.
 // Incident Rationale (2026-09-22):
 // Open bracket protective legs (stop/target) reserve shares on the broker side, causing Alpaca
@@ -508,6 +575,16 @@ async function executeExitSequence(decision, plan, {
         if (!res?.renewed) {
             throw executionError('ALPACA_LEASE_LOST', `submission lease lost during exit sequence (${stage})`);
         }
+    };
+
+    // "Flat" is only reported once the position is zero AND every plan-owned order is proven
+    // non-executable; otherwise the result says so and the next tick retries.
+    const finishFlat = async (result) => {
+        const check = await ensurePlanOrdersNonExecutable({
+            plan, client, renewLease: renewLeaseOrThrow, sleep, exitPolicy,
+        });
+        if (check.ok) return { ...result, flatVerified: true };
+        return { ...result, outcome: 'flat_with_live_orders', flatVerified: false, liveOrderCount: check.live.length };
     };
 
     try {
@@ -588,10 +665,15 @@ async function executeExitSequence(decision, plan, {
                 await sleep(exitPolicy.pollIntervalMs);
                 await renewLeaseOrThrow('replayed_flat_verify_poll');
             }
+            if (flat) {
+                return await finishFlat({
+                    action: decision.action, outcome: 'flat_verified', replayed: true, order: singleLiveAudit,
+                });
+            }
             return {
                 action: decision.action,
-                outcome: flat ? 'flat_verified' : 'replayed_live_order',
-                flatVerified: flat,
+                outcome: 'replayed_live_order',
+                flatVerified: false,
                 replayed: true,
                 order: singleLiveAudit,
             };
@@ -739,7 +821,7 @@ async function executeExitSequence(decision, plan, {
         const pos = await client.getPosition(plan.symbol);
         const qty = pos ? Number(pos.qty) : 0;
         if (!pos || qty === 0) {
-            return { action: decision.action, outcome: 'already_flat', flatVerified: true };
+            return await finishFlat({ action: decision.action, outcome: 'already_flat' });
         }
         if (exitSide === 'buy') {
             if (pos.side === 'long' || qty > 0) {
@@ -795,10 +877,15 @@ async function executeExitSequence(decision, plan, {
         }
 
         const isReplay = Boolean(submitResult.replayed);
+        if (flat) {
+            return await finishFlat({
+                action: decision.action, outcome: 'flat_verified', replayed: isReplay, order: submitResult.order,
+            });
+        }
         return {
             action: decision.action,
-            outcome: flat ? 'flat_verified' : (isReplay ? 'replayed_live_order' : 'exit_submitted_unverified'),
-            flatVerified: flat,
+            outcome: isReplay ? 'replayed_live_order' : 'exit_submitted_unverified',
+            flatVerified: false,
             replayed: isReplay,
             order: submitResult.order,
         };
@@ -841,17 +928,72 @@ async function executeManagementAction(decision, plan, deps) {
                 }
                 try {
                     await client.cancelOrder(id);
-                    canceled_ids.push(id);
                 } catch (err) {
-                    if (err.status === 422 || err.status === 404) {
-                        canceled_ids.push(id);
-                    } else {
-                        throw err;
+                    // 422/404 only mean the cancel itself was not accepted (often a race into a
+                    // terminal state); they prove nothing. Verification below decides.
+                    if (err.status !== 422 && err.status !== 404) throw err;
+                }
+                canceled_ids.push(id);
+            }
+
+            // A cancel request is not proof: poll the replacement chain until its terminal
+            // descendant is non-executable, cancelling any new executable descendant, bounded by
+            // legTerminalTimeoutMs. Unverified -> throw, so no caller treats the entry as dead.
+            const cancelPolicy = { legTerminalTimeoutMs: 10_000, pollIntervalMs: 500, ...deps.exitPolicy };
+            const sleep = deps.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+            const requested = new Set(canceled_ids);
+            // Verify every order seen in the chain (not only the root): each one's own terminal
+            // descendant must be non-executable.
+            const toVerify = new Set(chainRes.chain);
+            const deadline = Date.now() + cancelPolicy.legTerminalTimeoutMs;
+            while (true) {
+                let allNonExecutable = true;
+                let cancelledThisRound = false;
+                let lastStatus = 'unreadable';
+                for (const id of [...toVerify]) {
+                    let current = null;
+                    try {
+                        current = await resolveTerminalDescendant(id, client);
+                    } catch (_err) {
+                        current = null;
                     }
+                    if (current && current.isNonExecutable) continue;
+                    allNonExecutable = false;
+                    if (!current) continue;
+                    lastStatus = current.terminalStatus;
+                    for (const cid of current.chain) toVerify.add(cid);
+                    if (!requested.has(current.terminalId)) {
+                        const renewed = await store.renewSubmissionLease({ holderId, leaseDurationMs, now: nowFn() });
+                        if (!renewed?.renewed) {
+                            throw executionError('ALPACA_LEASE_LOST', 'submission lease lost before cancelOrder');
+                        }
+                        try {
+                            await client.cancelOrder(current.terminalId);
+                        } catch (err) {
+                            if (err.status !== 422 && err.status !== 404) throw err;
+                        }
+                        requested.add(current.terminalId);
+                        canceled_ids.push(current.terminalId);
+                        cancelledThisRound = true;
+                    }
+                }
+                if (allNonExecutable) break;
+                // A cancel issued this round is always re-verified at least once before giving up.
+                if (!cancelledThisRound && Date.now() >= deadline) {
+                    throw executionError(
+                        'ALPACA_ENTRY_CANCEL_UNVERIFIED',
+                        `entry order could not be proven non-executable (terminal status: ${lastStatus})`,
+                    );
+                }
+                await sleep(cancelPolicy.pollIntervalMs);
+                const renewed = await store.renewSubmissionLease({ holderId, leaseDurationMs, now: nowFn() });
+                if (!renewed?.renewed) {
+                    throw executionError('ALPACA_LEASE_LOST', 'submission lease lost while verifying entry cancellation');
                 }
             }
             return {
                 action: decision.action,
+                verified: true,
                 result: {
                     canceled_ids,
                     chain: chainRes.chain,
