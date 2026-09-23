@@ -66,6 +66,18 @@ async function attemptCloseFromFills(plan, { client }) {
     const position = await client.getPosition(plan.symbol);
     const remainingQty = position ? Number(position.qty) : 0;
     if (remainingQty !== 0) return null;
+    // A closed plan drops out of monitoring, so it must not close while any of its orders can
+    // still execute; the monitor cancels them first (cancel_stale_orders), then this closes.
+    // A failed broker read here means "cannot prove it yet" (stay open, retry next pass), never an
+    // error that would move the plan to a terminal state.
+    const { findStaleLiveOrders } = require('./alpaca_day_trade_repair_execution');
+    let staleOrders;
+    try {
+        staleOrders = await findStaleLiveOrders(plan, client);
+    } catch (_err) {
+        return null;
+    }
+    if (staleOrders.length > 0) return null;
 
     const exitFill = latestExitFill(fills);
     const orderAudits = await store.listOrderAudits();

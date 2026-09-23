@@ -53,8 +53,11 @@ async function seedPlanWithEntry(overrides = {}) {
         { ...basePlan, ...(overrides.plan || {}) },
         { ...baseEntryOrder, ...(overrides.order || {}) },
     );
-    await db.updateAlpacaDayTradePlan(plan.id, { entry_parent_broker_order_id: 'broker-parent-1' });
-    return { plan: { ...plan, entry_parent_broker_order_id: 'broker-parent-1' }, order };
+    await db.updateAlpacaDayTradePlan(plan.id, {
+        entry_parent_broker_order_id: 'broker-parent-1',
+        opened_at: overrides.plan?.opened_at ?? null,
+    });
+    return { plan: { ...plan, entry_parent_broker_order_id: 'broker-parent-1', opened_at: overrides.plan?.opened_at ?? null }, order };
 }
 
 test('normalizeRestFillActivity maps Alpaca\'s FILL activity fields to the canonical fill shape', () => {
@@ -614,4 +617,486 @@ test('buildObservation fails closed (brokerUnavailable: true) when any broker ca
     assert.strictEqual(observation.position, null);
     assert.strictEqual(logs.length, 1, 'the caught error must be logged, not silently swallowed');
     assert.match(logs[0].observationError, /network blip/);
+});
+
+test('T1 partial entry: planned_qty 10, one 4-share buy fill -> state partially_entered', async () => {
+    const { plan } = await seedPlanWithEntry();
+    const client = {
+        getOrder: async () => ({ id: 'broker-parent-1', legs: [
+            { id: 'broker-stop-1', type: 'stop', side: 'sell' },
+            { id: 'broker-target-1', type: 'limit', side: 'sell' },
+        ] }),
+        getAccountActivities: async () => [
+            { id: 'fill-partial-1', order_id: 'broker-parent-1', symbol: 'NVDA', side: 'buy', qty: '4', price: '100.40', transaction_time: '2026-09-17T13:31:00Z', type: 'partial_fill' },
+        ],
+        getPosition: async () => ({ symbol: 'NVDA', side: 'long', qty: '4' }),
+    };
+
+    await reconcileFills({ client, store });
+
+    const updated = await store.getPlan(plan.id);
+    assert.strictEqual(updated.state, 'partially_entered');
+    assert.strictEqual(updated.filled_entry_qty, 4);
+    assert.strictEqual(updated.avg_entry_price, 100.40);
+    assert.strictEqual(updated.opened_at, '2026-09-17T13:31:00Z');
+});
+
+test('T2 complete entry via REST: 4 + 6 fills -> state active, filled_entry_qty 10, avg 100.52', async () => {
+    const { plan } = await seedPlanWithEntry();
+    const client = {
+        getOrder: async () => ({ id: 'broker-parent-1', legs: [
+            { id: 'broker-stop-1', type: 'stop', side: 'sell' },
+            { id: 'broker-target-1', type: 'limit', side: 'sell' },
+        ] }),
+        getAccountActivities: async () => [
+            { id: 'fill-t2-a', order_id: 'broker-parent-1', symbol: 'NVDA', side: 'buy', qty: '4', price: '100.40', transaction_time: '2026-09-17T13:31:00Z', type: 'partial_fill' },
+            { id: 'fill-t2-b', order_id: 'broker-parent-1', symbol: 'NVDA', side: 'buy', qty: '6', price: '100.60', transaction_time: '2026-09-17T13:31:05Z', type: 'fill' },
+        ],
+        getPosition: async () => ({ symbol: 'NVDA', side: 'long', qty: '10' }),
+    };
+
+    await reconcileFills({ client, store });
+
+    const updated = await store.getPlan(plan.id);
+    assert.strictEqual(updated.state, 'active');
+    assert.strictEqual(updated.filled_entry_qty, 10);
+    assert.strictEqual(updated.avg_entry_price, 100.52);
+    assert.strictEqual(updated.opened_at, '2026-09-17T13:31:00Z');
+});
+
+test('T3 WebSocket-first: recordWebSocketFill then reconcileFills with composite REST activity -> exactly ONE fill row, active', async () => {
+    const { plan } = await seedPlanWithEntry();
+    const uuid = '9a049121-8591-402a-988a-99557c0c1610';
+    const wsFill = normalizeWebSocketFillEvent({
+        event: 'fill',
+        execution_id: uuid,
+        order: { id: 'broker-parent-1', symbol: 'NVDA', side: 'buy' },
+        price: '100.52',
+        qty: '10',
+        position_qty: '10',
+        timestamp: '2026-09-17T13:31:00Z',
+    });
+    await recordWebSocketFill(wsFill, { store });
+
+    const client = {
+        getOrder: async () => ({ id: 'broker-parent-1', legs: [
+            { id: 'broker-stop-1', type: 'stop', side: 'sell' },
+            { id: 'broker-target-1', type: 'limit', side: 'sell' },
+        ] }),
+        getAccountActivities: async () => [
+            { id: `20260918131205250::${uuid}`, order_id: 'broker-parent-1', symbol: 'NVDA', side: 'buy', qty: '10', price: '100.52', transaction_time: '2026-09-17T13:31:00Z', type: 'fill' },
+        ],
+        getPosition: async () => ({ symbol: 'NVDA', side: 'long', qty: '10' }),
+    };
+
+    await reconcileFills({ client, store });
+
+    const fills = await store.listFillsForPlan(plan.id);
+    assert.strictEqual(fills.length, 1);
+    const updated = await store.getPlan(plan.id);
+    assert.strictEqual(updated.state, 'active');
+    assert.strictEqual(updated.filled_entry_qty, 10);
+    assert.strictEqual(updated.avg_entry_price, 100.52);
+});
+
+test('T4 REST-first then recordWebSocketFill then reconcileFills -> one fill row, active', async () => {
+    const { plan } = await seedPlanWithEntry();
+    const uuid = '9a049121-8591-402a-988a-99557c0c1610';
+    const client = {
+        getOrder: async () => ({ id: 'broker-parent-1', legs: [
+            { id: 'broker-stop-1', type: 'stop', side: 'sell' },
+            { id: 'broker-target-1', type: 'limit', side: 'sell' },
+        ] }),
+        getAccountActivities: async () => [
+            { id: `20260918131205250::${uuid}`, order_id: 'broker-parent-1', symbol: 'NVDA', side: 'buy', qty: '10', price: '100.52', transaction_time: '2026-09-17T13:31:00Z', type: 'fill' },
+        ],
+        getPosition: async () => ({ symbol: 'NVDA', side: 'long', qty: '10' }),
+    };
+
+    await reconcileFills({ client, store });
+
+    const wsFill = normalizeWebSocketFillEvent({
+        event: 'fill',
+        execution_id: uuid,
+        order: { id: 'broker-parent-1', symbol: 'NVDA', side: 'buy' },
+        price: '100.52',
+        qty: '10',
+        position_qty: '10',
+        timestamp: '2026-09-17T13:31:00Z',
+    });
+    await recordWebSocketFill(wsFill, { store });
+
+    await reconcileFills({ client, store });
+
+    const fills = await store.listFillsForPlan(plan.id);
+    assert.strictEqual(fills.length, 1);
+    const updated = await store.getPlan(plan.id);
+    assert.strictEqual(updated.state, 'active');
+    assert.strictEqual(updated.filled_entry_qty, 10);
+    assert.strictEqual(updated.avg_entry_price, 100.52);
+});
+
+test('T5 restart self-heal: insert fills directly, reconcileFills with empty activities repairs plan to active', async () => {
+    const { plan } = await seedPlanWithEntry();
+    await store.recordFill({
+        activity_id: 'fill-direct-1',
+        plan_id: plan.id,
+        broker_order_id: 'broker-parent-1',
+        symbol: 'NVDA',
+        side: 'buy',
+        qty: 10,
+        price: 100.50,
+        executed_at: '2026-09-17T13:31:00Z',
+        fill_type: 'fill',
+        source: 'rest_reconciliation',
+    });
+
+    const before = await store.getPlan(plan.id);
+    assert.strictEqual(before.state, 'entry_pending');
+    assert.strictEqual(before.filled_entry_qty, 0);
+
+    const client = {
+        getOrder: async () => ({ id: 'broker-parent-1', legs: [
+            { id: 'broker-stop-1', type: 'stop', side: 'sell' },
+            { id: 'broker-target-1', type: 'limit', side: 'sell' },
+        ] }),
+        getAccountActivities: async () => [],
+        getPosition: async () => ({ symbol: 'NVDA', side: 'long', qty: '10' }),
+    };
+
+    await reconcileFills({ client, store });
+
+    const repaired = await store.getPlan(plan.id);
+    assert.strictEqual(repaired.state, 'active');
+    assert.strictEqual(repaired.filled_entry_qty, 10);
+    assert.strictEqual(repaired.avg_entry_price, 100.50);
+    assert.strictEqual(repaired.opened_at, '2026-09-17T13:31:00Z');
+});
+
+test('T5b restart self-heal on a production-shaped row: opened_at already set is preserved and the plan still repairs', async () => {
+    const { plan } = await seedPlanWithEntry({ plan: { opened_at: '2026-09-21 21:55:00' } });
+
+    await store.recordFill({
+        activity_id: 'fill-t5b-1',
+        plan_id: plan.id,
+        broker_order_id: 'broker-parent-1',
+        symbol: 'NVDA',
+        side: 'buy',
+        qty: 4,
+        price: 100.40,
+        executed_at: '2026-09-21T21:56:00.000Z',
+        fill_type: 'partial_fill',
+        source: 'rest_reconciliation',
+    });
+    await store.recordFill({
+        activity_id: 'fill-t5b-2',
+        plan_id: plan.id,
+        broker_order_id: 'broker-parent-1',
+        symbol: 'NVDA',
+        side: 'buy',
+        qty: 6,
+        price: 100.60,
+        executed_at: '2026-09-21T21:56:05.000Z',
+        fill_type: 'fill',
+        source: 'rest_reconciliation',
+    });
+
+    const before = await store.getPlan(plan.id);
+    assert.strictEqual(before.state, 'entry_pending');
+    assert.strictEqual(before.filled_entry_qty, 0);
+    assert.strictEqual(before.avg_entry_price, null);
+    assert.strictEqual(before.opened_at, '2026-09-21 21:55:00');
+
+    const client = {
+        getOrder: async () => ({ id: 'broker-parent-1', legs: [
+            { id: 'broker-stop-1', type: 'stop', side: 'sell' },
+            { id: 'broker-target-1', type: 'limit', side: 'sell' },
+        ] }),
+        getAccountActivities: async () => [],
+        getPosition: async () => ({ symbol: 'NVDA', side: 'long', qty: '10' }),
+    };
+
+    await reconcileFills({ client, store });
+
+    const repaired = await store.getPlan(plan.id);
+    assert.strictEqual(repaired.state, 'active');
+    assert.strictEqual(repaired.filled_entry_qty, 10);
+    assert.strictEqual(repaired.avg_entry_price, 100.52);
+    assert.strictEqual(repaired.opened_at, '2026-09-21 21:55:00');
+
+    const events = await store.listEvents(plan.id);
+    const planStateEvents = events.filter((e) => e.event_type === 'plan_state' && e.action === 'sync_from_fills');
+    assert.strictEqual(planStateEvents.length, 1);
+    const anomalyEvents = events.filter((e) => e.event_type === 'anomaly');
+    assert.strictEqual(anomalyEvents.length, 0);
+
+    await reconcileFills({ client, store });
+    const afterSecondPass = await store.getPlan(plan.id);
+    assert.deepStrictEqual(afterSecondPass, repaired);
+
+    const eventsAfterSecond = await store.listEvents(plan.id);
+    const planStateEventsAfterSecond = eventsAfterSecond.filter((e) => e.event_type === 'plan_state' && e.action === 'sync_from_fills');
+    assert.strictEqual(planStateEventsAfterSecond.length, 1);
+});
+
+test('T6 idempotent: run reconcileFills twice more -> identical plan row, exactly one plan_state event, no anomaly events', async () => {
+    const { plan } = await seedPlanWithEntry();
+    await store.recordFill({
+        activity_id: 'fill-idempotent-1',
+        plan_id: plan.id,
+        broker_order_id: 'broker-parent-1',
+        symbol: 'NVDA',
+        side: 'buy',
+        qty: 10,
+        price: 100.50,
+        executed_at: '2026-09-17T13:31:00Z',
+        fill_type: 'fill',
+        source: 'rest_reconciliation',
+    });
+
+    const client = {
+        getOrder: async () => ({ id: 'broker-parent-1', legs: [
+            { id: 'broker-stop-1', type: 'stop', side: 'sell' },
+            { id: 'broker-target-1', type: 'limit', side: 'sell' },
+        ] }),
+        getAccountActivities: async () => [],
+        getPosition: async () => ({ symbol: 'NVDA', side: 'long', qty: '10' }),
+    };
+
+    await reconcileFills({ client, store });
+    const firstSync = await store.getPlan(plan.id);
+
+    await reconcileFills({ client, store });
+    await reconcileFills({ client, store });
+    const afterSyncs = await store.getPlan(plan.id);
+
+    assert.deepStrictEqual(afterSyncs, firstSync);
+    const events = await store.listEvents(plan.id);
+    const stateEvents = events.filter((e) => e.event_type === 'plan_state' && e.action === 'sync_from_fills');
+    assert.strictEqual(stateEvents.length, 1);
+    const anomalies = events.filter((e) => e.event_type === 'anomaly');
+    assert.strictEqual(anomalies.length, 0);
+});
+
+test('T7 exit + closure: entry fills then stop-leg sell fill with getPosition null -> plan closed, sync does not overwrite', async () => {
+    const { plan } = await seedPlanWithEntry();
+    const client = {
+        getOrder: async () => ({ id: 'broker-parent-1', legs: [
+            { id: 'broker-stop-1', type: 'stop', side: 'sell' },
+            { id: 'broker-target-1', type: 'limit', side: 'sell' },
+        ] }),
+        getAccountActivities: async () => [
+            { id: 'fill-t7-in', order_id: 'broker-parent-1', symbol: 'NVDA', side: 'buy', qty: '10', price: '100.50', transaction_time: '2026-09-17T13:31:00Z', type: 'fill' },
+            { id: 'fill-t7-out', order_id: 'broker-stop-1', symbol: 'NVDA', side: 'sell', qty: '10', price: '98.00', transaction_time: '2026-09-17T14:00:00Z', type: 'fill' },
+        ],
+        getPosition: async () => null,
+    };
+
+    await reconcileFills({ client, store });
+
+    const closed = await store.getPlan(plan.id);
+    assert.strictEqual(closed.state, 'closed');
+    assert.strictEqual(closed.exit_reason, 'stop_loss');
+    assert.strictEqual(closed.realized_pnl, -25);
+    assert.strictEqual(closed.filled_entry_qty, 10);
+    assert.strictEqual(closed.filled_exit_qty, 10);
+});
+
+test('T8 partial exit with position still open -> state exit_pending, filled_exit_qty set, not closed', async () => {
+    const { plan } = await seedPlanWithEntry();
+    const client = {
+        getOrder: async () => ({ id: 'broker-parent-1', legs: [
+            { id: 'broker-stop-1', type: 'stop', side: 'sell' },
+            { id: 'broker-target-1', type: 'limit', side: 'sell' },
+        ] }),
+        getAccountActivities: async () => [
+            { id: 'fill-t8-in', order_id: 'broker-parent-1', symbol: 'NVDA', side: 'buy', qty: '10', price: '100.50', transaction_time: '2026-09-17T13:31:00Z', type: 'fill' },
+            { id: 'fill-t8-out', order_id: 'broker-stop-1', symbol: 'NVDA', side: 'sell', qty: '4', price: '98.00', transaction_time: '2026-09-17T14:00:00Z', type: 'partial_fill' },
+        ],
+        getPosition: async () => ({ symbol: 'NVDA', side: 'long', qty: '6' }),
+    };
+
+    await reconcileFills({ client, store });
+
+    const planRow = await store.getPlan(plan.id);
+    assert.strictEqual(planRow.state, 'exit_pending');
+    assert.strictEqual(planRow.filled_entry_qty, 10);
+    assert.strictEqual(planRow.filled_exit_qty, 4);
+    assert.strictEqual(planRow.avg_exit_price, 98.00);
+});
+
+test('T9 overfill stays fail-closed: entry fills exceeding planned_qty -> plan ends in error, filled_entry_qty not set to overfilled', async () => {
+    const { plan } = await seedPlanWithEntry();
+    await store.recordFill({
+        activity_id: 'fill-t9-over', plan_id: plan.id, broker_order_id: 'broker-parent-1', symbol: 'NVDA',
+        side: 'buy', qty: 999, price: 100.50, executed_at: '2026-09-17T13:31:00Z', fill_type: 'fill', source: 'rest_reconciliation',
+    });
+
+    const client = {
+        getOrder: async () => ({ id: 'broker-parent-1', legs: [
+            { id: 'broker-stop-1', type: 'stop', side: 'sell' },
+            { id: 'broker-target-1', type: 'limit', side: 'sell' },
+        ] }),
+        getAccountActivities: async () => [],
+        getPosition: async () => ({ symbol: 'NVDA', side: 'long', qty: '999' }),
+    };
+
+    await reconcileFills({ client, store });
+
+    const planRow = await store.getPlan(plan.id);
+    assert.strictEqual(planRow.state, 'error');
+    assert.strictEqual(planRow.filled_entry_qty, 0);
+});
+
+test('T10 terminal guard: a plan already closed with fills -> syncPlanFillSummary leaves columns unchanged and returns changed:false', async () => {
+    const { plan } = await seedPlanWithEntry();
+    await store.recordFill({
+        activity_id: 'fill-t10-in', plan_id: plan.id, broker_order_id: 'broker-parent-1', symbol: 'NVDA',
+        side: 'buy', qty: 10, price: 100.50, executed_at: '2026-09-17T13:31:00Z', fill_type: 'fill', source: 'rest_reconciliation',
+    });
+    await store.recordFill({
+        activity_id: 'fill-t10-out', plan_id: plan.id, broker_order_id: 'broker-stop-1', symbol: 'NVDA',
+        side: 'sell', qty: 10, price: 98.00, executed_at: '2026-09-17T14:00:00Z', fill_type: 'fill', source: 'rest_reconciliation',
+    });
+    await store.closePlan(plan.id, { confirmedFlatQty: 0, exit_reason: 'stop_loss', realized_pnl: -25, realized_r: -1, closed_at: '2026-09-17T14:01:00Z' });
+
+    const before = await store.getPlan(plan.id);
+    assert.strictEqual(before.state, 'closed');
+
+    const result = await store.syncPlanFillSummary(plan.id);
+    assert.strictEqual(result.changed, false);
+    assert.strictEqual(result.reason, 'terminal');
+
+    const after = await store.getPlan(plan.id);
+    assert.deepStrictEqual(after, before);
+});
+
+test('T11 sync failure isolation: store wrapper whose syncPlanFillSummary throws -> reconcileFills completes, plan state unchanged, anomaly event, second plan synced', async () => {
+    const { plan: planA } = await seedPlanWithEntry({
+        plan: { symbol: 'NVDA' },
+        order: { idempotency_key: 'dt-nvda-t11', client_order_id: 'dt-nvda-t11', symbol: 'NVDA' },
+    });
+    const { plan: planB } = await seedPlanWithEntry({
+        plan: { symbol: 'MSFT' },
+        order: { idempotency_key: 'dt-msft-t11', client_order_id: 'dt-msft-t11', symbol: 'MSFT' },
+    });
+    await db.updateAlpacaDayTradePlan(planA.id, { entry_parent_broker_order_id: 'parent-a' });
+    await db.updateAlpacaDayTradePlan(planB.id, { entry_parent_broker_order_id: 'parent-b' });
+
+    await store.recordFill({
+        activity_id: 'fill-t11-a', plan_id: planA.id, broker_order_id: 'parent-a', symbol: 'NVDA',
+        side: 'buy', qty: 4, price: 100.40, executed_at: '2026-09-17T13:31:00Z', fill_type: 'partial_fill', source: 'rest_reconciliation',
+    });
+    await store.recordFill({
+        activity_id: 'fill-t11-b', plan_id: planB.id, broker_order_id: 'parent-b', symbol: 'MSFT',
+        side: 'buy', qty: 10, price: 200.00, executed_at: '2026-09-17T13:31:05Z', fill_type: 'fill', source: 'rest_reconciliation',
+    });
+
+    const faultyStore = {
+        ...store,
+        syncPlanFillSummary: async (id) => {
+            if (id === planA.id) {
+                const err = new Error('simulated sync failure');
+                err.code = 'SIMULATED_SYNC_ERROR';
+                throw err;
+            }
+            return store.syncPlanFillSummary(id);
+        },
+    };
+
+    const client = {
+        getOrder: async (id) => ({ id, legs: [] }),
+        getAccountActivities: async () => [],
+        getPosition: async (sym) => ({ symbol: sym, side: 'long', qty: sym === 'NVDA' ? '4' : '10' }),
+    };
+
+    await reconcileFills({ client, store: faultyStore });
+
+    const planARow = await store.getPlan(planA.id);
+    assert.strictEqual(planARow.state, 'entry_pending', 'failed sync must not move plan state to error');
+
+    const planBRow = await store.getPlan(planB.id);
+    assert.strictEqual(planBRow.state, 'active', 'second plan must still sync successfully');
+    assert.strictEqual(planBRow.filled_entry_qty, 10);
+
+    const eventsA = await store.listEvents(planA.id);
+    const anomaly = eventsA.find((e) => e.event_type === 'anomaly' && e.action === 'sync_plan_summary');
+    assert.ok(anomaly);
+    assert.strictEqual(anomaly.reason, 'SIMULATED_SYNC_ERROR');
+});
+
+test('deriveFillSummaryPatch unit tests: bust excluded, correction supersedes original, entry 0 keeps state, null when unchanged, overfill throws', () => {
+    const { deriveFillSummaryPatch } = store;
+    assert.strictEqual(typeof deriveFillSummaryPatch, 'function');
+
+    const plan = {
+        id: 1,
+        symbol: 'NVDA',
+        state: 'entry_pending',
+        planned_qty: 10,
+        filled_entry_qty: 0,
+        avg_entry_price: null,
+        filled_exit_qty: 0,
+        avg_exit_price: null,
+        opened_at: null,
+    };
+
+    // Bust excluded:
+    const fillsWithBust = [
+        { activity_id: 'f1', side: 'buy', qty: 4, price: 100, executed_at: '2026-09-17T13:31:00Z', is_bust: 0 },
+        { activity_id: 'f2', side: 'buy', qty: 10, price: 50, executed_at: '2026-09-17T13:31:01Z', is_bust: 1 },
+    ];
+    const patchBust = deriveFillSummaryPatch(plan, fillsWithBust);
+    assert.strictEqual(patchBust.patch.filled_entry_qty, 4);
+    assert.strictEqual(patchBust.patch.state, 'partially_entered');
+    assert.strictEqual(patchBust.patch.avg_entry_price, 100);
+
+    // Correction supersedes original:
+    const fillsWithCorrection = [
+        { activity_id: 'f-orig', side: 'buy', qty: 4, price: 100, executed_at: '2026-09-17T13:31:00Z', is_bust: 0 },
+        { activity_id: 'f-corr', side: 'buy', qty: 6, price: 102, executed_at: '2026-09-17T13:31:02Z', is_bust: 0, correction_of: 'f-orig' },
+    ];
+    const patchCorr = deriveFillSummaryPatch(plan, fillsWithCorrection);
+    assert.strictEqual(patchCorr.patch.filled_entry_qty, 6);
+    assert.strictEqual(patchCorr.patch.avg_entry_price, 102);
+    assert.strictEqual(patchCorr.patch.opened_at, '2026-09-17T13:31:02Z');
+
+    // Entry 0 keeps state:
+    const patchEmpty = deriveFillSummaryPatch(plan, []);
+    assert.strictEqual(patchEmpty, null, 'unchanged returns null');
+
+    const emptyNonUnchangedPlan = { ...plan, filled_entry_qty: 5 };
+    const patchReset = deriveFillSummaryPatch(emptyNonUnchangedPlan, []);
+    assert.strictEqual(patchReset.patch.state, 'entry_pending');
+    assert.strictEqual(patchReset.patch.filled_entry_qty, 0);
+
+    // Returns null when unchanged:
+    const activePlan = {
+        id: 1,
+        symbol: 'NVDA',
+        state: 'active',
+        planned_qty: 10,
+        filled_entry_qty: 10,
+        avg_entry_price: 100.50,
+        filled_exit_qty: 0,
+        avg_exit_price: null,
+        opened_at: '2026-09-17T13:31:00Z',
+    };
+    const fillsActive = [
+        { activity_id: 'f-act', side: 'buy', qty: 10, price: 100.50, executed_at: '2026-09-17T13:31:00Z', is_bust: 0 },
+    ];
+    assert.strictEqual(deriveFillSummaryPatch(activePlan, fillsActive), null);
+
+    // Overfill throws:
+    assert.throws(
+        () => deriveFillSummaryPatch(plan, [{ activity_id: 'f-over', side: 'buy', qty: 15, price: 100, executed_at: '2026-09-17T13:31:00Z' }]),
+        (err) => err.code === 'ALPACA_FILL_OVERFILL',
+    );
+    assert.throws(
+        () => deriveFillSummaryPatch(plan, [
+            { activity_id: 'f-in', side: 'buy', qty: 5, price: 100, executed_at: '2026-09-17T13:31:00Z' },
+            { activity_id: 'f-out', side: 'sell', qty: 6, price: 100, executed_at: '2026-09-17T13:32:00Z' },
+        ]),
+        (err) => err.code === 'ALPACA_FILL_OVERFILL',
+    );
 });

@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const { executeDayTradeEntry } = require('../services/alpaca_day_trade_execution');
 const { createPaperClient, resolveMissingPaperOrderAudit } = require('../services/alpaca_paper_service');
@@ -6,6 +7,7 @@ const { DEFAULT_DAY_TRADE_POLICY } = require('../services/alpaca_day_trade_order
 const { reconcileFills, buildObservation } = require('../services/alpaca_fill_reconciliation');
 const { decidePlanAction, DEFAULT_MONITOR_POLICY } = require('../services/alpaca_day_trade_monitor');
 const { computeDayTradeJournalAnalytics, computeDailyRealizedPnl } = require('../services/alpaca_day_trade_journal');
+const { sanitizeBrokerMessage } = require('../services/alpaca_broker_error');
 
 const VALID_MODES = ['disabled', 'shadow', 'paper_execute'];
 const TERMINAL_PLAN_STATES = ['closed', 'cancelled', 'error'];
@@ -178,7 +180,8 @@ router.post('/entries', async (req, res) => {
             intent,
             clientOrderId,
             client: createPaperClient(),
-            holderId: `web-${process.pid}`,
+            // Unique per request: a stale request must never renew or release another request's lease.
+            holderId: `web-${process.pid}-${crypto.randomUUID()}`,
             policy,
         });
         return res.status(result.replayed ? 200 : 201).json({
@@ -577,17 +580,43 @@ router.get('/journal', async (_req, res) => {
         ]);
         const fills = (await Promise.all(plans.map((plan) => store.listFillsForPlan(plan.id)))).flat();
         const events = [
-            ...semanticEvents.map((event) => ({
-                source: 'semantic', eventKey: event.event_key, planId: event.plan_id, eventType: event.event_type,
-                action: event.action, outcome: event.outcome, reason: event.reason,
-                detail: JSON.parse(event.detail_json || '{}'), occurredAt: event.occurred_at,
-            })),
-            ...orderAudits.filter((audit) => audit.execution_epoch === 'day_trading').map((audit) => ({
-                source: 'order_audit', planId: audit.plan_id, eventType: 'order', action: audit.leg_role,
-                outcome: audit.status, reason: null,
-                detail: { symbol: audit.symbol, side: audit.side, qty: audit.qty, orderType: audit.order_type, legRole: audit.leg_role },
-                occurredAt: audit.created_at,
-            })),
+            ...semanticEvents.map((event) => {
+                const detail = JSON.parse(event.detail_json || '{}');
+                if (detail && typeof detail.broker_message === 'string') {
+                    detail.broker_message = sanitizeBrokerMessage(detail.broker_message);
+                }
+                return {
+                    source: 'semantic', eventKey: event.event_key, planId: event.plan_id, eventType: event.event_type,
+                    action: event.action, outcome: event.outcome, reason: event.reason,
+                    detail, occurredAt: event.occurred_at,
+                };
+            }),
+            ...orderAudits.filter((audit) => audit.execution_epoch === 'day_trading').map((audit) => {
+                let brokerPayload = null;
+                if (audit.broker_payload) {
+                    try {
+                        brokerPayload = typeof audit.broker_payload === 'string'
+                            ? JSON.parse(audit.broker_payload)
+                            : audit.broker_payload;
+                    } catch (_) {}
+                }
+                const rawBrokerMessage = brokerPayload?.broker_message || brokerPayload?.brokerMessage || null;
+                const brokerMessage = rawBrokerMessage ? sanitizeBrokerMessage(rawBrokerMessage) : null;
+                return {
+                    source: 'order_audit', planId: audit.plan_id, eventType: 'order', action: audit.leg_role,
+                    outcome: audit.status, reason: null,
+                    detail: {
+                        symbol: audit.symbol,
+                        side: audit.side,
+                        qty: audit.qty,
+                        orderType: audit.order_type,
+                        legRole: audit.leg_role,
+                        brokerCode: brokerPayload?.broker_code || brokerPayload?.brokerCode || null,
+                        brokerMessage,
+                    },
+                    occurredAt: audit.created_at,
+                };
+            }),
             ...fills.map((fill) => ({
                 source: 'fill', planId: fill.plan_id, eventType: 'fill', action: fill.side, outcome: fill.fill_type, reason: null,
                 detail: { symbol: fill.symbol, side: fill.side, qty: fill.qty, price: fill.price, source: fill.source, isBust: Boolean(fill.is_bust) },

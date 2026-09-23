@@ -472,3 +472,119 @@ test('explicit missing-order resolution refuses an HTTP 200 null broker response
     }), /reports|invalid/i);
     assert.strictEqual(updated, false);
 });
+
+test('P1: captures broker rejection code and message from JSON 403 response', async () => {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+    const client = createPaperClient({
+        fetchImpl: async () => ({
+            ok: false,
+            status: 403,
+            text: async () => JSON.stringify({
+                code: 40310000,
+                message: 'insufficient qty available for order (requested: 10, available: 0)',
+            }),
+            json: async () => ({
+                code: 40310000,
+                message: 'insufficient qty available for order (requested: 10, available: 0)',
+            }),
+        }),
+    });
+
+    await assert.rejects(
+        () => client.submitOrder({ symbol: 'MRNA', qty: 10, side: 'sell', type: 'market', time_in_force: 'day' }),
+        (err) => {
+            assert.strictEqual(err.status, 403);
+            assert.strictEqual(err.code, 'ALPACA_BROKER_REJECTED');
+            assert.strictEqual(err.brokerCode, 40310000);
+            assert.strictEqual(err.brokerMessage, 'insufficient qty available for order (requested: 10, available: 0)');
+            assert.match(err.message, /^Alpaca paper request failed \(403\): insufficient qty/);
+            return true;
+        },
+    );
+});
+
+test('P2: non-JSON error body sets trimmed brokerMessage, and body read failure falls back safely', async () => {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+
+    const clientRawText = createPaperClient({
+        fetchImpl: async () => ({
+            ok: false,
+            status: 500,
+            text: async () => '   internal server error   \n',
+        }),
+    });
+
+    await assert.rejects(
+        () => clientRawText.getAccount(),
+        (err) => {
+            assert.strictEqual(err.status, 500);
+            assert.strictEqual(err.brokerCode, null);
+            assert.strictEqual(err.brokerMessage, 'internal server error');
+            assert.strictEqual(err.message, 'Alpaca paper request failed (500): internal server error');
+            return true;
+        },
+    );
+
+    const clientFailingBody = createPaperClient({
+        fetchImpl: async () => ({
+            ok: false,
+            status: 502,
+            text: async () => { throw new Error('stream broken'); },
+        }),
+    });
+
+    await assert.rejects(
+        () => clientFailingBody.getAccount(),
+        (err) => {
+            assert.strictEqual(err.status, 502);
+            assert.strictEqual(err.brokerCode, null);
+            assert.strictEqual(err.brokerMessage, null);
+            assert.strictEqual(err.message, 'Alpaca paper request failed (502)');
+            return true;
+        },
+    );
+});
+
+test('G-2 paper service: a 403 body whose message contains an order UUID and account id -> error.message and error.brokerMessage are redacted; error.brokerBodyRaw holds the raw text and does not appear in JSON.stringify(error) or Object.keys(error)', async () => {
+    process.env.ALPACA_API_KEY = 'paper-key';
+    process.env.ALPACA_API_SECRET = 'paper-secret';
+    const { createPaperClient } = require('../services/alpaca_paper_service');
+
+    const rawPayload = JSON.stringify({
+        code: 40310000,
+        message: 'order 12345678-1234-1234-1234-123456789abc for account PA3ABCD12345 is forbidden',
+    });
+
+    const client = createPaperClient({
+        fetchImpl: async () => ({
+            ok: false,
+            status: 403,
+            text: async () => rawPayload,
+        }),
+    });
+
+    await assert.rejects(
+        () => client.getAccount(),
+        (err) => {
+            assert.strictEqual(err.status, 403);
+            assert.strictEqual(err.brokerCode, 40310000);
+            assert.strictEqual(
+                err.brokerMessage,
+                'order [id] for account [redacted] is forbidden',
+            );
+            assert.strictEqual(
+                err.message,
+                'Alpaca paper request failed (403): order [id] for account [redacted] is forbidden',
+            );
+            assert.strictEqual(err.brokerBodyRaw, rawPayload);
+            assert.strictEqual(Object.keys(err).includes('brokerBodyRaw'), false);
+            assert.strictEqual(JSON.stringify(err).includes('12345678-1234-1234-1234-123456789abc'), false);
+            assert.strictEqual(JSON.stringify(err).includes('brokerBodyRaw'), false);
+            return true;
+        },
+    );
+});

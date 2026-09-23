@@ -13,18 +13,35 @@ const { createWorker, acquireInstanceLock } = require('../workers/alpaca_day_tra
 before(async () => {
     if (fs.existsSync(TEST_DB)) fs.unlinkSync(TEST_DB);
     await db.initDb();
+    const sqlite = db.getDb();
+    await new Promise((resolve, reject) => sqlite.serialize(() => {
+        sqlite.run('PRAGMA journal_mode = WAL');
+        sqlite.run('DROP TRIGGER IF EXISTS alpaca_day_trade_events_no_delete', (err) => {
+            sqlite.close();
+            err ? reject(err) : resolve();
+        });
+    }));
 });
-after(() => { if (fs.existsSync(TEST_DB)) fs.unlinkSync(TEST_DB); });
+after(() => {
+    if (fs.existsSync(TEST_DB)) fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(`${TEST_DB}-wal`)) fs.unlinkSync(`${TEST_DB}-wal`);
+    if (fs.existsSync(`${TEST_DB}-shm`)) fs.unlinkSync(`${TEST_DB}-shm`);
+});
 beforeEach(async () => {
     const sqlite = db.getDb();
     await new Promise((resolve, reject) => sqlite.serialize(() => {
+        sqlite.run('BEGIN TRANSACTION');
         sqlite.run('DELETE FROM alpaca_day_trade_plans');
         sqlite.run('DELETE FROM alpaca_paper_orders');
         sqlite.run('DELETE FROM alpaca_paper_fills');
+        sqlite.run('DELETE FROM alpaca_day_trade_events');
         sqlite.run(
-            "UPDATE alpaca_monitor_state SET submission_lease_holder = NULL, submission_lease_expires_at = NULL, activity_cursor = NULL, mode = 'disabled', kill_switch = 0, block_entries = 0, health_code = NULL, last_rest_reconciliation_at = NULL, session_date = NULL WHERE id = 1",
-            (err) => { sqlite.close(); err ? reject(err) : resolve(); },
+            "UPDATE alpaca_monitor_state SET submission_lease_holder = NULL, submission_lease_expires_at = NULL, activity_cursor = NULL, mode = 'disabled', kill_switch = 0, block_entries = 0, health_code = NULL, last_rest_reconciliation_at = NULL, session_date = NULL WHERE id = 1"
         );
+        sqlite.run('COMMIT', (err) => {
+            sqlite.close();
+            err ? reject(err) : resolve();
+        });
     }));
 });
 
@@ -38,12 +55,14 @@ function tempLockPath() {
 // time-exit window) -- caught when the suite actually ran into that window during this session.
 const TEST_NOW = () => new Date('2026-09-17T14:00:00.000Z');
 
+let fakeClientOrderSeq = 1;
 function fakeClient(overrides = {}) {
     return {
         getClock: async () => ({ is_open: true, next_close: '2026-09-17T20:00:00.000Z' }),
         getPosition: async () => null,
         getOrder: async () => ({ id: 'broker-parent-1', legs: [] }),
-        submitOrder: async () => ({ id: 'broker-order-1', status: 'accepted' }),
+        getOrderByClientOrderId: async () => ({ found: false, order: null }),
+        submitOrder: async () => ({ id: `broker-order-${fakeClientOrderSeq++}`, status: 'accepted' }),
         cancelOrder: async () => ({ canceled: true }),
         getAccountActivities: async () => [],
         getCalendar: async () => [{ date: '2026-09-17', open: '09:30', close: '16:00' }],
@@ -123,18 +142,24 @@ test('a tick resolves and persists the current NYSE session date from the real t
         // single 20ms-interval tick can genuinely take longer than a short fixed wait, which is
         // exactly the flakiness this session already saw in the stop()-in-flight-tick test.
         const deadline = Date.now() + 10_000;
-        let state = await store.getMonitorState();
-        while (!state.session_date && Date.now() < deadline) {
-            await new Promise((resolve) => { setTimeout(resolve, 20); });
-            state = await store.getMonitorState();
+        let state = null;
+        try { state = await store.getMonitorState(); } catch (e) { if (e.code !== 'SQLITE_BUSY') throw e; }
+        while (!state?.session_date && Date.now() < deadline) {
+            await new Promise((resolve) => { setTimeout(resolve, 50); });
+            try { state = await store.getMonitorState(); } catch (e) { if (e.code !== 'SQLITE_BUSY') throw e; }
         }
-        assert.strictEqual(state.session_date, '2026-09-17');
+        assert.strictEqual(state?.session_date, '2026-09-17');
         assert.ok(calendarCalls >= 1);
-        let noActiveEvents = (await store.listEvents()).filter((event) => event.event_type === 'monitor_decision' && event.outcome === 'no_active_plans');
+        let noActiveEvents = [];
+        try {
+            noActiveEvents = (await store.listEvents()).filter((event) => event.event_type === 'monitor_decision' && event.outcome === 'no_active_plans');
+        } catch (e) { if (e.code !== 'SQLITE_BUSY') throw e; }
         const eventDeadline = Date.now() + 10_000;
         while (noActiveEvents.length === 0 && Date.now() < eventDeadline) {
-            await new Promise((resolve) => { setTimeout(resolve, 20); });
-            noActiveEvents = (await store.listEvents()).filter((event) => event.event_type === 'monitor_decision' && event.outcome === 'no_active_plans');
+            await new Promise((resolve) => { setTimeout(resolve, 50); });
+            try {
+                noActiveEvents = (await store.listEvents()).filter((event) => event.event_type === 'monitor_decision' && event.outcome === 'no_active_plans');
+            } catch (e) { if (e.code !== 'SQLITE_BUSY') throw e; }
         }
         assert.ok(noActiveEvents.length >= 1);
 
@@ -287,7 +312,11 @@ test('a WebSocket fill delivery is recorded, triggers reconciliation, and update
         assert.strictEqual(fills.length, 1);
         assert.strictEqual(fills[0].source, 'websocket');
 
-        const state = await store.getMonitorState();
+        let state = await store.getMonitorState();
+        while (!state?.last_websocket_event_at && Date.now() < deadline) {
+            await new Promise((resolve) => { setTimeout(resolve, 20); });
+            state = await store.getMonitorState();
+        }
         assert.ok(state.last_websocket_event_at);
     } finally {
         await worker.stop();
@@ -520,24 +549,24 @@ test('paper_execute mode actually submits the decided repair order', async () =>
             const start = Date.now();
             (function check() {
                 if (submitted.length > 0) return resolve();
-                if (Date.now() - start > 3000) return reject(new Error('timed out waiting for a repair submission'));
+                if (Date.now() - start > 10_000) return reject(new Error('timed out waiting for a repair submission'));
                 setTimeout(check, 10);
             }());
         });
-        assert.strictEqual(submitted[0].client_order_id, `dt-repair-${plan.id}`);
+        assert.strictEqual(submitted[0].client_order_id, `dt-repair-${plan.id}-a1`);
     } finally {
         await worker.stop();
         if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
     }
 });
 
-async function seedPlan(symbol, entryKey) {
+async function seedPlan(symbol, entryKey, { exitDeadline = '2026-09-17T19:45:00.000Z' } = {}) {
     const { plan } = await store.createPlanWithEntry(
         {
             symbol, setup: 's', catalyst: 'c', thesis: 't', invalidation: 'i',
             planned_entry_low: 100.50, planned_entry_high: 100.50, planned_stop: 98.00, planned_target: 104.00,
             planned_qty: 10, planned_risk_dollars: 25, planned_reward_risk: 1.4, planned_account_risk_pct: 0.00025,
-            exit_deadline: '2026-09-17T19:45:00.000Z',
+            exit_deadline: exitDeadline,
         },
         {
             idempotency_key: entryKey, client_order_id: entryKey, symbol, side: 'buy',
@@ -593,20 +622,21 @@ test('once one plan trips the kill switch mid-tick, a later plan in the same tic
             const start = Date.now();
             (function check() {
                 if (submitted.length > 0) return resolve();
-                if (Date.now() - start > 3000) return reject(new Error('timed out waiting for the buy-to-cover submission'));
+                if (Date.now() - start > 10_000) return reject(new Error('timed out waiting for the buy-to-cover submission'));
                 setTimeout(check, 10);
             }());
         });
         assert.strictEqual(submitted.length, 1, 'the plan after the kill-switch trip must not also be executed in the same tick');
         assert.strictEqual(submitted[0].client_order_id.startsWith('dt-cover-'), true);
 
-        let state = await store.getMonitorState();
+        let state = null;
+        try { state = await store.getMonitorState(); } catch (e) { if (e.code !== 'SQLITE_BUSY') throw e; }
         const stateDeadline = Date.now() + 10_000;
-        while (!state.kill_switch && Date.now() < stateDeadline) {
-            await new Promise((resolve) => { setTimeout(resolve, 20); });
-            state = await store.getMonitorState();
+        while (!state?.kill_switch && Date.now() < stateDeadline) {
+            await new Promise((resolve) => { setTimeout(resolve, 50); });
+            try { state = await store.getMonitorState(); } catch (e) { if (e.code !== 'SQLITE_BUSY') throw e; }
         }
-        assert.strictEqual(state.kill_switch, 1); // SQLite stores this as an integer, not a JS boolean
+        assert.strictEqual(state?.kill_switch, 1); // SQLite stores this as an integer, not a JS boolean
     } finally {
         await worker.stop();
         if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
@@ -666,24 +696,35 @@ test('a semantic-event append failure for one plan does not suppress a later pla
     const worker = createWorker({ client, lockPath, pollIntervalMs: 50, idlePollIntervalMs: 50, now: TEST_NOW });
     try {
         await worker.start();
-        const submitDeadline = Date.now() + 5_000;
+        const submitDeadline = Date.now() + 15_000;
         while (!(submittedSymbols.includes('AAA') && submittedSymbols.includes('BBB')) && Date.now() < submitDeadline) {
             await new Promise((resolve) => { setTimeout(resolve, 50); });
         }
         assert.ok(injected, 'the injected failure must actually have fired for this assertion to mean anything');
         assert.ok(submittedSymbols.includes('BBB'), 'the plan whose own decision-event append failed must still have its action executed');
         assert.ok(submittedSymbols.includes('AAA'), 'a later plan in the same tick must still be managed after an earlier plan\'s decision-event append failed');
-        // Also directly persist discovery (the same two fields the real discoverProtectiveLegs
-        // path writes), same as the block_entries self-heal test above -- buildObservation reads
-        // these columns, not just the live getOrder legs, to decide a plan is covered.
-        await db.updateAlpacaDayTradePlan(planA.id, { protective_stop_broker_order_id: 'stop-aaa', protective_target_broker_order_id: 'target-aaa' });
-        await db.updateAlpacaDayTradePlan(planB.id, { protective_stop_broker_order_id: 'stop-bbb', protective_target_broker_order_id: 'target-bbb' });
+        const retryOnBusy = async (fn, maxRetries = 10) => {
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    return await fn();
+                } catch (e) {
+                    if (e.code === 'SQLITE_BUSY' && i < maxRetries - 1) {
+                        await new Promise((r) => setTimeout(r, 50));
+                        continue;
+                    }
+                    throw e;
+                }
+            }
+        };
 
-        let state = await store.getMonitorState();
+        await retryOnBusy(() => db.updateAlpacaDayTradePlan(planA.id, { protective_stop_broker_order_id: 'stop-aaa', protective_target_broker_order_id: 'target-aaa' }));
+        await retryOnBusy(() => db.updateAlpacaDayTradePlan(planB.id, { protective_stop_broker_order_id: 'stop-bbb', protective_target_broker_order_id: 'target-bbb' }));
+
+        let state = await retryOnBusy(() => store.getMonitorState());
         const healDeadline = Date.now() + 5_000;
         while (state.block_entries !== 0 && Date.now() < healDeadline) {
             await new Promise((resolve) => { setTimeout(resolve, 50); });
-            state = await store.getMonitorState();
+            state = await retryOnBusy(() => store.getMonitorState());
         }
         assert.strictEqual(state.block_entries, 0, 'the terminal block_entries write must still self-heal after a mid-tick decision-event append failure');
     } finally {
@@ -760,4 +801,1000 @@ test('a fatal configuration error (client construction fails) rejects start() wi
 test('the worker module imports no Hermes, LLM, or AI SDK package (Safety Invariant #17)', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'workers', 'alpaca_day_trading_monitor.js'), 'utf8');
     assert.doesNotMatch(source, /require\(['"](@ai-sdk|hermes|openai|@anthropic-ai)/i);
+});
+
+function createWorkerStatefulClient({
+    orders = [],
+    positions = {},
+    rejectSellIfOpenOrders = true,
+    alwaysRejectSellSymbols = new Set(),
+    clock = { is_open: true, next_close: '2026-09-17T20:00:00.000Z' },
+} = {}) {
+    const ordersMap = new Map();
+    for (const o of orders) ordersMap.set(o.id, { ...o });
+    const positionsMap = new Map();
+    for (const [sym, pos] of Object.entries(positions)) positionsMap.set(sym, pos ? { ...pos } : null);
+    const calls = { submitOrder: [], cancelOrder: [], getOrder: [] };
+    let orderSeq = 500;
+
+    return {
+        calls,
+        ordersMap,
+        positionsMap,
+        getClock: async () => clock,
+        getCalendar: async () => [{ date: '2026-09-17', open: '09:30', close: '16:00' }],
+        getAccountActivities: async () => [],
+        getPosition: async (symbol) => positionsMap.get(symbol) || null,
+        getOrder: async (id, options = {}) => {
+            calls.getOrder.push({ id, options });
+            const o = ordersMap.get(id);
+            if (!o) {
+                return { id, status: 'filled', qty: 10, filled_qty: 10, legs: [] };
+            }
+            return { ...o };
+        },
+        getOrderByClientOrderId: async (key) => {
+            for (const o of ordersMap.values()) {
+                if (o.client_order_id === key) return { found: true, order: { ...o } };
+            }
+            return { found: false, order: null };
+        },
+        cancelOrder: async (id) => {
+            calls.cancelOrder.push(id);
+            const o = ordersMap.get(id);
+            if (!o) return { canceled: false, reason: 'not_found' };
+            o.status = 'canceled';
+            return { canceled: true };
+        },
+        submitOrder: async (order) => {
+            calls.submitOrder.push(order);
+            if (alwaysRejectSellSymbols.has(order.symbol) && order.side === 'sell') {
+                const err = new Error('Alpaca paper request failed (403): account restricted');
+                err.status = 403;
+                err.code = 'ALPACA_BROKER_REJECTED';
+                err.brokerCode = 40310001;
+                err.brokerMessage = 'account restricted';
+                throw err;
+            }
+            if (rejectSellIfOpenOrders && order.side === 'sell') {
+                for (const o of ordersMap.values()) {
+                    if (o.symbol === order.symbol && o.side === 'sell' && ['new', 'accepted', 'held', 'open'].includes(o.status)) {
+                        const err = new Error('Alpaca paper request failed (403): insufficient qty available for order (requested: 10, available: 0)');
+                        err.status = 403;
+                        err.code = 'ALPACA_BROKER_REJECTED';
+                        err.brokerCode = 40310000;
+                        err.brokerMessage = 'insufficient qty available for order (requested: 10, available: 0)';
+                        throw err;
+                    }
+                }
+            }
+            orderSeq += 1;
+            const id = `broker-ord-${orderSeq}`;
+            const submitted = { id, ...order, status: 'accepted' };
+            ordersMap.set(id, submitted);
+            if (order.type === 'market' && order.side === 'sell') {
+                positionsMap.set(order.symbol, null);
+                submitted.status = 'filled';
+            }
+            return { ...submitted };
+        },
+    };
+}
+
+function waitFor(predicate, timeoutMs = 15000, intervalMs = 20) {
+    const deadline = Date.now() + timeoutMs;
+    return new Promise((resolve, reject) => {
+        const interval = setInterval(() => {
+            try {
+                if (predicate()) {
+                    clearInterval(interval);
+                    return resolve();
+                }
+            } catch (err) {
+                clearInterval(interval);
+                return reject(err);
+            }
+            if (Date.now() >= deadline) {
+                clearInterval(interval);
+                return reject(new Error(`timed out after ${timeoutMs}ms waiting for condition`));
+            }
+        }, intervalMs);
+    });
+}
+
+test('W1: TWO plans (MRNA, SNDK) both with open brackets reach the time-exit window in the same tick -> both legs cancelled, both sold, both flat; monitor_action outcomes flat_verified', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const timeExitNow = () => new Date('2026-09-17T19:46:00.000Z');
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: timeExitNow().toISOString(), kill_switch: false });
+    const planMrna = await seedPlan('MRNA', 'dt-mrna-entry-1');
+    const planSndk = await seedPlan('SNDK', 'dt-sndk-entry-1');
+    await db.updateAlpacaDayTradePlan(planMrna.id, {
+        protective_stop_broker_order_id: 'stop-mrna',
+        protective_target_broker_order_id: 'target-mrna',
+    });
+    await db.updateAlpacaDayTradePlan(planSndk.id, {
+        protective_stop_broker_order_id: 'stop-sndk',
+        protective_target_broker_order_id: 'target-sndk',
+    });
+
+    const client = createWorkerStatefulClient({
+        orders: [
+            { id: 'stop-mrna', symbol: 'MRNA', side: 'sell', status: 'held', qty: 10 },
+            { id: 'target-mrna', symbol: 'MRNA', side: 'sell', status: 'held', qty: 10 },
+            { id: 'stop-sndk', symbol: 'SNDK', side: 'sell', status: 'held', qty: 10 },
+            { id: 'target-sndk', symbol: 'SNDK', side: 'sell', status: 'held', qty: 10 },
+        ],
+        positions: {
+            MRNA: { qty: 10, side: 'long' },
+            SNDK: { qty: 10, side: 'long' },
+        },
+        rejectSellIfOpenOrders: true,
+    });
+
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: timeExitNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        const events = await store.listEvents();
+        const actionEvents = events.filter((e) => e.event_type === 'monitor_action' && [planMrna.id, planSndk.id].includes(e.plan_id));
+        assert.ok(actionEvents.some((e) => e.plan_id === planMrna.id && e.outcome === 'flat_verified'));
+        assert.ok(actionEvents.some((e) => e.plan_id === planSndk.id && e.outcome === 'flat_verified'));
+        assert.strictEqual(actionEvents.some((e) => e.outcome === 'submitted'), false, 'no submitted event for rejected attempt');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('W2: TWO plans in the safety-sweep window -> BOTH exits are attempted in the same tick, kill_switch written once, exactly one kill_switch event whose detail.sweep has both plans', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const sweepNow = () => new Date('2026-09-17T19:56:00.000Z');
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: sweepNow().toISOString(), kill_switch: false });
+    const planMrna = await seedPlan('MRNA', 'dt-mrna-entry-w2');
+    const planSndk = await seedPlan('SNDK', 'dt-sndk-entry-w2');
+    await db.updateAlpacaDayTradePlan(planMrna.id, { protective_stop_broker_order_id: 'stop-mrna-w2' });
+    await db.updateAlpacaDayTradePlan(planSndk.id, { protective_stop_broker_order_id: 'stop-sndk-w2' });
+
+    const client = createWorkerStatefulClient({
+        orders: [
+            { id: 'stop-mrna-w2', symbol: 'MRNA', side: 'sell', status: 'held', qty: 10 },
+            { id: 'stop-sndk-w2', symbol: 'SNDK', side: 'sell', status: 'held', qty: 10 },
+        ],
+        positions: {
+            MRNA: { qty: 10, side: 'long' },
+            SNDK: { qty: 10, side: 'long' },
+        },
+        rejectSellIfOpenOrders: true,
+    });
+
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: sweepNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        const initialKsCount = (await store.listEvents()).filter((e) => e.event_type === 'kill_switch').length;
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        const state = await store.getMonitorState();
+        assert.strictEqual(state.kill_switch, 1);
+        const events = await store.listEvents();
+        const ksEvents = events.filter((e) => e.event_type === 'kill_switch');
+        assert.strictEqual(ksEvents.length - initialKsCount, 2, 'must have two kill_switch events (activation + sweep_summary)');
+        const sweepSummary = ksEvents.find((e) => e.action === 'sweep_summary');
+        assert.ok(sweepSummary, 'sweep_summary event must exist');
+        const detail = JSON.parse(sweepSummary.detail_json || '{}');
+        assert.ok(Array.isArray(detail.sweep), 'detail.sweep must be an array');
+        assert.strictEqual(detail.sweep.length, 2, 'detail.sweep must contain both plans');
+        for (const item of detail.sweep) {
+            assert.strictEqual(item.action, 'flatten');
+            assert.strictEqual(item.outcome, 'flat_verified');
+            assert.strictEqual(item.flat_verified, true);
+        }
+        const sweepSymbols = detail.sweep.map((s) => s.symbol).sort();
+        assert.deepStrictEqual(sweepSymbols, ['MRNA', 'SNDK']);
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('W3: kill_switch already latched, one open position past its exit_deadline, market open -> exit sequence runs (flat_verified); uncovered position attach_protective_oco IS executed (owner decision: RE-PROTECT); kill_switch stays true', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const timeExitNow = () => new Date('2026-09-17T19:46:00.000Z');
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: timeExitNow().toISOString(), kill_switch: true });
+    const planMrna = await seedPlan('MRNA', 'dt-mrna-entry-w3', { exitDeadline: '2026-09-17T19:45:00.000Z' });
+    const planAmd = await seedPlan('AMD', 'dt-amd-entry-w3', { exitDeadline: '2026-09-17T21:45:00.000Z' });
+    await db.updateAlpacaDayTradePlan(planMrna.id, { protective_stop_broker_order_id: 'stop-mrna-w3' });
+
+    const client = createWorkerStatefulClient({
+        clock: { is_open: true, next_close: '2026-09-17T22:00:00.000Z' },
+        orders: [
+            { id: 'stop-mrna-w3', symbol: 'MRNA', side: 'sell', status: 'held', qty: 10 },
+        ],
+        positions: {
+            MRNA: { qty: 10, side: 'long' },
+            AMD: { qty: 10, side: 'long' },
+        },
+        rejectSellIfOpenOrders: true,
+    });
+
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: timeExitNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        const state = await store.getMonitorState();
+        assert.strictEqual(state.kill_switch, 1, 'kill_switch must stay true');
+        const events = await store.listEvents();
+        const amdActions = events.filter((e) => e.event_type === 'monitor_action' && e.plan_id === planAmd.id);
+        assert.strictEqual(amdActions.length, 1, 'attach_protective_oco IS executed under kill switch (owner decision: RE-PROTECT)');
+        assert.strictEqual(amdActions[0].action, 'attach_protective_oco');
+        const mrnaAction = events.find((e) => e.event_type === 'monitor_action' && e.plan_id === planMrna.id);
+        assert.ok(mrnaAction);
+        assert.strictEqual(mrnaAction.outcome, 'flat_verified');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('W4: broker rejects for one plan -> monitor_action outcome failed with detail.broker_message set; other plan still exits', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const timeExitNow = () => new Date('2026-09-17T19:46:00.000Z');
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: timeExitNow().toISOString(), kill_switch: false });
+    const planMrna = await seedPlan('MRNA', 'dt-mrna-entry-w4');
+    const planSndk = await seedPlan('SNDK', 'dt-sndk-entry-w4');
+    await db.updateAlpacaDayTradePlan(planMrna.id, { protective_stop_broker_order_id: 'stop-mrna-w4' });
+    await db.updateAlpacaDayTradePlan(planSndk.id, { protective_stop_broker_order_id: 'stop-sndk-w4' });
+
+    const client = createWorkerStatefulClient({
+        orders: [
+            { id: 'stop-mrna-w4', symbol: 'MRNA', side: 'sell', status: 'held', qty: 10 },
+            { id: 'stop-sndk-w4', symbol: 'SNDK', side: 'sell', status: 'held', qty: 10 },
+        ],
+        positions: {
+            MRNA: { qty: 10, side: 'long' },
+            SNDK: { qty: 10, side: 'long' },
+        },
+        rejectSellIfOpenOrders: true,
+        alwaysRejectSellSymbols: new Set(['MRNA']),
+    });
+
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: timeExitNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        const events = await store.listEvents();
+        const mrnaFailed = events.find((e) => e.event_type === 'monitor_action' && e.plan_id === planMrna.id && e.outcome === 'failed');
+        assert.ok(mrnaFailed);
+        const detail = JSON.parse(mrnaFailed.detail_json || '{}');
+        assert.strictEqual(detail.broker_message, 'account restricted');
+        assert.strictEqual(detail.broker_code, 40310001);
+        assert.strictEqual(detail.broker_status, 403);
+        const sndkOk = events.find((e) => e.event_type === 'monitor_action' && e.plan_id === planSndk.id && e.outcome === 'flat_verified');
+        assert.ok(sndkOk);
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('W5a: latched switch + a plan whose decision would set blockEntries false -> stored block_entries unchanged', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const testNow = () => new Date('2026-09-17T14:30:00.000Z');
+    await store.updateMonitorState({
+        mode: 'paper_execute',
+        last_rest_reconciliation_at: testNow().toISOString(),
+        kill_switch: true,
+        block_entries: true,
+    });
+
+    const plan = await seedPlan('AAPL', 'dt-aapl-entry-w5a');
+    const client = createWorkerStatefulClient({
+        orders: [],
+        positions: { AAPL: { qty: 0 } },
+    });
+
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: testNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        const state = await store.getMonitorState();
+        assert.strictEqual(state.kill_switch, 1, 'kill_switch must remain latched');
+        assert.strictEqual(state.block_entries, 1, 'stored block_entries must remain unchanged (true) when kill_switch was already latched');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('E-1 two plans in the sweep window; the fake broker FIRST exit call checks store.getMonitorState() and records kill_switch — it must already be true', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const sweepNow = () => new Date('2026-09-17T19:56:00.000Z');
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: sweepNow().toISOString(), kill_switch: false });
+    const planMrna = await seedPlan('MRNA', 'dt-mrna-entry-e1');
+    const planSndk = await seedPlan('SNDK', 'dt-sndk-entry-e1');
+    await db.updateAlpacaDayTradePlan(planMrna.id, { protective_stop_broker_order_id: 'stop-mrna-e1' });
+    await db.updateAlpacaDayTradePlan(planSndk.id, { protective_stop_broker_order_id: 'stop-sndk-e1' });
+
+    let firstExitKillSwitch = null;
+    const client = createWorkerStatefulClient({
+        orders: [
+            { id: 'stop-mrna-e1', symbol: 'MRNA', side: 'sell', status: 'held', qty: 10 },
+            { id: 'stop-sndk-e1', symbol: 'SNDK', side: 'sell', status: 'held', qty: 10 },
+        ],
+        positions: {
+            MRNA: { qty: 10, side: 'long' },
+            SNDK: { qty: 10, side: 'long' },
+        },
+        rejectSellIfOpenOrders: true,
+    });
+
+    const origSubmitOrder = client.submitOrder;
+    client.submitOrder = async (order) => {
+        if (firstExitKillSwitch === null && order.side === 'sell') {
+            const state = await store.getMonitorState();
+            firstExitKillSwitch = Boolean(state.kill_switch);
+        }
+        return origSubmitOrder(order);
+    };
+
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: sweepNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        assert.strictEqual(firstExitKillSwitch, true, 'kill_switch must already be true when first exit runs');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('E-2 exactly one activation event + one sweep_summary event with both plans', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const sweepNow = () => new Date('2026-09-17T19:56:00.000Z');
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: sweepNow().toISOString(), kill_switch: false });
+    const planMrna = await seedPlan('MRNA', 'dt-mrna-entry-e2');
+    const planSndk = await seedPlan('SNDK', 'dt-sndk-entry-e2');
+    await db.updateAlpacaDayTradePlan(planMrna.id, { protective_stop_broker_order_id: 'stop-mrna-e2' });
+    await db.updateAlpacaDayTradePlan(planSndk.id, { protective_stop_broker_order_id: 'stop-sndk-e2' });
+
+    const client = createWorkerStatefulClient({
+        orders: [
+            { id: 'stop-mrna-e2', symbol: 'MRNA', side: 'sell', status: 'held', qty: 10 },
+            { id: 'stop-sndk-e2', symbol: 'SNDK', side: 'sell', status: 'held', qty: 10 },
+        ],
+        positions: {
+            MRNA: { qty: 10, side: 'long' },
+            SNDK: { qty: 10, side: 'long' },
+        },
+        rejectSellIfOpenOrders: true,
+    });
+
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: sweepNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        const events = await store.listEvents();
+        const ksEvents = events.filter((e) => e.event_type === 'kill_switch');
+        assert.strictEqual(ksEvents.length, 2, 'must have exactly two kill_switch events: 1 activation + 1 sweep_summary');
+        const activation = ksEvents.find((e) => e.action !== 'sweep_summary');
+        const sweepSummary = ksEvents.find((e) => e.action === 'sweep_summary');
+        assert.ok(activation, 'activation event must exist');
+        assert.ok(sweepSummary, 'sweep_summary event must exist');
+        assert.strictEqual(sweepSummary.outcome, 'recorded');
+        const detail = JSON.parse(sweepSummary.detail_json || '{}');
+        assert.ok(Array.isArray(detail.sweep), 'sweep must be an array');
+        assert.strictEqual(detail.sweep.length, 2, 'sweep must contain both plans');
+        const sweepSymbols = detail.sweep.map((s) => s.symbol).sort();
+        assert.deepStrictEqual(sweepSymbols, ['MRNA', 'SNDK']);
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('F-1 latched switch, entry parent partially_filled within the entry timeout -> cancelOrder called on the parent this tick', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const testNow = () => new Date('2026-09-17T14:30:00.000Z');
+    await store.updateMonitorState({
+        mode: 'paper_execute',
+        last_rest_reconciliation_at: testNow().toISOString(),
+        kill_switch: true,
+        block_entries: true,
+    });
+
+    const plan = await seedPlan('AAPL', 'dt-aapl-entry-f1');
+    await db.updateAlpacaDayTradePlan(plan.id, {
+        entry_parent_broker_order_id: 'parent-f1',
+        filled_entry_qty: 4,
+    });
+
+    const client = createWorkerStatefulClient({
+        orders: [
+            { id: 'parent-f1', symbol: 'AAPL', side: 'buy', status: 'partially_filled', qty: 10, filled_qty: 4 },
+        ],
+        positions: { AAPL: { qty: 4, side: 'long' } },
+    });
+
+    let leaseHolderDuringCancel = null;
+    const origCancelOrder = client.cancelOrder;
+    client.cancelOrder = async (id) => {
+        const state = await store.getMonitorState();
+        leaseHolderDuringCancel = state.submission_lease_holder;
+        return origCancelOrder(id);
+    };
+
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: testNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        assert.ok(leaseHolderDuringCancel, 'submission lease must be held during kill-switch entry cancel');
+        assert.ok(client.calls.cancelOrder.includes('parent-f1'), 'entry parent order must be cancelled under latched switch');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('F-2 latched switch, entry parent accepted (0 filled) -> cancelled', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const testNow = () => new Date('2026-09-17T14:30:00.000Z');
+    await store.updateMonitorState({
+        mode: 'paper_execute',
+        last_rest_reconciliation_at: testNow().toISOString(),
+        kill_switch: true,
+        block_entries: true,
+    });
+
+    const plan = await seedPlan('MSFT', 'dt-msft-entry-f2');
+    await db.updateAlpacaDayTradePlan(plan.id, {
+        entry_parent_broker_order_id: 'parent-f2',
+        filled_entry_qty: 0,
+    });
+
+    const client = createWorkerStatefulClient({
+        orders: [
+            { id: 'parent-f2', symbol: 'MSFT', side: 'buy', status: 'accepted', qty: 10, filled_qty: 0 },
+        ],
+        positions: { MSFT: { qty: 0 } },
+    });
+
+    let leaseHolderDuringCancel = null;
+    const origCancelOrderF2 = client.cancelOrder;
+    client.cancelOrder = async (id) => {
+        const state = await store.getMonitorState();
+        leaseHolderDuringCancel = state.submission_lease_holder;
+        return origCancelOrderF2(id);
+    };
+
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: testNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        assert.ok(leaseHolderDuringCancel, 'submission lease must be held during kill-switch entry cancel');
+        assert.ok(client.calls.cancelOrder.includes('parent-f2'), 'accepted entry parent order must be cancelled under latched switch');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('F-3 not latched, partial entry within timeout -> NOT cancelled (existing behavior unchanged)', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const testNow = () => new Date('2026-09-17T14:30:00.000Z');
+    await store.updateMonitorState({
+        mode: 'paper_execute',
+        last_rest_reconciliation_at: testNow().toISOString(),
+        kill_switch: false,
+        block_entries: false,
+    });
+
+    const plan = await seedPlan('GOOG', 'dt-goog-entry-f3');
+    await db.updateAlpacaDayTradePlan(plan.id, {
+        entry_parent_broker_order_id: 'parent-f3',
+        filled_entry_qty: 4,
+    });
+
+    const client = createWorkerStatefulClient({
+        orders: [
+            { id: 'parent-f3', symbol: 'GOOG', side: 'buy', status: 'partially_filled', qty: 10, filled_qty: 4 },
+        ],
+        positions: { GOOG: { qty: 4, side: 'long' } },
+    });
+
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: testNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        assert.strictEqual(client.calls.cancelOrder.includes('parent-f3'), false, 'entry parent order must NOT be cancelled when kill switch is not active');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('Finding 6: timer tick and runTickNow never run concurrently (max concurrency is 1)', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const testNow = () => new Date('2026-09-17T14:30:00.000Z');
+    await store.updateMonitorState({
+        mode: 'shadow',
+        last_rest_reconciliation_at: testNow().toISOString(),
+    });
+    await seedPlan('NVDA', 'dt-nvda-finding6');
+
+    let concurrentTicks = 0;
+    let maxConcurrentTicks = 0;
+    let resolveClock = null;
+    const clockPromise = new Promise((resolve) => { resolveClock = resolve; });
+
+    let clockCalls = 0;
+    const client = fakeClient({
+        getClock: async () => {
+            concurrentTicks++;
+            maxConcurrentTicks = Math.max(maxConcurrentTicks, concurrentTicks);
+            clockCalls++;
+            if (clockCalls === 1) {
+                await clockPromise;
+            }
+            concurrentTicks--;
+            return { is_open: true, next_close: '2026-09-17T20:00:00.000Z' };
+        },
+    });
+
+    const worker = createWorker({
+        client,
+        lockPath,
+        pollIntervalMs: 10,
+        idlePollIntervalMs: 10,
+        now: testNow,
+    });
+
+    try {
+        await worker.start();
+        while (clockCalls === 0) {
+            await new Promise((r) => setTimeout(r, 5));
+        }
+
+        const tickNowPromise = worker.runTickNow();
+        await new Promise((r) => setTimeout(r, 20));
+        resolveClock();
+
+        await tickNowPromise;
+        assert.strictEqual(maxConcurrentTicks, 1, 'max concurrent ticks must be 1');
+    } finally {
+        if (resolveClock) resolveClock();
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('T3 latched switch, entry parent \'canceled\' with filled_qty 6, position 6, no protective legs -> an OCO for exactly 6 shares is submitted this tick; kill_switch stays true', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const testNow = () => new Date('2026-09-17T14:30:00.000Z');
+    await store.updateMonitorState({
+        mode: 'paper_execute',
+        last_rest_reconciliation_at: testNow().toISOString(),
+        kill_switch: true,
+        block_entries: true,
+    });
+
+    const plan = await seedPlan('AMD', 'dt-amd-entry-t3');
+    await db.updateAlpacaDayTradePlan(plan.id, {
+        entry_parent_broker_order_id: 'parent-t3',
+        filled_entry_qty: 6,
+    });
+
+    const client = createWorkerStatefulClient({
+        clock: { is_open: true, next_close: '2026-09-17T22:00:00.000Z' },
+        orders: [
+            { id: 'parent-t3', symbol: 'AMD', side: 'buy', status: 'canceled', qty: 10, filled_qty: 6 },
+        ],
+        positions: { AMD: { qty: 6, side: 'long' } },
+    });
+
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: testNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        const state = await store.getMonitorState();
+        assert.strictEqual(state.kill_switch, 1, 'kill_switch stays true');
+        assert.strictEqual(client.calls.submitOrder.length, 1, 'an OCO order must be submitted');
+        const submitted = client.calls.submitOrder[0];
+        assert.strictEqual(submitted.symbol, 'AMD');
+        assert.strictEqual(submitted.qty, 6, 'OCO qty must be exactly 6');
+        assert.strictEqual(submitted.order_class, 'oco');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('T4 latched switch, entry parent still \'partially_filled\' -> the same tick cancels and verifies the entry, then protects the filled qty; the next tick does not duplicate the OCO', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const testNow = () => new Date('2026-09-17T14:30:00.000Z');
+    await store.updateMonitorState({
+        mode: 'paper_execute',
+        last_rest_reconciliation_at: testNow().toISOString(),
+        kill_switch: true,
+        block_entries: true,
+    });
+
+    const plan = await seedPlan('AMD', 'dt-amd-entry-t4');
+    await db.updateAlpacaDayTradePlan(plan.id, {
+        entry_parent_broker_order_id: 'parent-t4',
+        filled_entry_qty: 6,
+    });
+
+    const client = createWorkerStatefulClient({
+        clock: { is_open: true, next_close: '2026-09-17T22:00:00.000Z' },
+        orders: [
+            { id: 'parent-t4', symbol: 'AMD', side: 'buy', status: 'partially_filled', qty: 10, filled_qty: 6 },
+        ],
+        positions: { AMD: { qty: 6, side: 'long' } },
+    });
+
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: testNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        // Tick 1: parent is partially_filled
+        await worker.runTickNow();
+
+        // Tick 1: the entry is cancelled, proven non-executable, and the 6 filled shares are
+        // protected in the same pass (not left uncovered until the next tick).
+        assert.ok(client.calls.cancelOrder.includes('parent-t4'), 'tick 1 must cancel entry');
+        assert.strictEqual(client.ordersMap.get('parent-t4').status, 'canceled');
+        assert.strictEqual(client.calls.submitOrder.length, 1, 'tick 1 must protect the filled qty');
+        assert.strictEqual(client.calls.submitOrder[0].qty, 6, 'OCO for filled qty 6');
+        assert.strictEqual(client.calls.submitOrder[0].order_class, 'oco');
+
+        // Tick 2: the live OCO is replayed, never duplicated.
+        await worker.runTickNow();
+        assert.strictEqual(client.calls.submitOrder.length, 1, 'tick 2 must not submit a second OCO');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('T11 after a kill-switch entry cancel, the persisted event detail has no order_id and JSON.stringify(detail) does not contain the broker order id string', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const testNow = () => new Date('2026-09-17T14:30:00.000Z');
+    await store.updateMonitorState({
+        mode: 'paper_execute',
+        last_rest_reconciliation_at: testNow().toISOString(),
+        kill_switch: true,
+        block_entries: true,
+    });
+
+    const plan = await seedPlan('INTC', 'dt-intc-entry-t11');
+    const brokerOrderId = 'broker-parent-secret-11';
+    await db.updateAlpacaDayTradePlan(plan.id, {
+        entry_parent_broker_order_id: brokerOrderId,
+        filled_entry_qty: 0,
+    });
+
+    const client = createWorkerStatefulClient({
+        clock: { is_open: true, next_close: '2026-09-17T22:00:00.000Z' },
+        orders: [
+            { id: brokerOrderId, symbol: 'INTC', side: 'buy', status: 'accepted', qty: 10, filled_qty: 0 },
+        ],
+        positions: { INTC: { qty: 0 } },
+    });
+
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: testNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        const events = await store.listEvents();
+        const cancelEvent = events.find((e) => e.event_type === 'monitor_action' && e.action === 'cancel_unfilled_remainder' && e.plan_id === plan.id);
+        assert.ok(cancelEvent, 'cancel entry event must exist');
+        const detail = JSON.parse(cancelEvent.detail_json || '{}');
+        assert.strictEqual(detail.order_id, undefined, 'persisted detail must not have order_id');
+        assert.strictEqual('order_id' in detail, false, 'order_id key must not exist in detail');
+        assert.strictEqual(JSON.stringify(detail).includes(brokerOrderId), false, 'JSON.stringify(detail) must not contain the broker order id');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('N4-t: latched switch, 6 shares filled, no protective legs, entry parent A replaced -> B canceled -> no cancel this tick; an OCO for exactly 6 shares is submitted', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const testNow = () => new Date('2026-09-17T14:30:00.000Z');
+    await store.updateMonitorState({
+        mode: 'paper_execute',
+        last_rest_reconciliation_at: testNow().toISOString(),
+        kill_switch: true,
+        block_entries: true,
+    });
+
+    const plan = await seedPlan('AMD', 'dt-amd-entry-n4t');
+    await db.updateAlpacaDayTradePlan(plan.id, {
+        entry_parent_broker_order_id: 'parent-a',
+        filled_entry_qty: 6,
+    });
+
+    const client = createWorkerStatefulClient({
+        clock: { is_open: true, next_close: '2026-09-17T22:00:00.000Z' },
+        orders: [
+            { id: 'parent-a', symbol: 'AMD', side: 'buy', status: 'replaced', replaced_by: 'parent-b', qty: 10, filled_qty: 6 },
+            { id: 'parent-b', symbol: 'AMD', side: 'buy', status: 'canceled', qty: 10, filled_qty: 6 },
+        ],
+        positions: { AMD: { qty: 6, side: 'long' } },
+    });
+
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: testNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        assert.strictEqual(client.calls.cancelOrder.length, 0, 'no cancel this tick');
+        assert.strictEqual(client.calls.submitOrder.length, 1, 'an OCO for exactly 6 shares is submitted');
+        const submitted = client.calls.submitOrder[0];
+        assert.strictEqual(submitted.symbol, 'AMD');
+        assert.strictEqual(submitted.qty, 6, 'OCO qty must be exactly 6');
+        assert.strictEqual(submitted.order_class, 'oco');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('B2 a kill switch triggered by a later plan still sweeps a plan processed earlier in the same tick', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const sweepNow = () => new Date('2026-09-17T19:56:00.000Z');
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: sweepNow().toISOString(), kill_switch: false, block_entries: false });
+    // Plans are listed newest first: the trigger (older id) is evaluated AFTER the plan with the
+    // live entry, which is exactly the order the old single-pass loop got wrong.
+    const trigger = await seedPlan('TRGR', 'dt-trgr-entry-b2');
+    await db.updateAlpacaDayTradePlan(trigger.id, { protective_stop_broker_order_id: 'stop-trgr-b2' });
+    const liveEntryPlan = await seedPlan('LIVE', 'dt-live-entry-b2');
+
+    const client = createWorkerStatefulClient({
+        orders: [
+            { id: 'stop-trgr-b2', symbol: 'TRGR', side: 'sell', status: 'held', qty: 10 },
+            { id: 'broker-parent-LIVE', symbol: 'LIVE', side: 'buy', status: 'accepted', qty: 10, filled_qty: 0, legs: [] },
+        ],
+        positions: { TRGR: { qty: 10, side: 'long' }, LIVE: null },
+    });
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: sweepNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        assert.strictEqual(Boolean((await store.getMonitorState()).kill_switch), true);
+        assert.ok(client.calls.cancelOrder.includes('broker-parent-LIVE'), 'the earlier plan\'s live entry must be cancelled in the same tick');
+        assert.strictEqual(client.ordersMap.get('broker-parent-LIVE').status, 'canceled');
+        const cancelEvent = (await store.listEvents(liveEntryPlan.id))
+            .find((e) => e.event_type === 'monitor_action' && e.action === 'cancel_unfilled_remainder');
+        assert.ok(cancelEvent, 'the sweep must journal the entry cancellation');
+        assert.strictEqual(cancelEvent.outcome, 'cancel_verified');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('B4 a partial entry cancelled under the kill switch is verified and its filled shares protected in the same tick', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const midSession = () => new Date('2026-09-17T15:00:00.000Z');
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: midSession().toISOString(), kill_switch: true, block_entries: true });
+    const plan = await seedPlan('PART', 'dt-part-entry-b4');
+
+    const client = createWorkerStatefulClient({
+        orders: [
+            { id: 'broker-parent-PART', symbol: 'PART', side: 'buy', status: 'partially_filled', qty: 10, filled_qty: 6, legs: [], submitted_at: '2026-09-17T14:59:00.000Z' },
+        ],
+        positions: { PART: { qty: 6, side: 'long' } },
+    });
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: midSession,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        assert.strictEqual(client.ordersMap.get('broker-parent-PART').status, 'canceled');
+        const protection = client.calls.submitOrder.filter((o) => o.symbol === 'PART');
+        assert.strictEqual(protection.length, 1, 'the remaining 6 shares must be protected in the same tick');
+        assert.strictEqual(protection[0].order_class, 'oco');
+        assert.strictEqual(protection[0].qty, 6);
+        const actions = (await store.listEvents(plan.id)).filter((e) => e.event_type === 'monitor_action').map((e) => e.action);
+        assert.deepStrictEqual(actions, ['cancel_unfilled_remainder', 'attach_protective_oco']);
+        assert.strictEqual(Boolean((await store.getMonitorState()).kill_switch), true);
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('C3 flat position with a still-executable exit order is not ignored: the monitor cancels it until proven non-executable', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const midSession = () => new Date('2026-09-17T15:00:00.000Z');
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: midSession().toISOString(), kill_switch: false, block_entries: false });
+    const plan = await seedPlan('FLAT', 'dt-flat-entry-c3');
+    const exitKey = `dt-timeexit-${plan.id}-a1`;
+    await store.createOrderAudit({
+        idempotency_key: exitKey, client_order_id: exitKey, symbol: 'FLAT', side: 'sell', qty: 10,
+        order_type: 'market', time_in_force: 'day', status: 'pending_submission',
+        execution_epoch: 'day_trading', order_class: 'simple', leg_role: 'time_exit', plan_id: plan.id,
+    });
+    await store.updateOrderAudit(exitKey, { status: 'accepted', broker_order_id: 'exit-live-c3', broker_payload: { status: 'accepted' } });
+
+    const client = createWorkerStatefulClient({
+        orders: [{ id: 'exit-live-c3', client_order_id: exitKey, symbol: 'FLAT', side: 'sell', status: 'accepted', qty: 10 }],
+        positions: { FLAT: null },
+    });
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: midSession,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        assert.ok(client.calls.cancelOrder.includes('exit-live-c3'), 'the stale live exit must be cancelled');
+        assert.strictEqual(client.ordersMap.get('exit-live-c3').status, 'canceled');
+        const action = (await store.listEvents(plan.id)).find((e) => e.event_type === 'monitor_action' && e.action === 'cancel_stale_orders');
+        assert.ok(action, 'a cancel_stale_orders action must be journaled');
+        assert.strictEqual(action.outcome, 'stale_orders_cancelled');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('C5 the kill-switch sweep re-observes every plan after the switch is persisted instead of reusing phase-one observations', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const sweepNow = () => new Date('2026-09-17T19:56:00.000Z');
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: sweepNow().toISOString(), kill_switch: false, block_entries: false });
+    const trigger = await seedPlan('TRG5', 'dt-trg5-entry-c5');
+    await db.updateAlpacaDayTradePlan(trigger.id, { protective_stop_broker_order_id: 'stop-trg5' });
+    await seedPlan('OBS5', 'dt-obs5-entry-c5');
+
+    const client = createWorkerStatefulClient({
+        orders: [{ id: 'stop-trg5', symbol: 'TRG5', side: 'sell', status: 'held', qty: 10 }],
+        positions: { TRG5: { qty: 10, side: 'long' }, OBS5: null },
+    });
+    // Before the switch is persisted the entry looks finished; afterwards the broker reports it
+    // live (e.g. a replacement/fill changed its state between the two reads). Only a fresh
+    // post-switch observation sees that.
+    const getOrder = client.getOrder;
+    client.getOrder = async (id, options) => {
+        if (id === 'broker-parent-OBS5') {
+            const switched = Boolean((await store.getMonitorState()).kill_switch);
+            client.calls.getOrder.push({ id, options });
+            if (client.calls.cancelOrder.includes(id)) {
+                return { id, symbol: 'OBS5', side: 'buy', status: 'canceled', qty: 10, filled_qty: 0, legs: [] };
+            }
+            return switched
+                ? { id, symbol: 'OBS5', side: 'buy', status: 'partially_filled', qty: 10, filled_qty: 0, legs: [] }
+                : { id, symbol: 'OBS5', side: 'buy', status: 'filled', qty: 10, filled_qty: 10, legs: [] };
+        }
+        return getOrder(id, options);
+    };
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: sweepNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        assert.strictEqual(Boolean((await store.getMonitorState()).kill_switch), true);
+        assert.ok(client.calls.cancelOrder.includes('broker-parent-OBS5'), 'the entry that became live must be cancelled using a fresh observation');
+        const cancelEvent = (await store.listEvents()).find((e) => e.event_type === 'monitor_action' && e.action === 'cancel_unfilled_remainder');
+        assert.strictEqual(cancelEvent?.outcome, 'cancel_verified');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
 });

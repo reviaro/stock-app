@@ -30,6 +30,11 @@ beforeEach(async () => {
             (err) => { sqlite.close(); err ? reject(err) : resolve(); },
         );
     }));
+    // executeDayTradeEntry re-checks the route's gates inside the lease; open them by default.
+    await store.updateMonitorState({
+        mode: 'paper_execute', kill_switch: false, block_entries: false,
+        last_rest_reconciliation_at: new Date().toISOString(),
+    });
 });
 
 function baseIntent(overrides = {}) {
@@ -210,7 +215,8 @@ test('acquires and releases the durable cross-process lease around a submission'
 });
 
 test('fails closed when the durable lease is already held by another process', async () => {
-    await store.acquireSubmissionLease({ holderId: 'other-process', leaseDurationMs: 30_000, now: '2026-09-17T13:30:00.000Z' });
+    // Lease timing runs on the real clock, so the competing lease must be live right now.
+    await store.acquireSubmissionLease({ holderId: 'other-process', leaseDurationMs: 30_000, now: new Date() });
 
     await assert.rejects(
         () => execute({ client: fakeClient(), now: new Date('2026-09-17T13:30:05.000Z') }),
@@ -219,7 +225,7 @@ test('fails closed when the durable lease is already held by another process', a
 });
 
 test('reclaims a stale (expired) lease left by a crashed process and still submits', async () => {
-    await store.acquireSubmissionLease({ holderId: 'crashed-process', leaseDurationMs: 1000, now: '2026-09-17T13:29:00.000Z' });
+    await store.acquireSubmissionLease({ holderId: 'crashed-process', leaseDurationMs: 1000, now: new Date(Date.now() - 60_000) });
 
     const client = fakeClient();
     const result = await execute({ client, now: new Date('2026-09-17T13:30:05.000Z') });
@@ -321,4 +327,76 @@ test('never writes to the simulator transaction ledger', async () => {
     await execute({ client: fakeClient() });
     const after = await db.listTransactions();
     assert.deepStrictEqual(after, before);
+});
+
+test('B1 kill switch latched while the entry waits for or holds the lease blocks it before any plan or broker order', async () => {
+    // (a) latched while the request waited for the lease: refused before any broker read.
+    await store.updateMonitorState({ kill_switch: true, block_entries: true });
+    const waitingClient = fakeClient();
+    let brokerReads = 0;
+    waitingClient.getAccount = async () => { brokerReads += 1; return {}; };
+    await assert.rejects(() => execute({ client: waitingClient }), (err) => err.code === 'ALPACA_KILL_SWITCH_ACTIVE');
+    assert.strictEqual(brokerReads, 0);
+    assert.strictEqual(waitingClient.calls.submitOrder.length, 0);
+
+    // (b) latched by the monitor after the lease was acquired, during the broker reads.
+    await store.updateMonitorState({ kill_switch: false, block_entries: false });
+    const client = fakeClient();
+    const getAccount = client.getAccount;
+    client.getAccount = async () => {
+        await store.updateMonitorState({ kill_switch: true, block_entries: true });
+        return getAccount();
+    };
+    await assert.rejects(() => execute({ client }), (err) => err.code === 'ALPACA_KILL_SWITCH_ACTIVE');
+    assert.strictEqual(client.calls.submitOrder.length, 0);
+    assert.strictEqual((await store.listPlans(null)).length, 0);
+    assert.strictEqual((await store.listOrderAudits()).length, 0);
+});
+
+test('C1 kill switch latched after the gate check (between insert and broker ack) -> insert is refused atomically, or the submitted entry is cancelled at once', async () => {
+    // (a) latched just before the plan insert: the gate is read inside the insert transaction.
+    const quoteClient = fakeClient();
+    const getLatestQuote = quoteClient.getLatestQuote;
+    quoteClient.getLatestQuote = async (...args) => {
+        const quote = await getLatestQuote(...args);
+        await store.updateMonitorState({ kill_switch: true, block_entries: true });
+        return quote;
+    };
+    await assert.rejects(() => execute({ client: quoteClient }), (err) => err.code === 'ALPACA_KILL_SWITCH_ACTIVE');
+    assert.strictEqual(quoteClient.calls.submitOrder.length, 0);
+    assert.strictEqual((await store.listPlans(null)).length, 0);
+
+    // (b) latched while the order is in flight at the broker: cancelled immediately after the ack.
+    await store.updateMonitorState({ kill_switch: false, block_entries: false });
+    const cancelled = [];
+    const client = fakeClient({
+        submitOrder: async (order) => {
+            await store.updateMonitorState({ kill_switch: true, block_entries: true });
+            return { id: 'broker-order-c1', status: 'accepted', ...order };
+        },
+    });
+    client.cancelOrder = async (id) => { cancelled.push(id); return { canceled: true }; };
+    const result = await execute({ client, clientOrderId: 'dt-nvda-entry-c1' });
+    assert.strictEqual(result.order.broker_order_id, 'broker-order-c1');
+    assert.deepStrictEqual(cancelled, ['broker-order-c1']);
+    const cancelEvent = (await store.listEvents(result.plan.id)).find((e) => e.action === 'cancel_entry');
+    assert.ok(cancelEvent, 'the kill-switch cancellation must be journaled');
+    assert.strictEqual(cancelEvent.reason, 'kill_switch_active_after_submit');
+});
+
+test('C2 entry whose lease is taken over mid-request stops before persisting or submitting anything', async () => {
+    const client = fakeClient();
+    const getAccount = client.getAccount;
+    client.getAccount = async () => {
+        // Another holder reclaims the lease (e.g. ours expired during slow broker calls).
+        await store.releaseSubmissionLease({ holderId: 'test-holder' });
+        await store.acquireSubmissionLease({ holderId: 'other-request', leaseDurationMs: 30_000, now: new Date() });
+        return getAccount();
+    };
+    await assert.rejects(() => execute({ client }), (err) => err.code === 'ALPACA_LEASE_LOST');
+    assert.strictEqual(client.calls.submitOrder.length, 0);
+    assert.strictEqual((await store.listPlans(null)).length, 0);
+    assert.strictEqual((await store.listOrderAudits()).length, 0);
+    const state = await store.getMonitorState();
+    assert.strictEqual(state.submission_lease_holder, 'other-request', 'the new holder\'s lease must not be released');
 });

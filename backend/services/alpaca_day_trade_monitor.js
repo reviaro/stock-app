@@ -77,6 +77,14 @@ function decidePlanAction(observation) {
     }
 
     if (qty === 0) {
+        // Flat, but plan-owned orders that can still execute (a live exit, a repair OCO, legs of a
+        // finished entry) could reopen exposure later: cancel them until proven non-executable.
+        if (Number(observation.staleLiveOrderCount) > 0) {
+            return decision({
+                action: 'cancel_stale_orders', reason: 'flat position with executable plan-owned orders',
+                blockEntries: true, healthCode: 'LIVE_ORDERS_WHILE_FLAT',
+            });
+        }
         // Nothing open to protect or exit. Whether the plan should now be closed is Task 10's
         // question (it owns closing from complete broker evidence), not this function's.
         return decision({ action: 'none', reason: 'flat' });
@@ -85,24 +93,51 @@ function decidePlanAction(observation) {
     if (clock?.next_close) {
         const nextClose = new Date(clock.next_close);
         const safetySweepAt = new Date(nextClose.getTime() - policy.safetySweepMinutesBeforeClose * 60_000);
-        const timeExitAt = new Date(nextClose.getTime() - policy.timeExitMinutesBeforeClose * 60_000);
         if (now.getTime() >= safetySweepAt.getTime()) {
             return decision({
                 action: 'flatten', reason: 'safety-sweep deadline passed while still not flat',
                 blockEntries: true, activateKillSwitch: true, healthCode: 'SAFETY_SWEEP_VIOLATION', details: { qty },
             });
         }
+    }
+
+    if (plan.exit_deadline) {
+        const exitDeadline = new Date(plan.exit_deadline);
+        if (!Number.isNaN(exitDeadline.getTime()) && now.getTime() > exitDeadline.getTime()) {
+            if (clock?.is_open === true) {
+                const etFormatter = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' });
+                const isCarried = etFormatter.format(now) > etFormatter.format(exitDeadline);
+                return decision({
+                    action: 'submit_time_exit',
+                    reason: 'plan exit deadline has passed with an open position',
+                    blockEntries: true,
+                    healthCode: isCarried ? 'CARRIED_POSITION' : null,
+                    details: { qty },
+                });
+            }
+            return decision({
+                action: 'none',
+                reason: 'plan exit deadline passed while market is closed; awaiting next market open',
+                blockEntries: true,
+                healthCode: 'CARRIED_POSITION_AWAITING_OPEN',
+            });
+        }
+    }
+
+    if (clock?.next_close) {
+        const nextClose = new Date(clock.next_close);
+        const timeExitAt = new Date(nextClose.getTime() - policy.timeExitMinutesBeforeClose * 60_000);
         if (now.getTime() >= timeExitAt.getTime()) {
             return decision({ action: 'submit_time_exit', reason: 'time-exit window reached with an open position', blockEntries: true, details: { qty } });
         }
     }
 
-    // Keyed on the entry order's own observed status, never on plan.state: Task 8 creates
-    // every plan at 'entry_pending' and only Task 10's close ever moves it (to 'closed' or
-    // 'error') -- nothing writes 'partially_entered' or 'active'. A gate on plan.state would
-    // make this branch, and the generic coverage check below it, unreachable for every plan
-    // that actually exists. This mirrors the same decision already made for stopLeg/targetLeg:
-    // trust the fresh observation, not a persisted column nothing keeps current.
+    // Keyed on the entry order's own observed status, never on plan.state: reconciliation
+    // now keeps plan.state as a derived display/journal summary, but the decision is still
+    // keyed on the fresh broker observation because the persisted column lags the broker
+    // by up to one reconciliation pass. A gate on plan.state would make this branch, and the
+    // generic coverage check below it, lag real-time broker execution. This mirrors the
+    // same decision already made for stopLeg/targetLeg: trust the fresh observation.
     if (entryOrder) {
         const orderQty = Number(entryOrder.qty);
         const filledQty = Number(entryOrder.filled_qty || 0);

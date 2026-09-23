@@ -684,7 +684,7 @@ async function seedActivePlan() {
             symbol: 'NVDA', setup: 's', catalyst: 'c', thesis: 't', invalidation: 'i',
             planned_entry_low: 100.50, planned_entry_high: 100.50, planned_stop: 98.00, planned_target: 104.00,
             planned_qty: 10, planned_risk_dollars: 25, planned_reward_risk: 1.4, planned_account_risk_pct: 0.00025,
-            exit_deadline: '2026-09-17T19:45:00.000Z',
+            exit_deadline: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
         },
         {
             idempotency_key: 'dt-nvda-entry-1', client_order_id: 'dt-nvda-entry-1', symbol: 'NVDA', side: 'buy',
@@ -763,7 +763,9 @@ test('POST /day-trading/kill-switch/clear succeeds when every open plan is flat'
     const gate = enableDayTradingGate();
     await store.updateMonitorState({ kill_switch: true });
     await seedActivePlan();
-    mockKillSwitchClearBroker({ positionQty: 0 });
+    // Truly flat: no position AND no executable legs (held legs on a filled entry could still sell
+    // into a short, which must keep the switch set -- see LIVE_ORDERS_WHILE_FLAT).
+    mockKillSwitchClearBroker({ positionQty: 0, legsCovered: false });
     const app = createApp();
     const server = app.listen(0);
     const result = await post(
@@ -1125,4 +1127,116 @@ test('GET /day-trading/journal returns analytics computed from closed plans', as
     assert.strictEqual(result.body.data.analytics.total_pnl, 35);
     assert.ok(Array.isArray(result.body.data.trades));
     assert.ok(Array.isArray(result.body.data.events));
+});
+
+test('J1: journal order_audit event detail includes brokerMessage parsed from broker_payload', async () => {
+    const plan = await seedActivePlan();
+    await store.createOrderAudit({
+        idempotency_key: `dt-timeexit-${plan.id}-a1`,
+        client_order_id: `dt-timeexit-${plan.id}-a1`,
+        symbol: plan.symbol,
+        side: 'sell',
+        qty: 10,
+        order_type: 'market',
+        time_in_force: 'day',
+        status: 'submission_rejected',
+        execution_epoch: 'day_trading',
+        order_class: 'simple',
+        leg_role: 'time_exit',
+        plan_id: plan.id,
+    });
+    await store.updateOrderAudit(`dt-timeexit-${plan.id}-a1`, {
+        status: 'submission_rejected',
+        broker_payload: { broker_message: 'insufficient qty available for order (requested: 10, available: 0)' },
+    });
+
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, '/api/alpaca-paper/day-trading/journal');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200);
+    const orderAuditEvent = result.body.data.events.find(
+        (e) => e.source === 'order_audit' && e.action === 'time_exit',
+    );
+    assert.ok(orderAuditEvent, 'must find order_audit event for time_exit');
+    assert.strictEqual(
+        orderAuditEvent.detail.brokerMessage,
+        'insufficient qty available for order (requested: 10, available: 0)',
+    );
+});
+
+test('G-3: journal route returns brokerCode when present in audit record and does not leak raw bodies', async () => {
+    const plan = await seedActivePlan();
+    await store.createOrderAudit({
+        idempotency_key: `dt-timeexit-${plan.id}-g3`,
+        client_order_id: `dt-timeexit-${plan.id}-g3`,
+        symbol: plan.symbol,
+        side: 'sell',
+        qty: 10,
+        order_type: 'market',
+        time_in_force: 'day',
+        status: 'submission_rejected',
+        execution_epoch: 'day_trading',
+        order_class: 'simple',
+        leg_role: 'time_exit',
+        plan_id: plan.id,
+    });
+    await store.updateOrderAudit(`dt-timeexit-${plan.id}-g3`, {
+        status: 'submission_rejected',
+        broker_payload: {
+            broker_code: 40310000,
+            broker_message: 'order [id] for account [redacted] is forbidden',
+        },
+    });
+
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, '/api/alpaca-paper/day-trading/journal');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200);
+    const orderAuditEvent = result.body.data.events.find(
+        (e) => e.source === 'order_audit' && e.detail?.symbol === plan.symbol && e.action === 'time_exit',
+    );
+    assert.ok(orderAuditEvent, 'must find order_audit event');
+    assert.strictEqual(orderAuditEvent.detail.brokerCode, 40310000);
+    assert.strictEqual(orderAuditEvent.detail.brokerMessage, 'order [id] for account [redacted] is forbidden');
+    const rawJson = JSON.stringify(result.body);
+    assert.strictEqual(rawJson.includes('brokerBodyRaw'), false, 'brokerBodyRaw must never be leaked in journal response');
+});
+
+test('N5-t2 route: an audit row whose stored broker_payload.broker_message is an unsanitized historic string containing a UUID and client_order_id=dt-flatten-7-a2 -> journal response contains neither', async () => {
+    const plan = await seedActivePlan();
+    await store.createOrderAudit({
+        idempotency_key: `dt-flatten-${plan.id}-n5t2`,
+        client_order_id: `dt-flatten-${plan.id}-n5t2`,
+        symbol: plan.symbol,
+        side: 'sell',
+        qty: 10,
+        order_type: 'market',
+        time_in_force: 'day',
+        status: 'submission_rejected',
+        execution_epoch: 'day_trading',
+        order_class: 'simple',
+        leg_role: 'emergency_flatten',
+        plan_id: plan.id,
+    });
+    await store.updateOrderAudit(`dt-flatten-${plan.id}-n5t2`, {
+        status: 'submission_rejected',
+        broker_payload: {
+            broker_code: 40310000,
+            broker_message: 'order 12345678-1234-1234-1234-123456789abc failed: client_order_id=dt-flatten-7-a2 rejected',
+        },
+    });
+
+    const app = createApp();
+    const server = app.listen(0);
+    const result = await get(server.address().port, '/api/alpaca-paper/day-trading/journal');
+    await new Promise((resolve) => server.close(resolve));
+
+    assert.strictEqual(result.status, 200);
+    const rawJson = JSON.stringify(result.body);
+    assert.strictEqual(rawJson.includes('12345678-1234-1234-1234-123456789abc'), false, 'raw UUID must not appear in journal response');
+    assert.strictEqual(rawJson.includes('dt-flatten-7-a2'), false, 'dt-flatten-7-a2 must not appear in journal response');
 });
