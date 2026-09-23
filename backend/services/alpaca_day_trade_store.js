@@ -24,8 +24,8 @@ function computeFilledSummary(fills = []) {
     };
 }
 
-async function createPlanWithEntry(plan, entryOrder) {
-    return db.createAlpacaDayTradePlanWithEntry(plan, entryOrder);
+async function createPlanWithEntry(plan, entryOrder, entryGate = null) {
+    return db.createAlpacaDayTradePlanWithEntry(plan, entryOrder, entryGate);
 }
 
 function getPlan(id) {

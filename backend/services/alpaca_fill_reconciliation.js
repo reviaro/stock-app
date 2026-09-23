@@ -1,5 +1,6 @@
 const store = require('./alpaca_day_trade_store');
 const { attemptCloseFromFills } = require('./alpaca_day_trade_journal');
+const { findStaleLiveOrders } = require('./alpaca_day_trade_repair_execution');
 
 // Verified against Alpaca's documented GET /v2/account/activities/FILL response schema: type
 // is only ever "fill" or "partial_fill"; no field represents a correction or a busted trade in
@@ -286,9 +287,14 @@ async function buildObservation(plan, {
                 ? client.getOrder(plan.entry_parent_broker_order_id, { nested: true })
                 : Promise.resolve(null),
         ]);
+        // Only needed (and only meaningful) when the plan holds no shares: executable exit/repair
+        // orders or orphaned bracket legs must then be cancelled, not ignored as "flat".
+        const positionQty = position ? Number(position.qty) : 0;
+        const staleLiveOrders = positionQty === 0 ? await findStaleLiveOrders(plan, client) : [];
         return {
             plan,
             position,
+            staleLiveOrderCount: staleLiveOrders.length,
             brokerUnavailable: false,
             entryOrder: parentOrder ? {
                 status: parentOrder.status, qty: Number(parentOrder.qty), filled_qty: Number(parentOrder.filled_qty || 0),

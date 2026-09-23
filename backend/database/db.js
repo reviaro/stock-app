@@ -2141,7 +2141,26 @@ function normalizeAlpacaDayTradePlan(plan) {
     return normalized;
 }
 
-function createAlpacaDayTradePlanWithEntry(plan, entryOrder) {
+// entryGate (optional): { staleReconciliationMs, nowMs }. When given, the monitor's entry gates
+// are read INSIDE the same write transaction as the plan insert. BEGIN IMMEDIATE takes the write
+// lock up front, so a concurrent kill-switch/block_entries update is serialized either before
+// this check (and the insert is refused) or after the commit (and the new plan is visible to the
+// kill-switch sweep) -- never in between.
+function entryGateViolation(state, entryGate) {
+    const gateError = (code, message) => Object.assign(new Error(message), { code });
+    if (!state) return gateError('ALPACA_ENTRIES_DISABLED', 'Day Trading monitor state is unavailable');
+    if (state.kill_switch) return gateError('ALPACA_KILL_SWITCH_ACTIVE', 'the Day Trading kill switch is active; new entries are refused until it is cleared');
+    if (state.mode !== 'paper_execute') return gateError('ALPACA_ENTRIES_DISABLED', 'Day Trading entries are currently disabled');
+    if (state.block_entries) return gateError('ALPACA_ENTRIES_BLOCKED', 'a Day Trading plan currently requires attention; new entries are refused');
+    const lastTick = state.last_rest_reconciliation_at ? new Date(state.last_rest_reconciliation_at).getTime() : NaN;
+    const ageMs = entryGate.nowMs - lastTick;
+    if (!(ageMs <= entryGate.staleReconciliationMs)) {
+        return gateError('ALPACA_MONITOR_STALE', 'the Day Trading monitor has not confirmed account state recently enough to trust');
+    }
+    return null;
+}
+
+function createAlpacaDayTradePlanWithEntry(plan, entryOrder, entryGate = null) {
     let normalizedPlan;
     try {
         normalizedPlan = normalizeAlpacaDayTradePlan(plan);
@@ -2169,10 +2188,14 @@ function createAlpacaDayTradePlanWithEntry(plan, entryOrder) {
             // dispatch — it does not stop a later statement just because an earlier one's
             // callback reported an error. Nesting is what actually prevents an unguarded
             // write if BEGIN itself fails (e.g. under lock contention).
-            sqlite.run('BEGIN TRANSACTION', (beginErr) => {
-                if (beginErr) return finish(beginErr);
+            sqlite.run(entryGate ? 'BEGIN IMMEDIATE' : 'BEGIN TRANSACTION', (beginErr) => {
+                if (beginErr) {
+                    settled = true;
+                    sqlite.close();
+                    return reject(beginErr);
+                }
 
-                sqlite.run(
+                const insertPlan = () => sqlite.run(
                     `INSERT INTO alpaca_day_trade_plans (
                         symbol, setup, catalyst, thesis, invalidation, planned_entry_low, planned_entry_high,
                         planned_stop, planned_target, planned_qty, planned_risk_dollars, planned_reward_risk,
@@ -2214,6 +2237,14 @@ function createAlpacaDayTradePlanWithEntry(plan, entryOrder) {
                         });
                     },
                 );
+
+                if (!entryGate) return insertPlan();
+                sqlite.get('SELECT * FROM alpaca_monitor_state WHERE id = 1', [], (stateErr, state) => {
+                    if (stateErr) return finish(stateErr);
+                    const violation = entryGateViolation(state, entryGate);
+                    if (violation) return finish(violation);
+                    return insertPlan();
+                });
                 },
             );
         });

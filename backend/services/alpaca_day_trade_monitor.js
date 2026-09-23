@@ -77,6 +77,14 @@ function decidePlanAction(observation) {
     }
 
     if (qty === 0) {
+        // Flat, but plan-owned orders that can still execute (a live exit, a repair OCO, legs of a
+        // finished entry) could reopen exposure later: cancel them until proven non-executable.
+        if (Number(observation.staleLiveOrderCount) > 0) {
+            return decision({
+                action: 'cancel_stale_orders', reason: 'flat position with executable plan-owned orders',
+                blockEntries: true, healthCode: 'LIVE_ORDERS_WHILE_FLAT',
+            });
+        }
         // Nothing open to protect or exit. Whether the plan should now be closed is Task 10's
         // question (it owns closing from complete broker evidence), not this function's.
         return decision({ action: 'none', reason: 'flat' });

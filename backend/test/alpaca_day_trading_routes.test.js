@@ -763,7 +763,9 @@ test('POST /day-trading/kill-switch/clear succeeds when every open plan is flat'
     const gate = enableDayTradingGate();
     await store.updateMonitorState({ kill_switch: true });
     await seedActivePlan();
-    mockKillSwitchClearBroker({ positionQty: 0 });
+    // Truly flat: no position AND no executable legs (held legs on a filled entry could still sell
+    // into a short, which must keep the switch set -- see LIVE_ORDERS_WHILE_FLAT).
+    mockKillSwitchClearBroker({ positionQty: 0, legsCovered: false });
     const app = createApp();
     const server = app.listen(0);
     const result = await post(

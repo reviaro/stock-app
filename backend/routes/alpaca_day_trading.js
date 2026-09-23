@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const { executeDayTradeEntry } = require('../services/alpaca_day_trade_execution');
 const { createPaperClient, resolveMissingPaperOrderAudit } = require('../services/alpaca_paper_service');
@@ -179,7 +180,8 @@ router.post('/entries', async (req, res) => {
             intent,
             clientOrderId,
             client: createPaperClient(),
-            holderId: `web-${process.pid}`,
+            // Unique per request: a stale request must never renew or release another request's lease.
+            holderId: `web-${process.pid}-${crypto.randomUUID()}`,
             policy,
         });
         return res.status(result.replayed ? 200 : 201).json({

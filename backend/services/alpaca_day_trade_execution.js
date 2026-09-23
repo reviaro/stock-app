@@ -99,14 +99,24 @@ async function assertEntryGatesOpen() {
 // or Task 10's reconciliation resolves it (Safety Invariant #11).
 async function executeDayTradeEntry({
     intent, clientOrderId, client, policy = DEFAULT_DAY_TRADE_POLICY, holderId, leaseDurationMs = 30_000, now = new Date(),
+    nowFn = () => new Date(),
 }) {
     const key = String(clientOrderId || '').trim();
     if (!key) throw executionError('ALPACA_CLIENT_ORDER_ID_REQUIRED', 'a client order id is required to submit a Day Trading entry');
 
-    const lease = await store.acquireSubmissionLease({ holderId, leaseDurationMs, now });
+    // Lease timing runs on the real clock (nowFn); `now` stays the decision/quote-freshness time.
+    const lease = await store.acquireSubmissionLease({ holderId, leaseDurationMs, now: nowFn() });
     if (!lease.acquired) {
         throw executionError('ALPACA_LEASE_UNAVAILABLE', 'the durable Day Trading submission lease is held by another process');
     }
+    // Broker calls can outlast a fixed lease. Renew before each step; if another holder took the
+    // lease meanwhile, stop before persisting or sending anything.
+    const renewLeaseOrThrow = async (stage) => {
+        const renewed = await store.renewSubmissionLease({ holderId, leaseDurationMs, now: nowFn() });
+        if (!renewed?.renewed) {
+            throw executionError('ALPACA_LEASE_LOST', `the Day Trading submission lease was lost before ${stage}`);
+        }
+    };
 
     try {
         const symbol = String(intent?.symbol || '').trim().toUpperCase();
@@ -154,12 +164,14 @@ async function executeDayTradeEntry({
             throw executionError('ALPACA_RECONCILIATION_REQUIRED', 'an unresolved Day Trading order audit exists and must be reconciled before another submission');
         }
 
+        await renewLeaseOrThrow('broker_reads');
         const [account, asset, clock, openOrders] = await Promise.all([
             client.getAccount(), client.getAsset(symbol), client.getClock(), client.getOrders({ status: 'open' }),
         ]);
         // Fetched fresh, after the lease is held and every DB-only gate has passed: Task 6's
         // freshness bound is 10 seconds, and fetching the quote any earlier would let lease
         // contention or the atomic plan write eat into that budget before the price is used.
+        await renewLeaseOrThrow('quote_fetch');
         const quote = await getProvenQuote({
             client, symbol, now, feed: policy.feed, maxAgeMs: policy.maxQuoteAgeMs,
         });
@@ -180,10 +192,10 @@ async function executeDayTradeEntry({
         });
         const { order, entryPrice, stopPrice, targetPrice, plannedRiskDollars, plannedRewardRisk } = built;
 
-        // Second check, as late as possible: the broker reads and quote fetch above can take
-        // seconds, during which the monitor may have latched the kill switch.
-        await assertEntryGatesOpen();
-
+        // Second check, as late as possible and atomic with the plan insert: the gates are read
+        // inside the same write transaction that persists the plan (see
+        // createAlpacaDayTradePlanWithEntry), so the kill switch cannot activate in between.
+        await renewLeaseOrThrow('plan_persist');
         const { plan, order: auditRow } = await store.createPlanWithEntry(
             {
                 symbol,
@@ -218,6 +230,7 @@ async function executeDayTradeEntry({
                 status: 'pending_submission',
                 order_class: 'bracket',
             },
+            { staleReconciliationMs: DEFAULT_MONITOR_POLICY.staleReconciliationMs, nowMs: Date.now() },
         );
 
         const occurredAt = new Date(now).toISOString();
@@ -237,6 +250,19 @@ async function executeDayTradeEntry({
         });
 
         try {
+            await renewLeaseOrThrow('broker_submission');
+        } catch (leaseError) {
+            // Nothing reached the broker: close the local records so this plan neither blocks
+            // future entries as an unresolved audit nor looks like a live position.
+            await store.updateOrderAudit(key, {
+                status: 'submission_rejected',
+                broker_payload: { error: 'lease_lost_before_submit', status: null },
+            });
+            await store.updatePlan(plan.id, { state: 'cancelled' });
+            throw leaseError;
+        }
+
+        try {
             const brokerOrder = { ...order, client_order_id: key };
             const brokerResult = await client.submitOrder(brokerOrder);
             const brokerStatus = String(brokerResult.status || 'submitted');
@@ -247,6 +273,23 @@ async function executeDayTradeEntry({
                 action: 'submit_entry', outcome: 'acknowledged', reason: brokerStatus,
                 detail: { symbol, qty: order.qty, status: brokerStatus }, occurred_at: occurredAt,
             });
+            // Close the last window: if the kill switch latched while the order was in flight, cancel
+            // it right away (still under the lease). The kill-switch sweep then verifies it is
+            // non-executable and protects any partial fill.
+            const stateAfterSubmit = await store.getMonitorState();
+            if (stateAfterSubmit?.kill_switch && brokerResult.id) {
+                let cancelOutcome = 'cancel_requested';
+                try {
+                    await client.cancelOrder(brokerResult.id);
+                } catch (cancelError) {
+                    cancelOutcome = cancelError.status === 422 || cancelError.status === 404 ? 'cancel_not_accepted' : 'cancel_failed';
+                }
+                await store.appendEvent({
+                    event_key: `entry:${plan.id}:${key}:kill_switch_cancel`, plan_id: plan.id, event_type: 'entry_outcome',
+                    action: 'cancel_entry', outcome: cancelOutcome, reason: 'kill_switch_active_after_submit',
+                    detail: { symbol, qty: order.qty }, occurred_at: new Date().toISOString(),
+                });
+            }
             return {
                 plan: { ...plan, entry_parent_broker_order_id: brokerResult.id || null },
                 order: { ...auditRow, status: brokerStatus, broker_order_id: brokerResult.id || null },

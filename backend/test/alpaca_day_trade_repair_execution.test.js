@@ -2093,3 +2093,39 @@ test('B4 partial-entry cancellation follows the replacement chain and is verifie
         (err) => err.code === 'ALPACA_ENTRY_CANCEL_UNVERIFIED',
     );
 });
+
+test('C4 mixed live exits: an older same-side exit plus a newer opposite-side exit -> opposite cancelled, the existing exit replayed, never a second same-side exit', async () => {
+    const plan = await seedPlan();
+    const sellKey = `dt-timeexit-${plan.id}-a1`;
+    const coverKey = `dt-cover-${plan.id}-a1`;
+    for (const [key, side, legRole, brokerId] of [
+        [sellKey, 'sell', 'time_exit', 'exit-old-sell'],
+        [coverKey, 'buy', 'emergency_flatten', 'cover-new-buy'],
+    ]) {
+        await store.createOrderAudit({
+            idempotency_key: key, client_order_id: key, symbol: 'NVDA', side, qty: 10,
+            order_type: 'market', time_in_force: 'day', status: 'pending_submission',
+            execution_epoch: 'day_trading', order_class: 'simple', leg_role: legRole, plan_id: plan.id,
+        });
+        await store.updateOrderAudit(key, { status: 'accepted', broker_order_id: brokerId, broker_payload: { status: 'accepted' } });
+    }
+    const client = createStatefulClient({
+        orders: [
+            { id: 'exit-old-sell', client_order_id: sellKey, symbol: 'NVDA', side: 'sell', status: 'accepted', qty: 10 },
+            { id: 'cover-new-buy', client_order_id: coverKey, symbol: 'NVDA', side: 'buy', status: 'accepted', qty: 10 },
+        ],
+        positions: { NVDA: { qty: 10, side: 'long' } },
+        rejectSellIfOpenOrders: false,
+    });
+
+    const result = await executeManagementAction(
+        { action: 'flatten', details: { qty: 10 } }, plan,
+        { client, holderId: 'test', exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 20, pollIntervalMs: 1 }, sleep: async () => {} },
+    );
+
+    assert.ok(client.calls.cancelOrder.includes('cover-new-buy'), 'the opposite-side exit must be cancelled');
+    assert.ok(!client.calls.cancelOrder.includes('exit-old-sell'), 'the existing same-side exit must be kept');
+    assert.strictEqual(client.calls.submitOrder.length, 0, 'no second same-side exit may be submitted');
+    assert.strictEqual(result.replayed, true);
+    assert.strictEqual(result.order.idempotency_key, sellKey);
+});

@@ -1709,3 +1709,92 @@ test('B4 a partial entry cancelled under the kill switch is verified and its fil
         if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
     }
 });
+
+test('C3 flat position with a still-executable exit order is not ignored: the monitor cancels it until proven non-executable', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const midSession = () => new Date('2026-09-17T15:00:00.000Z');
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: midSession().toISOString(), kill_switch: false, block_entries: false });
+    const plan = await seedPlan('FLAT', 'dt-flat-entry-c3');
+    const exitKey = `dt-timeexit-${plan.id}-a1`;
+    await store.createOrderAudit({
+        idempotency_key: exitKey, client_order_id: exitKey, symbol: 'FLAT', side: 'sell', qty: 10,
+        order_type: 'market', time_in_force: 'day', status: 'pending_submission',
+        execution_epoch: 'day_trading', order_class: 'simple', leg_role: 'time_exit', plan_id: plan.id,
+    });
+    await store.updateOrderAudit(exitKey, { status: 'accepted', broker_order_id: 'exit-live-c3', broker_payload: { status: 'accepted' } });
+
+    const client = createWorkerStatefulClient({
+        orders: [{ id: 'exit-live-c3', client_order_id: exitKey, symbol: 'FLAT', side: 'sell', status: 'accepted', qty: 10 }],
+        positions: { FLAT: null },
+    });
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: midSession,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        assert.ok(client.calls.cancelOrder.includes('exit-live-c3'), 'the stale live exit must be cancelled');
+        assert.strictEqual(client.ordersMap.get('exit-live-c3').status, 'canceled');
+        const action = (await store.listEvents(plan.id)).find((e) => e.event_type === 'monitor_action' && e.action === 'cancel_stale_orders');
+        assert.ok(action, 'a cancel_stale_orders action must be journaled');
+        assert.strictEqual(action.outcome, 'stale_orders_cancelled');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});
+
+test('C5 the kill-switch sweep re-observes every plan after the switch is persisted instead of reusing phase-one observations', { timeout: 30_000 }, async () => {
+    const lockPath = tempLockPath();
+    const sweepNow = () => new Date('2026-09-17T19:56:00.000Z');
+    await store.updateMonitorState({ mode: 'paper_execute', last_rest_reconciliation_at: sweepNow().toISOString(), kill_switch: false, block_entries: false });
+    const trigger = await seedPlan('TRG5', 'dt-trg5-entry-c5');
+    await db.updateAlpacaDayTradePlan(trigger.id, { protective_stop_broker_order_id: 'stop-trg5' });
+    await seedPlan('OBS5', 'dt-obs5-entry-c5');
+
+    const client = createWorkerStatefulClient({
+        orders: [{ id: 'stop-trg5', symbol: 'TRG5', side: 'sell', status: 'held', qty: 10 }],
+        positions: { TRG5: { qty: 10, side: 'long' }, OBS5: null },
+    });
+    // Before the switch is persisted the entry looks finished; afterwards the broker reports it
+    // live (e.g. a replacement/fill changed its state between the two reads). Only a fresh
+    // post-switch observation sees that.
+    const getOrder = client.getOrder;
+    client.getOrder = async (id, options) => {
+        if (id === 'broker-parent-OBS5') {
+            const switched = Boolean((await store.getMonitorState()).kill_switch);
+            client.calls.getOrder.push({ id, options });
+            if (client.calls.cancelOrder.includes(id)) {
+                return { id, symbol: 'OBS5', side: 'buy', status: 'canceled', qty: 10, filled_qty: 0, legs: [] };
+            }
+            return switched
+                ? { id, symbol: 'OBS5', side: 'buy', status: 'partially_filled', qty: 10, filled_qty: 0, legs: [] }
+                : { id, symbol: 'OBS5', side: 'buy', status: 'filled', qty: 10, filled_qty: 10, legs: [] };
+        }
+        return getOrder(id, options);
+    };
+    const worker = createWorker({
+        client, lockPath, pollIntervalMs: 3_600_000, idlePollIntervalMs: 3_600_000, now: sweepNow,
+        exitPolicy: { legTerminalTimeoutMs: 50, flatVerifyTimeoutMs: 50, pollIntervalMs: 5 },
+        sleep: async () => {},
+    });
+
+    try {
+        await worker.start();
+        await worker.runTickNow();
+        await worker.stop();
+
+        assert.strictEqual(Boolean((await store.getMonitorState()).kill_switch), true);
+        assert.ok(client.calls.cancelOrder.includes('broker-parent-OBS5'), 'the entry that became live must be cancelled using a fresh observation');
+        const cancelEvent = (await store.listEvents()).find((e) => e.event_type === 'monitor_action' && e.action === 'cancel_unfilled_remainder');
+        assert.strictEqual(cancelEvent?.outcome, 'cancel_verified');
+    } finally {
+        await worker.stop();
+        if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+    }
+});

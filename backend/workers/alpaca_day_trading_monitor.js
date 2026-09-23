@@ -13,7 +13,7 @@ const DEFAULT_LOCK_PATH = path.join(__dirname, '..', '..', 'run', 'alpaca-day-tr
 const DEFAULT_POLL_INTERVAL_MS = 60_000; // Section 8: every 60s while any plan/order/position is open
 const DEFAULT_IDLE_POLL_INTERVAL_MS = 300_000; // Section 8: a slower cadence while flat/closed -- tunable, Stage 4 material
 const TERMINAL_PLAN_STATES = ['closed', 'cancelled', 'error'];
-const RISK_REDUCING_ACTIONS = ['flatten', 'submit_time_exit', 'buy_to_cover', 'cancel_unfilled_remainder', 'attach_protective_oco'];
+const RISK_REDUCING_ACTIONS = ['flatten', 'submit_time_exit', 'buy_to_cover', 'cancel_unfilled_remainder', 'attach_protective_oco', 'cancel_stale_orders'];
 const EXIT_ACTIONS = ['flatten', 'submit_time_exit', 'buy_to_cover'];
 
 function workerError(code, message) {
@@ -313,13 +313,11 @@ function createWorker({
                 // was persisted so an entry that slipped in during evaluation is covered too.
                 const sweepPlans = (await store.listPlans(null)).filter((plan) => !TERMINAL_PLAN_STATES.includes(plan.state));
                 for (const listedPlan of sweepPlans) {
-                    let evaluation = evaluations.get(listedPlan.id);
-                    if (!evaluation) {
-                        const observation = await buildObservation(listedPlan, { client, policy, now, log });
-                        evaluation = { plan: listedPlan, observation, decision: decidePlanAction(observation) };
-                    }
-                    const plan = { ...evaluation.plan, ...listedPlan };
-                    const { observation, decision } = evaluation;
+                    // Always a fresh, post-switch broker observation: phase-one observations may be
+                    // stale by now (fills, cancels or a new entry since they were taken).
+                    const plan = listedPlan;
+                    const observation = await buildObservation(plan, { client, policy, now, log });
+                    const decision = decidePlanAction(observation);
                     if (!EXIT_ACTIONS.includes(decision.action) && await entryStillExecutable(plan, observation)) {
                         const entryOrderId = observation.entryOrder?.id || plan.entry_parent_broker_order_id;
                         const cancelled = await runAction(
