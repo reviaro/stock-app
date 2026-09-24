@@ -15,6 +15,8 @@ const DEFAULT_RECONNECT_MAX_MS = 30_000;
 function createTradeUpdatesStream({
     url, apiKey, apiSecret,
     WebSocketImpl = WebSocketLib,
+    // v2 boundary: the v2 monitor injects its own fill normalizer; v1 keeps its default.
+    normalize = normalizeWebSocketFillEvent,
     onFill = () => {},
     onReconnect = () => {},
     onStateChange = () => {},
@@ -69,7 +71,8 @@ function createTradeUpdatesStream({
             return;
         }
         if (message.stream === 'trade_updates') {
-            const normalized = normalizeWebSocketFillEvent(message.data);
+            let normalized = null;
+            try { normalized = normalize(message.data); } catch (_error) { onStateChange('malformed_message'); return; }
             if (normalized) onFill(normalized);
         }
     }

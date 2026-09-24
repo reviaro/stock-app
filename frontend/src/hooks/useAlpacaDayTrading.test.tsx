@@ -1,8 +1,8 @@
-import { act, renderHook, waitFor } from '@testing-library/react'
+import { renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, expect, test, vi } from 'vitest'
 import type { ReactNode } from 'react'
-import { useSetAlpacaDayTradingMode, useClearAlpacaDayTradingKillSwitch, useAlpacaDayTradingJournal } from './useAlpacaDayTrading'
+import { useAlpacaDayTradingJournal } from './useAlpacaDayTrading'
 
 beforeEach(() => { vi.restoreAllMocks() })
 
@@ -13,32 +13,6 @@ function mount<T>(hook: () => T) {
 
 const response = (status: number, data: unknown) =>
   new Response(JSON.stringify(status < 400 ? { status: 'success', data } : { status: 'error', error: 'Rejected' }), { status })
-
-test('useSetAlpacaDayTradingMode uses the authenticated operator session without exposing a server token in the browser', async () => {
-  const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(response(200, { mode: 'shadow', killSwitch: false }))
-  const { result } = mount(() => useSetAlpacaDayTradingMode())
-  await act(async () => { await result.current.mutateAsync('shadow') })
-
-  expect(fetcher).toHaveBeenCalledTimes(1)
-  const [url, options] = fetcher.mock.calls[0]
-  expect(url).toBe('/api/alpaca-paper/day-trading/mode')
-  expect(options?.method).toBe('POST')
-  expect((options?.headers as Record<string, string>)['X-Alpaca-Day-Trading-Token']).toBeUndefined()
-  expect(JSON.parse(options?.body as string)).toEqual({ mode: 'shadow', confirm: true })
-})
-
-test('useClearAlpacaDayTradingKillSwitch uses the authenticated operator session', async () => {
-  const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(response(200, { killSwitch: false }))
-  const { result } = mount(() => useClearAlpacaDayTradingKillSwitch())
-  await act(async () => { await result.current.mutateAsync() })
-
-  expect(fetcher).toHaveBeenCalledTimes(1)
-  const [url, options] = fetcher.mock.calls[0]
-  expect(url).toBe('/api/alpaca-paper/day-trading/kill-switch/clear')
-  expect(options?.method).toBe('POST')
-  expect((options?.headers as Record<string, string>)['X-Alpaca-Day-Trading-Token']).toBeUndefined()
-  expect(JSON.parse(options?.body as string)).toEqual({ confirm: true })
-})
 
 // Pins the /journal response as {analytics, trades, events}, not the flat analytics object it
 // used to be -- a regression here silently breaks DayTradingJournalCard, which reads

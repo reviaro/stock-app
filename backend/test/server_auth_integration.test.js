@@ -72,7 +72,7 @@ test('server leaves auth session public while protecting dashboard APIs', async 
     }
 });
 
-test('dedicated Alpaca Day Trading bearer reaches its scoped journal and entry routes with invalid scope', async () => {
+test('dedicated Alpaca Day Trading bearer is denied the retired v1 scoped routes', async () => {
     const token = 'day-trading-agent-token-at-least-32-characters';
     const auth = createAuth({
         username: 'dashboard-user',
@@ -102,8 +102,8 @@ test('dedicated Alpaca Day Trading bearer reaches its scoped journal and entry r
                 },
                 body: { account_id: 999 },
             });
-            assert.equal(response.status, 400, path);
-            assert.equal(response.body.code, 'ALPACA_ACCOUNT_SCOPE_REQUIRED', path);
+            assert.equal(response.status, 403, path);
+            assert.equal(response.body.code, 'CAPABILITY_DENIED', path);
         }
     } finally {
         await new Promise((resolve) => server.close(resolve));
