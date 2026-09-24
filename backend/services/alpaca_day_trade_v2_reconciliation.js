@@ -139,9 +139,11 @@ async function ingestFill({ store, fill, now = () => new Date() }) {
         const code = error.code === 'ALPACA_V2_FILL_CONFLICT' ? 'FILL_CONFLICT' : 'FILL_INVALID';
         const plans = await store.listPlans();
         const match = matchPlan(fill, plans);
+        // REST re-reads the same bad activity every pass: a stable key keeps the immutable
+        // journal to one anomaly per plan (or per account-hour) instead of one per tick.
         await store.latchAttention({
             planId: match?.plan.id ?? null, code, occurredAt,
-            eventKey: `attention:${code}:${match?.plan.id ?? 'account'}:${occurredAt}`,
+            eventKey: match ? `plan:${match.plan.id}:attention:${code}` : `attention:${code}:account:${occurredAt.slice(0, 13)}`,
             detail: { symbol: fill.symbol },
         });
         return { outcome: 'conflict' };

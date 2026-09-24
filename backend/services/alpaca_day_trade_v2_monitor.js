@@ -11,6 +11,12 @@ const { buildTimeExitOrder, timeExitClientOrderId } = require('./alpaca_day_trad
 const NON_EXECUTABLE = ['filled', 'canceled', 'expired', 'rejected'];
 // Evidence that a flat, fully non-executable bracket's fills should have arrived by now.
 const FILL_EVIDENCE_GRACE_MS = 15 * 60_000;
+// A pending_submission plan this young may still have its entry POST in flight (the paper
+// client aborts after 10s); looking it up now would find nothing and latch a false alarm.
+const SUBMISSION_GRACE_MS = 60_000;
+// Unlinked plans the monitor may still resolve by exact client id. A latched submission stays
+// latched, but linking it lets the monitor recognize its bracket legs and fills as plan-owned.
+const RESOLVABLE_UNLINKED = ['pending_submission', 'submission_unknown', 'attention_required'];
 
 class BrokerUnreadable extends Error {}
 
@@ -31,6 +37,10 @@ function createV2Monitor({
 }) {
     async function read(fn) {
         try { return await fn(); } catch (_error) { throw new BrokerUnreadable('broker read failed'); }
+    }
+
+    function submissionInFlight(plan) {
+        return plan.state === 'pending_submission' && now().getTime() - new Date(plan.created_at).getTime() < SUBMISSION_GRACE_MS;
     }
 
     function hourKey() {
@@ -154,14 +164,12 @@ function createV2Monitor({
 
     async function managePlan(plan, state) {
         if (!plan.parent_order_id) {
-            if (['pending_submission', 'submission_unknown'].includes(plan.state)) {
-                const outcome = await resolvePlanByClientOrderId({ store, client, plan, now });
-                if (outcome !== 'linked') return;
-                plan = await store.getPlan(plan.id);
-                if (!plan.parent_order_id) return;
-            } else {
-                return latch('UNKNOWN_PLAN_LINKAGE', { plan });
-            }
+            if (!RESOLVABLE_UNLINKED.includes(plan.state)) return latch('UNKNOWN_PLAN_LINKAGE', { plan });
+            if (submissionInFlight(plan)) return undefined;
+            const outcome = await resolvePlanByClientOrderId({ store, client, plan, now });
+            if (outcome !== 'linked') return undefined;
+            plan = await store.getPlan(plan.id);
+            if (!plan.parent_order_id) return undefined;
         }
         if (plan.state === 'attention_required') return; // observed, never acted on
 
@@ -248,7 +256,7 @@ function createV2Monitor({
         const state = await store.getMonitorState();
         if (state.mode === 'disabled') return { skipped: true, exposure: false };
         for (const plan of await store.listNonterminalPlans()) {
-            if (!plan.parent_order_id && ['pending_submission', 'submission_unknown', 'attention_required'].includes(plan.state)) {
+            if (!plan.parent_order_id && RESOLVABLE_UNLINKED.includes(plan.state) && !submissionInFlight(plan)) {
                 await resolvePlanByClientOrderId({ store, client, plan, now });
             }
         }
@@ -258,4 +266,4 @@ function createV2Monitor({
     return { tick, startup };
 }
 
-module.exports = { createV2Monitor, easternDate, FILL_EVIDENCE_GRACE_MS };
+module.exports = { createV2Monitor, easternDate, FILL_EVIDENCE_GRACE_MS, SUBMISSION_GRACE_MS };

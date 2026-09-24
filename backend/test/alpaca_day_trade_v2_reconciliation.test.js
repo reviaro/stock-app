@@ -134,6 +134,18 @@ test('the same execution identity with divergent material facts latches attentio
     assert.strictEqual((await store.listFills())[0].qty, 10);
 });
 
+test('re-reading the same conflicting activity on later passes does not append another anomaly event', async () => {
+    await seedPlan();
+    await ingestFill({ store, fill: normalizeV2WebSocketFill(wsFill()), now: () => NOW });
+    const client = restClient([restFill({ qty: '9' })]);
+    await reconcileRestFills({ store, client, now: () => NOW });
+    await reconcileRestFills({ store, client, now: () => new Date(NOW.getTime() + 60_000) });
+    await reconcileRestFills({ store, client, now: () => new Date(NOW.getTime() + 120_000) });
+    const anomalies = (await store.listEvents()).filter((e) => e.event_type === 'anomaly');
+    assert.strictEqual(anomalies.length, 1);
+    assert.strictEqual(anomalies[0].reason_code, 'FILL_CONFLICT');
+});
+
 test('restart with fills present but a stale summary repairs the summary without duplicating events', async () => {
     const plan = await seedPlan();
     await ingestFill({ store, fill: normalizeV2WebSocketFill(wsFill()), now: () => NOW });

@@ -47,26 +47,28 @@ function stateFromParent(order) {
 
 async function resolvePlanByClientOrderId({ store, client, plan, now = () => new Date() }) {
     const occurredAt = now().toISOString();
+    // An already-latched plan keeps its original attention code: a still-missing order is the
+    // same unresolved incident, not a new one.
+    const latched = plan.state === 'attention_required';
     let lookup;
     try {
         lookup = await client.getOrderByClientOrderId(plan.client_order_id);
     } catch (_error) {
-        await store.latchAttention({ planId: plan.id, code: 'SUBMISSION_LOOKUP_FAILED', eventKey: `plan:${plan.id}:attention:SUBMISSION_LOOKUP_FAILED`, detail: { symbol: plan.symbol }, occurredAt });
+        if (!latched) await store.latchAttention({ planId: plan.id, code: 'SUBMISSION_LOOKUP_FAILED', eventKey: `plan:${plan.id}:attention:SUBMISSION_LOOKUP_FAILED`, detail: { symbol: plan.symbol }, occurredAt });
         return 'unresolved';
     }
     if (!lookup?.found || !lookup.order?.id) {
         // Never assume rejected: an order that cannot be found now may still surface later.
-        await store.latchAttention({ planId: plan.id, code: 'SUBMISSION_NOT_FOUND', eventKey: `plan:${plan.id}:attention:SUBMISSION_NOT_FOUND`, detail: { symbol: plan.symbol }, occurredAt });
+        if (!latched) await store.latchAttention({ planId: plan.id, code: 'SUBMISSION_NOT_FOUND', eventKey: `plan:${plan.id}:attention:SUBMISSION_NOT_FOUND`, detail: { symbol: plan.symbol }, occurredAt });
         return 'unresolved';
     }
     const order = lookup.order;
     const nextState = stateFromParent(order);
     if (String(order.symbol || '').toUpperCase() !== plan.symbol || order.side !== 'buy' || !nextState) {
-        await store.latchAttention({ planId: plan.id, code: 'SUBMISSION_MISMATCH', eventKey: `plan:${plan.id}:attention:SUBMISSION_MISMATCH`, detail: { symbol: plan.symbol }, occurredAt });
+        if (!latched) await store.latchAttention({ planId: plan.id, code: 'SUBMISSION_MISMATCH', eventKey: `plan:${plan.id}:attention:SUBMISSION_MISMATCH`, detail: { symbol: plan.symbol }, occurredAt });
         return 'unresolved';
     }
     // Linking is evidence, not a repair: a latched plan stays latched for the operator.
-    const latched = plan.state === 'attention_required';
     await store.updatePlan(plan.id, { ...linkPatchFromBrokerOrder(order), ...(latched ? {} : { state: nextState }) }, {
         events: [{
             event_key: `plan:${plan.id}:linked_by_client_id`, event_type: 'submission', action: 'linked_by_client_id',

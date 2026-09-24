@@ -339,6 +339,51 @@ test('startup resolves a pending_submission plan by client id before classifying
     assert.strictEqual((await store.getMonitorState()).attention_required, 0);
 });
 
+async function createUnlinkedPlan(occurredAt = '2026-09-23T14:00:00.000Z') {
+    const { plan } = await store.createPlan({
+        client_order_id: CID, symbol: 'NVDA', setup: 'orb', catalyst: 'earnings', thesis: 't', invalidation: 'i',
+        planned_qty: 10, planned_entry_price: 100.5, planned_stop: 98, planned_target: 104, planned_risk_dollars: 25,
+        exit_deadline: '2026-09-23T19:30:00.000Z', occurred_at: occurredAt,
+    });
+    return plan;
+}
+
+test('a tick links a latched submission once the broker shows it, keeps the original latch, and never re-codes it', async () => {
+    const plan = await createUnlinkedPlan();
+    await store.updatePlan(plan.id, { state: 'submission_unknown' });
+    await store.latchAttention({ planId: plan.id, code: 'SUBMISSION_UNKNOWN', eventKey: `plan:${plan.id}:attention:SUBMISSION_UNKNOWN` });
+    const broker = fakeBroker();
+    await monitor(broker, BEFORE_DEADLINE).tick();
+    const linked = await store.getPlan(plan.id);
+    assert.strictEqual(linked.parent_order_id, 'parent-1');
+    assert.strictEqual(linked.stop_order_id, 'stop-1');
+    assert.strictEqual(linked.state, 'attention_required');
+    assert.strictEqual(linked.attention_code, 'SUBMISSION_UNKNOWN');
+    assert.strictEqual((await store.getMonitorState()).attention_code, 'SUBMISSION_UNKNOWN');
+    const codes = (await eventsOf('anomaly')).map((e) => e.reason_code);
+    assert.ok(!codes.includes('UNKNOWN_PLAN_LINKAGE'), codes.join(','));
+    assert.ok(!codes.includes('UNEXPECTED_ORDER'), codes.join(','));
+    assert.deepStrictEqual(broker.mutations, []);
+});
+
+test('a pending_submission plan whose entry POST may still be in flight is left alone by tick and startup', async () => {
+    const createdAt = new Date(BEFORE_DEADLINE.getTime() - 5_000);
+    const plan = await createUnlinkedPlan(createdAt.toISOString());
+    const broker = fakeBroker();
+    broker.orders.clear(); // the POST has not reached the broker yet
+    broker.positions.clear();
+    broker.activities.length = 0;
+    let lookups = 0;
+    const lookup = broker.client.getOrderByClientOrderId;
+    broker.client.getOrderByClientOrderId = async (...args) => { lookups += 1; return lookup(...args); };
+    const m = monitor(broker, BEFORE_DEADLINE);
+    await m.startup();
+    await m.tick();
+    assert.strictEqual(lookups, 0);
+    assert.strictEqual((await store.getPlan(plan.id)).state, 'pending_submission');
+    assert.strictEqual((await store.getMonitorState()).attention_required, 0);
+});
+
 test('cadence: 60s while any exposure exists, 300s while flat', () => {
     assert.strictEqual(nextDelayMs({ exposure: true }), 60_000);
     assert.strictEqual(nextDelayMs({ exposure: false }), 300_000);
