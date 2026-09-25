@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { computeHoldings, computeCashBalance } = require('./simulator_ledger');
 const { validateExecutionQuote } = require('./execution_quote_policy');
+const { validateValuationQuote } = require('./valuation_quote_policy');
 
 const schema = [
     `CREATE TABLE IF NOT EXISTS sim_risk_policy_versions (
@@ -94,7 +95,7 @@ function valueLedger(rows, quotes) {
     const missing = [];
     const values = {};
     for (const [symbol, position] of Object.entries(holdings)) {
-        const valid = validateExecutionQuote(quotes[symbol], { expectedSymbol: symbol });
+        const valid = validateValuationQuote(quotes[symbol], { expectedSymbol: symbol });
         if (!valid.valid) missing.push(symbol);
         else values[symbol] = position.shares * quotes[symbol].price;
     }

@@ -13,6 +13,7 @@ process.env.DB_PATH_OVERRIDE = TEST_DB;
 const Module = require('module');
 const _originalLoad = Module._load;
 let quoteSeq = 0;
+let fundQuoteOverrides = {};
 Module._load = function(request, parent, isMain) {
     if (request.includes('hybrid_market_data')) {
         return {
@@ -22,6 +23,12 @@ Module._load = function(request, parent, isMain) {
                 timestamp: new Date(Date.now() - 30_000).toISOString(),
                 market_state: 'REGULAR',
                 data_source: 'alpaca_iex',
+                ...(symbol === 'FXAIX' ? {
+                    symbol, currency: 'USD', instrument_type: 'MUTUALFUND',
+                    data_source: 'yfinance', market_state: 'CLOSED',
+                    timestamp: new Date(Date.now() - 24 * 3600000).toISOString(),
+                    ...fundQuoteOverrides,
+                } : {}),
             }),
             createAlpacaMarketDataSource: () => { throw new Error('not configured'); },
         };
@@ -50,6 +57,7 @@ before(async () => {
 });
 
 beforeEach(async () => {
+    fundQuoteOverrides = {};
     await db.deleteAllSimTransactions(1);
     await db.deleteAllSimTransactions(2);
 });
@@ -91,6 +99,34 @@ test('evaluated trade ignores caller price and uses server quote', async () => {
     assert.strictEqual(txns.body.data[0].price, 200);
     const order = await db.getSimOrder(1, 'exec-1');
     assert.strictEqual(order.quote.price, 200);
+});
+
+test('ADBE entry can value an existing FXAIX holding at daily NAV', async () => {
+    await db.addSimTransaction({ account_id: 1, type: 'deposit', amount: 10000, txn_date: '2026-09-23' });
+    await db.addSimTransaction({ account_id: 1, type: 'buy', symbol: 'FXAIX', shares: 10, price: 200, txn_date: '2026-09-23' });
+    const review = await request('GET', '/api/simulator/review?account_id=1');
+    assert.equal(review.body.data.valuation_complete, true);
+    const body = { account_id: 1, type: 'buy', symbol: 'ADBE', shares: 4, client_order_id: 'adbe-with-fund' };
+    const result = await request('POST', '/api/simulator/trade', body);
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+    assert.equal((await request('POST', '/api/simulator/trade', body)).body.duplicate, true);
+    assert.equal((await db.listSimTransactions(1)).filter((t) => t.symbol === 'ADBE').length, 1);
+    assert.equal((await db.getSimOrder(1, body.client_order_id)).quote.source, 'alpaca_iex');
+});
+
+test('expired fund NAV blocks entry atomically even when review has numeric prices', async () => {
+    await db.addSimTransaction({ account_id: 1, type: 'deposit', amount: 10000, txn_date: '2026-09-23' });
+    await db.addSimTransaction({ account_id: 1, type: 'buy', symbol: 'FXAIX', shares: 10, price: 200, txn_date: '2026-09-23' });
+    fundQuoteOverrides = { timestamp: new Date(Date.now() - 5 * 24 * 3600000).toISOString() };
+    const before = await db.listSimTransactions(1);
+    const body = { account_id: 1, type: 'buy', symbol: 'ADBE', shares: 4, client_order_id: 'adbe-expired-fund' };
+    for (let attempt = 0; attempt < 2; attempt++) {
+        const result = await request('POST', '/api/simulator/trade', body);
+        assert.equal(result.status, 503);
+        assert.equal(result.body.code, 'SIM_RISK_DATA_UNAVAILABLE');
+    }
+    assert.equal(await db.getSimOrder(1, body.client_order_id), null);
+    assert.deepEqual(await db.listSimTransactions(1), before);
 });
 
 test('evaluated trade replays idempotently on same client_order_id', async () => {

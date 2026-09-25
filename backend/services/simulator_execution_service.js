@@ -19,6 +19,7 @@
 
 const db = require('../database/db');
 const { obtainExecutionQuote } = require('./execution_quote_policy');
+const { obtainValuationQuote } = require('./valuation_quote_policy');
 const { getDefaultHybridQuote } = require('./hybrid_market_data');
 const { normalizeTradePlan } = require('./trade_journal');
 
@@ -120,7 +121,7 @@ async function executeSimulatorTradeIntent(input) {
     const { computeHoldings } = require('./simulator_ledger');
     const holdings = computeHoldings(await db.listSimTransactions(accountId));
     await Promise.all(Object.keys(holdings).filter((held) => held !== symbol).map(async (held) => {
-        const mark = await obtainExecutionQuote(held, { getHybridQuote: getDefaultHybridQuote });
+        const mark = await obtainValuationQuote(held, { getHybridQuote: getDefaultHybridQuote });
         if (mark.valid) order.valuation_quotes[held] = mark.quote;
     }));
     if (type === 'buy' && input?.trade_plan) {
