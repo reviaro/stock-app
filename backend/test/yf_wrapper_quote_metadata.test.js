@@ -28,6 +28,7 @@ class FakeTicker:
         'shortName': 'Example',
         'regularMarketTime': 1786464000,
         'marketState': 'REGULAR',
+        'quoteType': 'MUTUALFUND',
     }
     def history(self, **kwargs):
         return pd.DataFrame([{
@@ -39,6 +40,7 @@ yf_wrapper.yf.Ticker = lambda _symbol: FakeTicker()
 print(json.dumps(yf_wrapper.get_stock_info('XYZ')))
 `);
     assert.strictEqual(result.data.marketState, 'REGULAR');
+    assert.strictEqual(result.data.quoteType, 'MUTUALFUND');
     assert.match(result.data.timestamp, /^\d{4}-\d{2}-\d{2}T/);
     assert.strictEqual(result.data.isDemo, false);
 });

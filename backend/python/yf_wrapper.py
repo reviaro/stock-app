@@ -435,6 +435,7 @@ def get_stock_info(symbol):
                 'currency': info.get('currency', 'USD'),
                 'isDemo': False,
                 'timestamp': _utc_iso_from_epoch(info.get('regularMarketTime')),
+                'quoteType': info.get('quoteType'),
                 'marketState': info.get('marketState', 'UNKNOWN'),
                 'price': price,
                 'change': change,

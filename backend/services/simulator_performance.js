@@ -2,7 +2,7 @@
 
 const controls = require('./simulator_controls');
 const { computeHoldings } = require('./simulator_ledger');
-const { obtainExecutionQuote } = require('./execution_quote_policy');
+const { obtainValuationQuote } = require('./valuation_quote_policy');
 const { getDefaultHybridQuote } = require('./hybrid_market_data');
 const db = () => require('../database/db');
 
@@ -12,7 +12,7 @@ async function quotesFor(accountId, extraSymbols = []) {
     if (active) symbols.add(JSON.parse(active.config_json).benchmark_symbol);
     const quotes = {};
     await Promise.all([...symbols].map(async (symbol) => {
-        const quote = await obtainExecutionQuote(symbol, { getHybridQuote: getDefaultHybridQuote });
+        const quote = await obtainValuationQuote(symbol, { getHybridQuote: getDefaultHybridQuote });
         if (quote.valid) quotes[symbol] = quote.quote;
     }));
     return quotes;

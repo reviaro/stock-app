@@ -83,6 +83,13 @@ function normalizeQuote(quote, source) {
         timestamp: quote.timestamp,
         market_state: quote.marketState || null,
         data_source: quote.source || source,
+        ...(quote.quoteType === 'MUTUALFUND' ? {
+            instrument_type: quote.quoteType,
+            symbol: quote.symbol,
+            currency: quote.currency,
+            is_demo: quote.is_demo === true || quote.isDemo === true,
+            stale: quote.stale === true || quote.meta?.stale === true,
+        } : {}),
     };
 }
 
@@ -113,7 +120,10 @@ async function getDefaultHybridQuote(symbol) {
     }
     return getHybridQuote(symbol, {
         alpacaSource,
-        yfinanceSource: async (ticker) => (await pybridge.getStockInfo(ticker))?.data || {},
+        yfinanceSource: async (ticker) => {
+            const info = await pybridge.getStockInfo(ticker);
+            return { ...info?.data, ...(info?.meta?.stale ? { stale: true } : {}) };
+        },
     });
 }
 

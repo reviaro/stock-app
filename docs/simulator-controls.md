@@ -59,6 +59,12 @@ Limits constrain entries; long-only sells still require valid execution quotes
 and sufficient shares, but do not require complete marks for other positions.
 Manual operator records remain non-evaluated and are prohibited during active runs.
 
+Existing mutual-fund holdings (provider type `MUTUALFUND`) use USD yfinance daily
+NAV marks for valuation, labeled `daily_nav` with their original provider time.
+These marks must be retrieved within three minutes and dated within four calendar
+days to cover long weekends. This exception applies only to valuation; execution
+prices and other holdings retain the regular-session, three-minute quote rule.
+
 These permissions enforce the HTTP boundary. An agent with the server owner's
 unrestricted shell, database, or operator-secret access can bypass that boundary.
 Strong isolation requires separate OS/service identities and restricted tools.
