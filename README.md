@@ -11,9 +11,13 @@ sample database.
 |---|---|
 | [![Fictional holdings, P&L, and a position-limit breach](docs/screenshots/02-portfolio.png)](docs/screenshots/02-portfolio.png) | [![Separate simulator sleeves and fictional trade history](docs/screenshots/04-simulator.png)](docs/screenshots/04-simulator.png) |
 
+[![AI analyst using the portfolio risk tool to explain a position-limit breach](docs/screenshots/03-ai-analyst.png)](docs/screenshots/03-ai-analyst.png)
+
+Live OpenAI response on the fictional account: the risk tool reports MSFT at
+18.15% against a 15% position limit. No trades were requested or executed.
+
 [![Portfolio Lab comparing five allocation methods with walk-forward results](docs/screenshots/05-portfolio-lab.png)](docs/screenshots/05-portfolio-lab.png)
 
-**AI analyst screenshot:** pending a live tool-use run with a sample-only API key.
 **Two-minute walkthrough:** recording pending. There is no hosted demo; use the
 [local sample setup](#local-sample-portfolio) to explore it yourself.
 
