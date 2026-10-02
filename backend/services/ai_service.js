@@ -1,5 +1,3 @@
-const { google } = require('@ai-sdk/google');
-const { createOpenAI } = require('@ai-sdk/openai');
 const { tool } = require('ai');
 const { z } = require('zod');
 const pybridge = require('./pybridge');
@@ -14,19 +12,6 @@ const {
     computeRealizedPnl,
 } = require('./simulator_ledger');
 
-const model = google('gemini-2.5-flash-preview-04-17');
-const backupModel = google('gemini-2.5-flash');
-
-// LM Studio local fallback — OpenAI-compatible API running locally
-// Set LMSTUDIO_BASE_URL in .env (default: http://localhost:1234/v1)
-// Set LMSTUDIO_MODEL to match the model loaded in LM Studio
-// Common values: qwen2.5-7b-instruct, qwen3-8b, llama-3.2-8b-instruct
-const lmstudio = createOpenAI({
-  baseURL: process.env.LMSTUDIO_BASE_URL || 'http://localhost:1234/v1',
-  apiKey: 'lm-studio', // LM Studio doesn't require a real key
-});
-const localModel = lmstudio(process.env.LMSTUDIO_MODEL || 'qwen2.5-7b-instruct');
-
 const simSleeveParam = z.number().int().positive().optional()
   .describe('Simulator sleeve id: 1 = long-term investing (default), 2 = day trading');
 
@@ -40,7 +25,7 @@ const tools = {
   getStockInfo: tool({
     description:
       'Fetches basic stock information including price, market cap, company name, sector, and industry for a given ticker symbol.',
-    parameters: z.object({
+    inputSchema: z.object({
       symbol: z.string().describe('The stock ticker symbol (e.g. AAPL, MSFT)'),
     }),
     execute: async (args) => {
@@ -53,7 +38,7 @@ const tools = {
   getCanslimAnalysis: tool({
     description:
       'Fetches CAN SLIM scores and fundamental data for a stock symbol. Returns letter grades (A–F) for each of the 7 CAN SLIM criteria: Current Earnings, Annual Earnings, New Products/Services, Supply/Demand, Leader/Laggard, Institutional Sponsorship, and Market Direction.',
-    parameters: z.object({
+    inputSchema: z.object({
       symbol: z.string().describe('The stock ticker symbol (e.g. AAPL, MSFT)'),
     }),
     execute: async (args) => {
@@ -66,7 +51,7 @@ const tools = {
   getTechnicalIndicators: tool({
     description:
       'Fetches key technical analysis indicators for a stock symbol, including RSI, MACD, moving averages (50-day, 200-day), Bollinger Bands, and volume trends.',
-    parameters: z.object({
+    inputSchema: z.object({
       symbol: z.string().describe('The stock ticker symbol (e.g. AAPL, MSFT)'),
     }),
     execute: async (args) => {
@@ -79,7 +64,7 @@ const tools = {
   getMarketDirection: tool({
     description:
       'Fetches the current overall market direction assessment based on Follow-Through Day (FTD) analysis of the Nasdaq Composite. Returns whether the market is in a confirmed uptrend or not, along with supporting evidence.',
-    parameters: z.object({}),
+    inputSchema: z.object({}),
     execute: async () => {
       return await pybridge.getMarketDirection();
     },
@@ -88,7 +73,7 @@ const tools = {
   getNews: tool({
     description:
       'Fetches the latest news articles for a specific stock symbol or the broader market. For general market news, use index symbols like ^GSPC (S&P 500) or SPY. Returns a list of recent article titles, publishers, links, and publish timestamps.',
-    parameters: z.object({
+    inputSchema: z.object({
       symbol: z.string().describe('The stock ticker symbol or index (e.g. AAPL, MSFT, ^GSPC)').optional(),
     }),
     execute: async (args) => {
@@ -100,7 +85,7 @@ const tools = {
   getMemo: tool({
     description:
       'Fetches the user\'s saved research memo for a stock, including their thesis, fair-value band, buy-below price, sell rule, invalidation criteria, risks, and conviction level. Returns null if no memo exists.',
-    parameters: z.object({
+    inputSchema: z.object({
       symbol: z.string().describe('The stock ticker symbol (e.g. AAPL, MSFT)'),
     }),
     execute: async (args) => {
@@ -114,7 +99,7 @@ const tools = {
   getQualityMetrics: tool({
     description:
       'Fetches Buffett-style business quality metrics for a stock, including ROIC, FCF margin, debt/equity, interest coverage, earnings consistency, gross margin stability, revenue CAGR, and a composite quality score.',
-    parameters: z.object({
+    inputSchema: z.object({
       symbol: z.string().describe('The stock ticker symbol (e.g. AAPL, MSFT)'),
     }),
     execute: async (args) => {
@@ -127,7 +112,7 @@ const tools = {
   getRiskRules: tool({
     description:
       'Fetches the current portfolio risk rules including max position size, max sector size, max risk per trade, and target cash percentage.',
-    parameters: z.object({}),
+    inputSchema: z.object({}),
     execute: async () => {
       return { status: 'success', data: await dbModule.getRiskRules() };
     },
@@ -136,7 +121,7 @@ const tools = {
   checkPortfolioRisk: tool({
     description:
       'Checks the current portfolio against risk rules and returns any active breaches for position size, sector concentration, risk per trade, and cash target.',
-    parameters: z.object({}),
+    inputSchema: z.object({}),
     execute: async () => {
       const [transactions, rules, stops] = await Promise.all([
         dbModule.listTransactions ? dbModule.listTransactions() : Promise.resolve([]),
@@ -180,7 +165,7 @@ const tools = {
 
   simulator_get_account: tool({
     description: 'Fetches a paper trading simulator sleeve: cash balance, realized P&L, and configured tax bracket. For live portfolio value and unrealized P&L, use simulator_get_holdings instead.',
-    parameters: z.object({ account_id: simSleeveParam }),
+    inputSchema: z.object({ account_id: simSleeveParam }),
     execute: async ({ account_id = 1 } = {}) => {
       try {
         const account = await requireSimSleeve(account_id);
@@ -196,7 +181,7 @@ const tools = {
 
   simulator_get_holdings: tool({
     description: 'Lists all open positions in a paper trading simulator sleeve with shares, average cost, current price (live), unrealized P&L, and holding period.',
-    parameters: z.object({ account_id: simSleeveParam }),
+    inputSchema: z.object({ account_id: simSleeveParam }),
     execute: async ({ account_id = 1 } = {}) => {
       try {
         await requireSimSleeve(account_id);
@@ -268,7 +253,7 @@ const tools = {
 
   simulator_tax_preview: tool({
     description: 'Returns a detailed tax breakdown for selling a given number of shares in the simulator: proceeds, cost basis, gross gain, ST/LT split, total tax owed, after-tax net gain, and whether it is worth selling. Uses FIFO lot matching and the account\'s configured US tax bracket. Price is fetched live from the market.',
-    parameters: z.object({
+    inputSchema: z.object({
       symbol: z.string().describe('Ticker symbol'),
       shares: z.number().describe('Shares to sell'),
       account_id: simSleeveParam,
@@ -298,7 +283,7 @@ const tools = {
 
   simulator_get_transactions: tool({
     description: 'Returns the full trade history for a paper trading simulator sleeve: all buys, sells, deposits, and withdrawals.',
-    parameters: z.object({ account_id: simSleeveParam }),
+    inputSchema: z.object({ account_id: simSleeveParam }),
     execute: async ({ account_id = 1 } = {}) => {
       try {
         await requireSimSleeve(account_id);
@@ -312,7 +297,7 @@ const tools = {
 
   simulator_deposit: tool({
     description: 'Adds cash to a paper trading simulator sleeve.',
-    parameters: z.object({
+    inputSchema: z.object({
       amount: z.number().describe('Dollar amount to deposit'),
       account_id: simSleeveParam,
     }),
@@ -334,7 +319,7 @@ const tools = {
 
   simulator_reset: tool({
     description: 'Wipes all transactions in one paper trading simulator sleeve, resetting its cash to $0. Other sleeves are untouched. Use with caution.',
-    parameters: z.object({ account_id: simSleeveParam }),
+    inputSchema: z.object({ account_id: simSleeveParam }),
     execute: async ({ account_id = 1 } = {}) => {
       try {
         await requireSimSleeve(account_id);
@@ -385,4 +370,4 @@ Fields you cannot justify from the data MUST be null (numbers) or empty string (
   pressureTestSystem: `You are a skeptical bear who will pressure-test the user's investment thesis. You will receive the user's current memo and the latest stock info/news. Write a focused bear case with 3–5 specific, falsifiable risks that would invalidate the thesis, and 2–3 conditions under which you would become bullish. Output as markdown only. Do not hedge with "on the other hand".`,
 };
 
-module.exports = { model, backupModel, localModel, tools, chatTools, memoPrompts };
+module.exports = { tools, chatTools, memoPrompts };

@@ -1,6 +1,8 @@
 const express = require('express');
-const { streamText, generateText, convertToModelMessages } = require('ai');
-const { model, backupModel, localModel, tools, chatTools, memoPrompts } = require('../services/ai_service');
+const { convertToModelMessages, stepCountIs } = require('ai');
+const { getAIModels, AIConfigurationError } = require('../services/ai_models');
+const { generateWithModels, streamWithModels } = require('../services/ai_generation');
+const { tools, chatTools, memoPrompts } = require('../services/ai_service');
 const pybridgeAI = require('../services/pybridge');
 const { getMode, validateInputs } = require('../services/ai_modes');
 const aiContext = require('../services/ai_context');
@@ -86,16 +88,10 @@ For **macro/market analysis**, lead with:
 For **quick questions**, give a sharp, direct answer with essential context.
 
 ---
-## MANDATORY OUTPUT RULE — READ THIS FIRST
-Your response MUST always contain substantial written text. The rule is simple:
-
-**Write your analysis TEXT first. Then call a tool if live data is needed.**
-
-The correct sequence for any stock question:
-1. Write your full APEX analysis in text (verdict, thesis, key metrics, bull/bear cases, risks, catalysts)
-2. THEN optionally call getStockInfo once to show the live price chart alongside your text
-
-A response that is only a tool call with no written text is a complete failure. The chart is supplementary — your written analysis is the deliverable. Never let a tool call replace your commentary.
+## DATA AND RESPONSE RULES
+When current data is needed, call the relevant tools before giving conclusions.
+Use the returned evidence to write a clear answer. Never invent quotes or risk
+results, and never stop at a tool call without explaining the result to the user.
 
 ---
 ## BEHAVIORAL RULES
@@ -104,7 +100,7 @@ A response that is only a tool call with no written text is a complete failure. 
 - When comparing companies, use standardized metrics and apples-to-apples analysis.
 - If asked about a stock to buy, provide analysis, not a recommendation — remind users you are an AI, not a licensed financial advisor, and that they should consult a professional for personalized advice.
 - Proactively flag when a question is too vague and ask clarifying questions (e.g., time horizon, risk tolerance, portfolio context).
-- Think out loud when doing complex analysis — show your reasoning.
+- Give a concise explanation of the evidence, assumptions, and conclusion.
 
 ---
 ## DASHBOARD & DASHBOARD DATA CONTROLS
@@ -141,6 +137,15 @@ router.delete('/history', async (req, res) => {
   }
 });
 
+router.use(['/chat', '/memo-draft', '/pressure-test', '/mode'], (req, res, next) => {
+  try {
+    req.aiModels = getAIModels();
+    next();
+  } catch (err) {
+    res.status(503).json({ error: err instanceof AIConfigurationError ? err.message : 'AI configuration unavailable.' });
+  }
+});
+
 router.post('/chat', async (req, res) => {
   try {
     const { messages, sessionId = 'default' } = req.body;
@@ -167,58 +172,15 @@ router.post('/chat', async (req, res) => {
     // Always use the full tools set here so historical getCanslimAnalysis messages
     // in the conversation history are decoded correctly.
     const modelMessages = await convertToModelMessages(messages, { tools });
-    console.log('[AI] chatTools (available to model):', Object.keys(chatTools));
-
-    // Model fallback chain: Gemini Flash → Gemini 2.5 Flash → LM Studio (local Qwen)
-    const models = [model, backupModel, localModel];
-    const modelLabels = ['gemini-primary', 'gemini-backup', 'lmstudio-local'];
-
-    for (let i = 0; i < models.length; i++) {
-      const currentModel = models[i];
-      const label = modelLabels[i];
-      try {
-        const result = streamText({
-          model: currentModel,
-          system: dynamicPrompt,
-          messages: modelMessages,
-          tools: chatTools,
-          maxSteps: 5,
-          onStepFinish: ({ text, finishReason, toolCalls }) => {
-            console.log(`[AI][${label}] step finish — reason: ${finishReason}, textLen: ${text.length}, tools: ${toolCalls?.map(t => t.toolName).join(',') || 'none'}`);
-          },
-          onFinish: ({ text }) => {
-            if (text) {
-              db.saveChatMessage('assistant', text, sessionId).catch(() => {});
-            }
-          },
-        });
-
-        // pipeUIMessageStreamToResponse sends headers immediately.
-        // consumeStream() drives the lazy API call — 429/rate-limit errors surface here.
-        result.pipeUIMessageStreamToResponse(res);
-        try {
-          await result.consumeStream();
-        } catch (streamErr) {
-          // Stream error after headers already sent — can't retry or change status code.
-          console.error(`[AI][${label}] Stream error:`, streamErr.message);
-          return;
-        }
-        return; // Success
-      } catch (err) {
-        console.error(`[AI][${label}] Failed:`, err.message);
-        if (res.headersSent) {
-          return;
-        }
-        // Headers not sent yet — try next model in the chain
-        continue;
-      }
-    }
-
-    // All models failed
-    if (!res.headersSent) {
-      res.status(503).json({ error: 'All AI models are currently unavailable. Please try again later.' });
-    }
-    return;
+    await streamWithModels(res, req.aiModels, {
+      system: dynamicPrompt,
+      messages: modelMessages,
+      tools: chatTools,
+      stopWhen: stepCountIs(5),
+      onFinish: ({ text }) => {
+        if (text) db.saveChatMessage('assistant', text, sessionId).catch(() => {});
+      },
+    });
   } catch (err) {
     console.error('[AI Route] Error:', err.message);
     if (!res.headersSent) {
@@ -242,24 +204,10 @@ router.post('/memo-draft', async (req, res) => {
 
     const userPrompt = `Symbol: ${symbol}\n\nInfo:\n${JSON.stringify(info, null, 2)}\n\nQuality:\n${JSON.stringify(quality, null, 2)}\n\nTechnicals:\n${JSON.stringify(tech, null, 2)}\n\nNews:\n${JSON.stringify(news, null, 2)}`;
 
-    const models = [model, backupModel, localModel];
-    let text = '';
-    let lastError = null;
-    for (const currentModel of models) {
-      try {
-        const result = await generateText({
-          model: currentModel,
-          system: memoPrompts.draftSystem,
-          prompt: userPrompt,
-        });
-        text = result.text;
-        lastError = null;
-        break;
-      } catch (err) {
-        lastError = err;
-      }
-    }
-    if (lastError) throw lastError;
+    const { text } = await generateWithModels(req.aiModels, {
+      system: memoPrompts.draftSystem,
+      prompt: userPrompt,
+    });
 
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('AI draft did not return JSON');
@@ -285,24 +233,10 @@ router.post('/pressure-test', async (req, res) => {
 
     const userPrompt = `Current memo:\n${JSON.stringify(memo, null, 2)}\n\nLatest info:\n${JSON.stringify(info, null, 2)}\n\nNews:\n${JSON.stringify(news, null, 2)}`;
 
-    const models = [model, backupModel, localModel];
-    let text = '';
-    let lastError = null;
-    for (const currentModel of models) {
-      try {
-        const result = await generateText({
-          model: currentModel,
-          system: memoPrompts.pressureTestSystem,
-          prompt: userPrompt,
-        });
-        text = result.text;
-        lastError = null;
-        break;
-      } catch (err) {
-        lastError = err;
-      }
-    }
-    if (lastError) throw lastError;
+    const { text } = await generateWithModels(req.aiModels, {
+      system: memoPrompts.pressureTestSystem,
+      prompt: userPrompt,
+    });
 
     res.json({ status: 'success', data: { bear_case: text } });
   } catch (err) {
@@ -347,29 +281,13 @@ router.post('/mode/:modeName', async (req, res) => {
       },
     ];
 
-    const models = [model, backupModel, localModel];
-
-    for (const currentModel of models) {
-      try {
-        const result = streamText({
-          model: currentModel,
-          system: mode.systemPrompt,
-          messages: modelMessages,
-          onFinish: ({ text }) => {
-            if (text) db.saveChatMessage('assistant', text, sessionId).catch(() => {});
-          },
-        });
-        result.pipeUIMessageStreamToResponse(res);
-        await result.consumeStream();
-        return;
-      } catch (err) {
-        if (res.headersSent) return;
-      }
-    }
-
-    if (!res.headersSent) {
-      res.status(503).json({ error: 'All AI models are currently unavailable.' });
-    }
+    await streamWithModels(res, req.aiModels, {
+      system: mode.systemPrompt,
+      messages: modelMessages,
+      onFinish: ({ text }) => {
+        if (text) db.saveChatMessage('assistant', text, sessionId).catch(() => {});
+      },
+    });
   } catch (err) {
     console.error('[AI mode route] Error:', err.message);
     if (!res.headersSent) res.status(500).json({ error: 'Mode service error.' });

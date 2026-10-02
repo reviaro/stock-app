@@ -82,6 +82,15 @@ test('normal mode keeps existing configuration; sample mode rejects missing path
     }
 });
 
+test('sample AI providers use only explicit sample settings, never inherited cloud credentials', () => {
+    const settings = { AI_PROVIDER: 'anthropic', AI_MODEL: 'sample-model', AI_LOCAL_FALLBACK: 'false',
+        OPENAI_API_KEY: 'sample-openai', ANTHROPIC_API_KEY: 'sample-anthropic' };
+    const inherited = buildSampleEnvironment(settings);
+    for (const key of Object.keys(settings)) assert.equal(inherited[key], undefined);
+    const explicit = buildSampleEnvironment({}, settings);
+    for (const [key, value] of Object.entries(settings)) assert.equal(explicit[key], value);
+});
+
 test('sample lock blocks a second server or seed and can be released', (t) => {
     const file = path.join(scratch(t), 'sample.db');
     const release = acquireSampleLock(file);
