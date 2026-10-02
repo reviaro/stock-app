@@ -1,4 +1,7 @@
-require('dotenv').config();
+// The explicit sample launcher supplies its own environment; never import .env.
+if (process.env.SAMPLE_DATA !== '1') require('dotenv').config();
+const { validateSampleEnvironment, verifySampleDatabase, acquireSampleLock } = require('./services/sample_mode');
+validateSampleEnvironment();
 const express = require('express');
 const cors = require('cors');
 const net = require('node:net');
@@ -132,21 +135,47 @@ function resolveListenHost(env = process.env) {
 }
 
 async function start() {
+    let releaseSampleLock;
     try {
+        if (validateSampleEnvironment()) {
+            releaseSampleLock = acquireSampleLock(process.env.DB_PATH_OVERRIDE);
+            await verifySampleDatabase(process.env.DB_PATH_OVERRIDE);
+        }
         const auth = createAuthFromEnv();
         const app = createApp({ auth });
         await db.initDb();
         console.log('Database initialized');
 
-        initUniverseScheduler();
-        initSnapshotScheduler();
-        require('./services/simulator_performance').initSimulatorPerformanceScheduler();
+        if (process.env.SAMPLE_DATA === '1') {
+            console.log('Sample mode: background refresh jobs and universe warm-up are disabled');
+        } else {
+            initUniverseScheduler();
+            initSnapshotScheduler();
+            require('./services/simulator_performance').initSimulatorPerformanceScheduler();
+        }
 
         const host = resolveListenHost();
-        return app.listen(PORT, host, () => {
+        const server = app.listen(PORT, host, () => {
             console.log(`Stock Dashboard running on ${host}:${PORT}`);
         });
+        if (releaseSampleLock) {
+            process.once('exit', releaseSampleLock);
+            const stopSample = () => {
+                server.close(() => process.exit(0));
+                setTimeout(() => process.exit(0), 5000).unref();
+            };
+            process.once('SIGINT', stopSample);
+            process.once('SIGTERM', stopSample);
+            server.once('close', () => {
+                process.removeListener('exit', releaseSampleLock);
+                process.removeListener('SIGINT', stopSample);
+                process.removeListener('SIGTERM', stopSample);
+                releaseSampleLock();
+            });
+        }
+        return server;
     } catch (err) {
+        releaseSampleLock?.();
         console.error('Failed to start server:', err);
         process.exitCode = 1;
         throw err;

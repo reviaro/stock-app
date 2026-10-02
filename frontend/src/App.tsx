@@ -13,7 +13,7 @@ type Tab = 'dashboard' | 'opportunities' | 'simulator' | 'research-lab' | 'portf
 type AuthState =
   | { status: 'loading' }
   | { status: 'guest'; error?: string }
-  | { status: 'authenticated'; username: string }
+  | { status: 'authenticated'; username: string; sampleData: boolean }
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
@@ -25,7 +25,7 @@ const TABS: { id: Tab; label: string }[] = [
 ]
 
 function LoginPage({ onAuthenticated, initialError }: {
-  onAuthenticated: (username: string) => void
+  onAuthenticated: (username: string, sampleData: boolean) => void
   initialError?: string
 }) {
   const [username, setUsername] = useState('dashboard-user')
@@ -49,7 +49,7 @@ function LoginPage({ onAuthenticated, initialError }: {
         throw new Error(json.error || 'Unable to sign in')
       }
       setPassword('')
-      onAuthenticated(json.data.username)
+      onAuthenticated(json.data.username, json.data.sampleData === true)
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : 'Unable to sign in')
     } finally {
@@ -114,7 +114,7 @@ function App() {
         const json = await response.json()
         if (!active) return
         if (response.ok && json.data?.authenticated) {
-          setAuth({ status: 'authenticated', username: json.data.username })
+          setAuth({ status: 'authenticated', username: json.data.username, sampleData: json.data.sampleData === true })
         } else {
           setAuth({ status: 'guest' })
         }
@@ -138,7 +138,7 @@ function App() {
     return <main className="min-h-screen flex items-center justify-center bg-background text-sm text-muted-foreground">Securing dashboard…</main>
   }
   if (auth.status === 'guest') {
-    return <LoginPage initialError={auth.error} onAuthenticated={(username) => setAuth({ status: 'authenticated', username })} />
+    return <LoginPage initialError={auth.error} onAuthenticated={(username, sampleData) => setAuth({ status: 'authenticated', username, sampleData })} />
   }
 
   return (
@@ -160,6 +160,7 @@ function App() {
           </button>
         ))}
         <div className="ml-auto flex items-center gap-3 pb-1.5 pl-4 text-xs text-muted-foreground">
+          {auth.sampleData && <span className="whitespace-nowrap rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 font-medium text-primary">Sample data</span>}
           <span>{auth.username}</span>
           <button
             type="button"

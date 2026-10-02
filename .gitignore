@@ -27,6 +27,7 @@ __pycache__/
 .env.*
 !.env.example
 !**/.env.example
+!backend/.env.sample.example
 *.pem
 *.key
 *.p12

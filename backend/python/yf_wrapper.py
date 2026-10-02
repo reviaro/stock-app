@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
+from database_path import get_database_path
 
 def _utc_iso_from_epoch(value):
     """Convert a provider epoch timestamp to a stable UTC ISO string."""
@@ -563,7 +564,7 @@ def get_rs_rating_from_cache(symbol):
     """Returns (rs_rating: int 1-99, cache_stale: bool)."""
     import sqlite3
     import os
-    DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'database', 'stocks.db')
+    DB_PATH = get_database_path()
     try:
         if not os.path.exists(DB_PATH):
             return 50, True
