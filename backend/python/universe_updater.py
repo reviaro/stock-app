@@ -7,6 +7,7 @@ import math
 import sys
 from datetime import datetime
 from yf_wrapper import _normalize_bars
+from database_path import get_database_path
 
 def _log(message):
     print(message, file=sys.stderr, flush=True)
@@ -49,7 +50,7 @@ def calculate_weighted_performance(closes):
     return score if math.isfinite(score) else None
 
 def update_universe_cache():
-    DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'database', 'stocks.db')
+    DB_PATH = get_database_path()
     
     _log(f"[universe_updater] Starting cache update for {len(SP500_TOP100)} tickers...")
     

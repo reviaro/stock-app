@@ -1,0 +1,423 @@
+{
+  "name": "Sample Investor",
+  "as_of": "2025-12-31",
+  "sectors": {
+    "AAPL": "Technology",
+    "MSFT": "Technology",
+    "GOOGL": "Communication Services",
+    "AMZN": "Consumer Cyclical",
+    "JPM": "Financial Services",
+    "V": "Financial Services",
+    "JNJ": "Healthcare",
+    "XOM": "Energy",
+    "PG": "Consumer Defensive",
+    "CAT": "Industrials",
+    "NEE": "Utilities",
+    "COST": "Consumer Defensive",
+    "VTI": "ETF",
+    "VXUS": "ETF"
+  },
+  "transactions": [
+    {
+      "type": "deposit",
+      "amount": 100000,
+      "txn_date": "2025-01-02",
+      "notes": "Fictional opening capital; no real investor data."
+    },
+    {
+      "type": "buy",
+      "symbol": "AAPL",
+      "shares": 25,
+      "txn_date": "2025-01-02"
+    },
+    {
+      "type": "buy",
+      "symbol": "MSFT",
+      "shares": 40,
+      "txn_date": "2025-01-02"
+    },
+    {
+      "type": "buy",
+      "symbol": "GOOGL",
+      "shares": 30,
+      "txn_date": "2025-01-02"
+    },
+    {
+      "type": "buy",
+      "symbol": "AMZN",
+      "shares": 25,
+      "txn_date": "2025-01-02"
+    },
+    {
+      "type": "buy",
+      "symbol": "JPM",
+      "shares": 20,
+      "txn_date": "2025-01-02"
+    },
+    {
+      "type": "buy",
+      "symbol": "V",
+      "shares": 15,
+      "txn_date": "2025-01-02"
+    },
+    {
+      "type": "buy",
+      "symbol": "JNJ",
+      "shares": 30,
+      "txn_date": "2025-01-02"
+    },
+    {
+      "type": "buy",
+      "symbol": "XOM",
+      "shares": 40,
+      "txn_date": "2025-01-02"
+    },
+    {
+      "type": "buy",
+      "symbol": "PG",
+      "shares": 25,
+      "txn_date": "2025-01-02"
+    },
+    {
+      "type": "buy",
+      "symbol": "CAT",
+      "shares": 12,
+      "txn_date": "2025-01-02"
+    },
+    {
+      "type": "buy",
+      "symbol": "NEE",
+      "shares": 50,
+      "txn_date": "2025-01-02"
+    },
+    {
+      "type": "buy",
+      "symbol": "COST",
+      "shares": 5,
+      "txn_date": "2025-01-02"
+    },
+    {
+      "type": "buy",
+      "symbol": "VTI",
+      "shares": 25,
+      "txn_date": "2025-01-02"
+    },
+    {
+      "type": "buy",
+      "symbol": "VXUS",
+      "shares": 100,
+      "txn_date": "2025-01-02"
+    },
+    {
+      "type": "dividend",
+      "symbol": "JNJ",
+      "amount": 37.2,
+      "txn_date": "2025-03-14",
+      "notes": "Illustrative fictional dividend cash flow; not a provider distribution record."
+    },
+    {
+      "type": "dividend",
+      "symbol": "XOM",
+      "amount": 39.6,
+      "txn_date": "2025-03-14",
+      "notes": "Illustrative fictional dividend cash flow; not a provider distribution record."
+    },
+    {
+      "type": "dividend",
+      "symbol": "MSFT",
+      "amount": 33.2,
+      "txn_date": "2025-06-13",
+      "notes": "Illustrative fictional dividend cash flow; not a provider distribution record."
+    },
+    {
+      "type": "dividend",
+      "symbol": "VTI",
+      "amount": 22.5,
+      "txn_date": "2025-06-27",
+      "notes": "Illustrative fictional dividend cash flow; not a provider distribution record."
+    },
+    {
+      "type": "buy",
+      "symbol": "MSFT",
+      "shares": 5,
+      "txn_date": "2025-07-01"
+    },
+    {
+      "type": "buy",
+      "symbol": "VTI",
+      "shares": 5,
+      "txn_date": "2025-07-01"
+    },
+    {
+      "type": "dividend",
+      "symbol": "JNJ",
+      "amount": 39,
+      "txn_date": "2025-09-12",
+      "notes": "Illustrative fictional dividend cash flow; not a provider distribution record."
+    },
+    {
+      "type": "dividend",
+      "symbol": "MSFT",
+      "amount": 37.35,
+      "txn_date": "2025-09-12",
+      "notes": "Illustrative fictional dividend cash flow; not a provider distribution record."
+    },
+    {
+      "type": "sell",
+      "symbol": "AAPL",
+      "shares": 5,
+      "txn_date": "2025-11-03"
+    },
+    {
+      "type": "sell",
+      "symbol": "XOM",
+      "shares": 10,
+      "txn_date": "2025-11-03"
+    },
+    {
+      "type": "dividend",
+      "symbol": "VXUS",
+      "amount": 180,
+      "txn_date": "2025-12-19",
+      "notes": "Illustrative fictional dividend cash flow; not a provider distribution record."
+    },
+    {
+      "type": "withdrawal",
+      "amount": 2000,
+      "txn_date": "2025-12-31",
+      "notes": "Fictional year-end withdrawal."
+    }
+  ],
+  "watchlist": [
+    {
+      "symbol": "AAPL",
+      "bucket": "owned",
+      "notes": "Fictional sample holding."
+    },
+    {
+      "symbol": "MSFT",
+      "bucket": "owned",
+      "notes": "Fictional sample holding."
+    },
+    {
+      "symbol": "GOOGL",
+      "bucket": "owned",
+      "notes": "Fictional sample holding."
+    },
+    {
+      "symbol": "AMZN",
+      "bucket": "owned",
+      "notes": "Fictional sample holding."
+    },
+    {
+      "symbol": "JPM",
+      "bucket": "owned",
+      "notes": "Fictional sample holding."
+    },
+    {
+      "symbol": "V",
+      "bucket": "owned",
+      "notes": "Fictional sample holding."
+    },
+    {
+      "symbol": "JNJ",
+      "bucket": "owned",
+      "notes": "Fictional sample holding."
+    },
+    {
+      "symbol": "XOM",
+      "bucket": "owned",
+      "notes": "Fictional sample holding."
+    },
+    {
+      "symbol": "PG",
+      "bucket": "owned",
+      "notes": "Fictional sample holding."
+    },
+    {
+      "symbol": "CAT",
+      "bucket": "owned",
+      "notes": "Fictional sample holding."
+    },
+    {
+      "symbol": "NEE",
+      "bucket": "owned",
+      "notes": "Fictional sample holding."
+    },
+    {
+      "symbol": "COST",
+      "bucket": "owned",
+      "notes": "Fictional sample holding."
+    },
+    {
+      "symbol": "VTI",
+      "bucket": "owned",
+      "notes": "Fictional sample holding."
+    },
+    {
+      "symbol": "VXUS",
+      "bucket": "owned",
+      "notes": "Fictional sample holding."
+    },
+    {
+      "symbol": "BRK-B",
+      "bucket": "compounders",
+      "notes": "Research note: compare operating earnings and capital allocation."
+    },
+    {
+      "symbol": "HD",
+      "bucket": "buy_soon",
+      "notes": "Research note: review valuation after the next earnings release."
+    },
+    {
+      "symbol": "LLY",
+      "bucket": "expensive",
+      "notes": "Research note: growth expectations leave little margin for error."
+    },
+    {
+      "symbol": "RKLB",
+      "bucket": "speculative",
+      "notes": "Research note: watch cash runway and launch execution."
+    },
+    {
+      "symbol": "DIS",
+      "bucket": "unsorted",
+      "notes": "Research note: thesis not yet reviewed."
+    }
+  ],
+  "memos": [
+    {
+      "symbol": "MSFT",
+      "thesis": "Fictional thesis: recurring enterprise software and cloud demand support durable cash generation.",
+      "variant_view": "AI spending may take longer to generate an adequate return than expected.",
+      "fair_value_low": 380,
+      "fair_value_high": 470,
+      "buy_below": 390,
+      "trim_above": 500,
+      "sell_rule": "Review after two quarters of declining cloud growth and cash conversion.",
+      "invalidation": "Enterprise retention weakens while infrastructure spending keeps rising.",
+      "risks": "Concentration in one holding; capital intensity; competition.",
+      "conviction": 4
+    },
+    {
+      "symbol": "JNJ",
+      "thesis": "Fictional thesis: diversified healthcare cash flows balance the technology allocation.",
+      "variant_view": "Legal liabilities could absorb more cash than the base case allows.",
+      "fair_value_low": 145,
+      "fair_value_high": 180,
+      "buy_below": 150,
+      "trim_above": 190,
+      "sell_rule": "Review if dividend coverage weakens materially.",
+      "invalidation": "Persistent deterioration in pipeline productivity and operating cash flow.",
+      "risks": "Litigation; patent expiries; clinical execution.",
+      "conviction": 3
+    },
+    {
+      "symbol": "COST",
+      "thesis": "Fictional thesis: membership economics and customer retention support long-term compounding.",
+      "variant_view": "A strong business can still deliver weak returns at an excessive purchase price.",
+      "fair_value_low": 800,
+      "fair_value_high": 950,
+      "buy_below": 820,
+      "trim_above": 1100,
+      "sell_rule": "Review after sustained deterioration in renewal rates.",
+      "invalidation": "Membership retention and comparable sales weaken together.",
+      "risks": "Valuation; wage inflation; international execution.",
+      "conviction": 3
+    }
+  ],
+  "risk_rules": {
+    "max_position_pct": 15,
+    "max_sector_pct": 45,
+    "max_risk_per_trade_pct": 2,
+    "target_cash_pct": 5
+  },
+  "simulator_transactions": [
+    {
+      "account_id": 1,
+      "type": "deposit",
+      "amount": 25000,
+      "txn_date": "2025-01-02",
+      "notes": "Fictional simulator activity; daily-close reference fills, not intraday execution evidence."
+    },
+    {
+      "account_id": 2,
+      "type": "deposit",
+      "amount": 10000,
+      "txn_date": "2025-01-02",
+      "notes": "Fictional simulator activity; daily-close reference fills, not intraday execution evidence."
+    },
+    {
+      "account_id": 1,
+      "type": "buy",
+      "symbol": "VTI",
+      "shares": 30,
+      "txn_date": "2025-01-02",
+      "notes": "Fictional simulator activity; daily-close reference fills, not intraday execution evidence.",
+      "fees": 1
+    },
+    {
+      "account_id": 1,
+      "type": "buy",
+      "symbol": "JNJ",
+      "shares": 20,
+      "txn_date": "2025-07-01",
+      "notes": "Fictional simulator activity; daily-close reference fills, not intraday execution evidence.",
+      "fees": 1
+    },
+    {
+      "account_id": 2,
+      "type": "buy",
+      "symbol": "AAPL",
+      "shares": 10,
+      "txn_date": "2025-07-01",
+      "notes": "Fictional simulator activity; daily-close reference fills, not intraday execution evidence.",
+      "fees": 1
+    },
+    {
+      "account_id": 2,
+      "type": "sell",
+      "symbol": "AAPL",
+      "shares": 10,
+      "txn_date": "2025-07-01",
+      "notes": "Fictional simulator activity; daily-close reference fills, not intraday execution evidence.",
+      "fees": 1
+    },
+    {
+      "account_id": 1,
+      "type": "sell",
+      "symbol": "VTI",
+      "shares": 5,
+      "txn_date": "2025-11-03",
+      "notes": "Fictional simulator activity; daily-close reference fills, not intraday execution evidence.",
+      "fees": 1
+    },
+    {
+      "account_id": 2,
+      "type": "buy",
+      "symbol": "MSFT",
+      "shares": 8,
+      "txn_date": "2025-11-03",
+      "notes": "Fictional simulator activity; daily-close reference fills, not intraday execution evidence.",
+      "fees": 1
+    },
+    {
+      "account_id": 2,
+      "type": "sell",
+      "symbol": "MSFT",
+      "shares": 8,
+      "txn_date": "2025-11-03",
+      "notes": "Fictional simulator activity; daily-close reference fills, not intraday execution evidence.",
+      "fees": 1
+    },
+    {
+      "account_id": 2,
+      "type": "buy",
+      "symbol": "AAPL",
+      "shares": 5,
+      "txn_date": "2025-12-31",
+      "notes": "Fictional simulator activity; daily-close reference fills, not intraday execution evidence.",
+      "fees": 1
+    }
+  ]
+}

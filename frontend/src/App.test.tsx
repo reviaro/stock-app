@@ -78,6 +78,27 @@ describe('App', () => {
   it('renders the Stock Dashboard heading', async () => {
     renderWithProviders(<App />)
     expect(await screen.findByText('Stock Dashboard')).toBeInTheDocument()
+    expect(screen.queryByText('Sample data')).not.toBeInTheDocument()
+  })
+
+  it('shows the sample badge when the server session identifies sample data', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ status: 'success', data: { authenticated: true, username: 'sample-investor', sampleData: true } }),
+    } as Response)
+    renderWithProviders(<App />)
+    expect(await screen.findByText('Sample data')).toBeInTheDocument()
+  })
+
+  it('shows the sample badge immediately after sample login', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'success', data: { authenticated: false } }) } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'success', data: { authenticated: true, username: 'sample-investor', sampleData: true } }) } as Response)
+    renderWithProviders(<App />)
+    fireEvent.change(await screen.findByLabelText('Username'), { target: { value: 'sample-investor' } })
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'sample-portfolio' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+    expect(await screen.findByText('Sample data')).toBeInTheDocument()
   })
 
   it('opens the evidence-only strategy research screen', async () => {

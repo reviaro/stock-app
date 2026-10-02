@@ -102,7 +102,7 @@ node server.js         # http://localhost:3002
 | `ALPACA_TRADING_BASE_URL` | Must remain `https://paper-api.alpaca.markets`; live endpoint is rejected |
 | `ALPACA_PAPER_ORDER_ENTRY_ENABLED` | Paper-order master switch; disabled unless explicitly set to `true` |
 | `ALPACA_PAPER_ORDER_ENTRY_TOKEN` | Independent token required by the paper-order and reconciliation routes |
-| `DB_PATH_OVERRIDE` | Tests only — point db.js at a scratch database |
+| `DB_PATH_OVERRIDE` | Override the database used by Node and the Python cache reader/updater; unset keeps `backend/database/stocks.db` |
 | `ENABLE_LEDGER_MIGRATION` | One-time legacy portfolio→ledger migration gate; leave unset for new installations and back up before migration |
 
 Generate a password hash without putting the password in shell history:
@@ -128,6 +128,85 @@ npm install
 npm run dev     # http://localhost:5173 (proxies /api to 3002)
 npm run build   # emits frontend/dist, served by the backend
 ```
+
+### Local sample portfolio
+
+Use this checkout to prepare screenshots and recordings with a fictional account.
+After installing the prerequisites and dependencies above, run from the repo root:
+
+```bash
+cd frontend
+npm run build
+cd ../backend
+npm run seed:sample
+npm run start:sample
+```
+
+Open **http://127.0.0.1:3003** and sign in with **sample-investor** /
+**sample-portfolio**. The header shows **Sample data**. These are public demo
+credentials for a loopback-only local server; do not publish or proxy this mode.
+The sample uses a separate session cookie, so it does not replace a normal login
+on the same hostname. The ordinary `npm start` command is unchanged.
+
+`seed:sample` creates only this checkout's `backend/database/sample.db`. It uses
+the app's schema initialization/migrations and ledger functions, takes no CLI
+arguments, and never reads the normal `.env`. An inherited `DB_PATH_OVERRIDE`
+pointing anywhere else makes it refuse to run. It refuses symlinks, hard links,
+unmarked existing databases and SQLite sidecars. Stop the sample server before
+running the seed again: reseeding replaces the fictional account, including edits
+made during a demo. A failed build preserves the previous sample database.
+The generated database and lock files are git-ignored.
+
+The fixture contains a $100,000 January 2025 deposit, 12 stocks and two ETFs,
+buys/sells through December, illustrative dividends, one withdrawal, all six
+watchlist buckets, three research memos with notes, risk rules, and trades in both
+simulator sleeves. See [the scenario](backend/fixtures/sample/scenario.json),
+[fixed price inputs](backend/fixtures/sample/prices.json), and
+[expected accounting](backend/fixtures/sample/expected.json).
+Trades use Yahoo Finance daily closes retrieved through yfinance with
+`auto_adjust=False`, rounded to cents; the fixture records retrieval provenance.
+Fills and dividend cash flows are fictional, not actual execution or distribution
+records. Same-day simulator round trips use the same reference close plus fees;
+they are not evidence of an intraday strategy's performance.
+
+Reseeding needs no network. Expected portfolio cash is **$15,024.16**, realized
+P&L is **$190.50**, and at the fixture's **2025-12-31** closes the only breach is
+MSFT's position weight (**18.9%**, against a **15%** limit). The running app still
+uses current market data when you open or refresh a page: values, P&L and breach
+counts can change. Sample mode disables the universe-cache startup warm-up and
+scheduled refresh, scheduled watchlist snapshots, and simulator performance
+sampling. Normal mode keeps all three jobs enabled. This is not an offline or
+frozen recording mode.
+
+Before each capture, confirm the **Sample data** badge, check that all 14 holdings
+have prices, and review the portfolio's cash and breach chips. The intended scene
+has one MSFT position breach. If live prices change that scenario, adjust only the
+fictional account's risk rules and check again; do not describe live values as the
+dated fixture values. Do not trade or edit the account between related captures.
+
+`start:sample` supplies an absolute database override, validates the seed marker
+before initialization, binds to `127.0.0.1:3003`, and creates a fresh session secret.
+It never seeds on startup or loads your normal `.env`, inherited broker keys,
+operator tokens, or model credentials. Alpaca is unconfigured and broker order
+entry stays disabled. Normal mode retains its existing database, auth and jobs.
+
+For optional AI access, copy `backend/.env.sample.example` to
+`backend/.env.sample` and configure a separate model key or a local LM Studio
+model. Only the documented model/Python settings in that file are accepted by
+the launcher; other settings are ignored. Live AI calls can incur provider costs.
+The file is ignored by Git. No model call is required to seed or start the sample.
+
+For frontend development against the sample backend:
+
+```bash
+cd frontend
+VITE_DEV_BACKEND_TARGET=http://127.0.0.1:3003 npm run dev
+```
+
+Use a separate browser profile for recording. If an abnormal shutdown leaves
+`backend/database/sample.db.lock`, first confirm no sample server or seed process
+is running (the file contains its PID), then remove only that lock and retry.
+Do not delete SQLite sidecars while a database process is running.
 
 ## Tests
 

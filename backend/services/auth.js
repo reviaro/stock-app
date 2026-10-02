@@ -59,6 +59,8 @@ function createAuth({
     attemptWindowMs = 15 * 60 * 1000,
     now = () => Date.now(),
     publicOrigin = '',
+    sampleData = false,
+    cookieName = COOKIE_NAME,
 } = {}) {
     if (!username || !passwordHash || !sessionSecret || String(sessionSecret).length < 32) {
         throw new Error('Dashboard auth requires username, password hash, and a session secret of at least 32 characters');
@@ -122,7 +124,7 @@ function createAuth({
 
     function cookieHeader(token, maxAge = sessionTtlSeconds) {
         const parts = [
-            `${COOKIE_NAME}=${encodeURIComponent(token)}`,
+            `${cookieName}=${encodeURIComponent(token)}`,
             'Path=/',
             'HttpOnly',
             'SameSite=Strict',
@@ -133,7 +135,7 @@ function createAuth({
     }
 
     function sessionFromRequest(req) {
-        const token = parseCookies(req.headers.cookie)[COOKIE_NAME];
+        const token = parseCookies(req.headers.cookie)[cookieName];
         return verifyToken(token);
     }
 
@@ -220,7 +222,7 @@ function createAuth({
         res.json({
             status: 'success',
             data: session
-                ? { authenticated: true, username: session.sub }
+                ? { authenticated: true, username: session.sub, ...(sampleData ? { sampleData: true } : {}) }
                 : { authenticated: false },
         });
     });
@@ -243,7 +245,7 @@ function createAuth({
 
         attempts.delete(key);
         res.setHeader('Set-Cookie', cookieHeader(issueToken()));
-        return res.json({ status: 'success', data: { authenticated: true, username } });
+        return res.json({ status: 'success', data: { authenticated: true, username, ...(sampleData ? { sampleData: true } : {}) } });
     });
 
     router.post('/logout', (req, res) => {
@@ -251,7 +253,7 @@ function createAuth({
         if (!sameOrigin(req)) {
             return res.status(403).json({ status: 'error', error: 'Request origin rejected' });
         }
-        revokeToken(parseCookies(req.headers.cookie)[COOKIE_NAME]);
+        revokeToken(parseCookies(req.headers.cookie)[cookieName]);
         res.setHeader('Set-Cookie', cookieHeader('', 0));
         return res.json({ status: 'success', data: { authenticated: false } });
     });
@@ -282,6 +284,8 @@ function createAuthFromEnv(env = process.env) {
         secureCookie: env.STOCK_DASHBOARD_SECURE_COOKIE === '1',
         allowLoopback: env.STOCK_DASHBOARD_ALLOW_LOOPBACK !== '0',
         publicOrigin: env.STOCK_DASHBOARD_PUBLIC_ORIGIN || '',
+        sampleData: env.SAMPLE_DATA === '1',
+        cookieName: env.SAMPLE_DATA === '1' ? 'stock_dashboard_sample_session' : COOKIE_NAME,
     });
 }
 

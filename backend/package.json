@@ -12,6 +12,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
+    "seed:sample": "node scripts/seed-sample.js",
+    "start:sample": "node scripts/start-sample.js",
     "test": "node --test --test-concurrency=1"
   },
   "dependencies": {

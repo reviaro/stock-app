@@ -1,0 +1,72 @@
+{
+  "source": "Yahoo Finance daily Close via yfinance",
+  "retrieved_at": "2026-10-02T20:34:49.927305+00:00",
+  "yfinance_version": "1.6.0",
+  "adjustment": "auto_adjust=False; Yahoo Close (split-adjusted, not dividend-adjusted), rounded to USD cents. Fictional fills at these daily closes; not actual executions.",
+  "dates": {
+    "2025-01-02": {
+      "AAPL": 243.85,
+      "MSFT": 418.58,
+      "GOOGL": 189.43,
+      "AMZN": 220.22,
+      "JPM": 240.0,
+      "V": 314.4,
+      "JNJ": 144.02,
+      "XOM": 107.31,
+      "PG": 165.98,
+      "CAT": 359.77,
+      "NEE": 71.61,
+      "COST": 909.81,
+      "VTI": 289.26,
+      "VXUS": 58.83
+    },
+    "2025-07-01": {
+      "AAPL": 207.82,
+      "MSFT": 492.05,
+      "GOOGL": 175.84,
+      "AMZN": 220.46,
+      "JPM": 290.41,
+      "V": 355.47,
+      "JNJ": 155.92,
+      "XOM": 109.24,
+      "PG": 161.22,
+      "CAT": 390.92,
+      "NEE": 73.06,
+      "COST": 985.96,
+      "VTI": 303.93,
+      "VXUS": 69.11
+    },
+    "2025-11-03": {
+      "AAPL": 269.05,
+      "MSFT": 517.03,
+      "GOOGL": 283.72,
+      "AMZN": 254.0,
+      "JPM": 309.35,
+      "V": 336.9,
+      "JNJ": 186.26,
+      "XOM": 113.76,
+      "PG": 148.02,
+      "CAT": 570.59,
+      "NEE": 81.78,
+      "COST": 928.04,
+      "VTI": 335.8,
+      "VXUS": 74.84
+    },
+    "2025-12-31": {
+      "AAPL": 271.86,
+      "MSFT": 483.62,
+      "GOOGL": 313.0,
+      "AMZN": 230.82,
+      "JPM": 322.22,
+      "V": 350.71,
+      "JNJ": 206.95,
+      "XOM": 120.34,
+      "PG": 143.31,
+      "CAT": 572.87,
+      "NEE": 80.28,
+      "COST": 862.34,
+      "VTI": 335.27,
+      "VXUS": 75.44
+    }
+  }
+}
