@@ -1,0 +1,64 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:07.000
+Stock Dashboard is a research workbench I built for my own use.
+
+2
+00:00:07.000 --> 00:00:14.000
+This walkthrough uses a fictional portfolio in a separate sample database.
+
+3
+00:00:14.000 --> 00:00:23.000
+Portfolio cash. holdings. cost basis and profit or loss are calculated from a
+transaction ledger.
+
+4
+00:00:23.000 --> 00:00:32.000
+Risk rules set limits for each position and sector. This sample allows at most
+15% in one position.
+
+5
+00:00:32.000 --> 00:00:42.000
+MSFT exceeds that limit. The breach is visible alongside the holdings and
+transaction history.
+
+6
+00:00:42.000 --> 00:00:51.000
+Now I ask the AI analyst to check the same rule. The request explicitly says: no
+trades.
+
+7
+00:00:51.000 --> 00:01:01.000
+This is a live OpenAI API request. The analyst calls the portfolio risk tool to
+get evidence.
+
+8
+00:01:01.000 --> 00:01:17.239
+Its answer compares the actual position weight with the configured limit. using
+the returned tool data.
+
+9
+00:01:17.239 --> 00:01:24.741
+The simulator has separate long-term and day-trading sleeves. each with its own
+cash and holdings.
+
+10
+00:01:24.741 --> 00:01:34.231
+These are fictional simulator trades. They are separate from the broker-backed
+paper account.
+
+11
+00:01:34.231 --> 00:01:45.001
+Broker execution is disabled here. The backend rejects live endpoints and checks
+the kill switch before new entries.
+
+12
+00:01:45.001 --> 00:01:52.501
+Built with AI coding agents. I owned the scope. architecture decisions. testing
+and operations.
+
+13
+00:01:52.501 --> 00:02:00.001
+The public repository links safety claims to implementation and tests. Explore
+the screenshots and local sample setup.

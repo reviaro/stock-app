@@ -18,8 +18,9 @@ Live OpenAI response on the fictional account: the risk tool reports MSFT at
 
 [![Portfolio Lab comparing five allocation methods with walk-forward results](docs/screenshots/05-portfolio-lab.png)](docs/screenshots/05-portfolio-lab.png)
 
-**Two-minute walkthrough:** recording pending. There is no hosted demo; use the
-[local sample setup](#local-sample-portfolio) to explore it yourself.
+**Two-minute walkthrough:** [Watch the captioned demo](docs/video/stock-dashboard-demo.mp4)
+(1080p, no voiceover). [Captions and transcript](docs/video/README.md).
+There is no hosted interactive demo; use the [local sample setup](#local-sample-portfolio) to explore it yourself.
 
 ## What I built and owned
 
