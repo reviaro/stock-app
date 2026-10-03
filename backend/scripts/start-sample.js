@@ -12,7 +12,7 @@ function buildSampleEnvironment(parent = process.env, optional = {}) {
     for (const key of ['PATH', 'HOME', 'USERPROFILE', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL']) {
         if (parent[key]) env[key] = parent[key];
     }
-    for (const key of ['GOOGLE_GENERATIVE_AI_API_KEY', 'LMSTUDIO_BASE_URL', 'LMSTUDIO_MODEL', 'PYTHON_PATH', 'PORTFOLIO_LAB_PYTHON']) {
+    for (const key of ['AI_PROVIDER', 'AI_MODEL', 'AI_LOCAL_FALLBACK', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'LMSTUDIO_BASE_URL', 'LMSTUDIO_MODEL', 'PYTHON_PATH', 'PORTFOLIO_LAB_PYTHON']) {
         if (optional[key]) env[key] = optional[key];
     }
     return { ...env,

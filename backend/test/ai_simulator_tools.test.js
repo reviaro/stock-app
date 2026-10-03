@@ -21,7 +21,23 @@ Module._load = function(request, parent, isMain) {
 };
 
 const db = require('../database/db');
-const { tools } = require('../services/ai_service');
+const { tools, chatTools } = require('../services/ai_service');
+
+test('chat exposes only approved tools with SDK-compatible input validation', () => {
+    assert.deepEqual(Object.keys(chatTools).sort(), [
+        'getStockInfo', 'getTechnicalIndicators', 'getMarketDirection', 'getNews',
+        'getMemo', 'getQualityMetrics', 'getRiskRules', 'checkPortfolioRisk',
+        'simulator_get_account', 'simulator_get_holdings', 'simulator_buy',
+        'simulator_sell', 'simulator_tax_preview', 'simulator_get_transactions',
+    ].sort());
+    for (const [name, tool] of Object.entries(tools)) {
+        assert.equal(typeof tool.inputSchema?.safeParse, 'function', `${name} needs an inputSchema`);
+        assert.equal(tool.parameters, undefined);
+    }
+    assert.equal(chatTools.getStockInfo.inputSchema.safeParse({ symbol: 'MSFT' }).success, true);
+    assert.equal(chatTools.getStockInfo.inputSchema.safeParse({ symbol: 123 }).success, false);
+    assert.equal(chatTools.simulator_buy.inputSchema.safeParse({ symbol: 'MSFT', shares: 1 }).success, false);
+});
 
 const today = new Date().toISOString().slice(0, 10);
 

@@ -27,7 +27,7 @@ small Python bridge to yfinance for market data.
 - **AI analyst** — chat agent with tool access to live quotes, technicals,
   news, quality metrics, risk checks, and the simulator; plus five one-shot
   analyst modes (decision memo, bear case, compare, weekly review, monthly
-  review). Gemini primary with LM Studio local fallback.
+  review). Supports Gemini, OpenAI API, Anthropic Claude API, and LM Studio.
 - **Paper-trading simulator** — two isolated sleeves (Long-Term Investing and
   Day Trading), each with its own cash, holdings, trade history, FIFO tax
   preview (short/long-term split by your bracket), performance review, and CSV
@@ -79,8 +79,13 @@ node server.js         # http://localhost:3002
 
 | Key | Purpose |
 |-----|---------|
-| `GOOGLE_GENERATIVE_AI_API_KEY` | Gemini for the AI analyst (read automatically by `@ai-sdk/google`) |
-| `LMSTUDIO_BASE_URL` | Optional local-model fallback (default `http://localhost:1234/v1`) |
+| `AI_PROVIDER` | `gemini` (default), `openai`, `anthropic`, or `lmstudio`; applies to chat, modes, memo drafts, and pressure tests |
+| `AI_MODEL` | Model ID; required for OpenAI/Anthropic. Empty preserves the existing Gemini primary and backup models |
+| `AI_LOCAL_FALLBACK` | `true` or `false`; defaults to enabled for Gemini and disabled for OpenAI/Anthropic. Never switches between cloud providers |
+| `GOOGLE_GENERATIVE_AI_API_KEY` | API key for Gemini |
+| `OPENAI_API_KEY` | API key for OpenAI |
+| `ANTHROPIC_API_KEY` | API key for Anthropic Claude |
+| `LMSTUDIO_BASE_URL` | Local model server (default `http://localhost:1234/v1`); uses Chat Completions |
 | `LMSTUDIO_MODEL` | Model name as shown in LM Studio's server tab |
 | `PYTHON_PATH` | Optional override for the venv python used by pybridge |
 | `STOCK_DASHBOARD_USERNAME` | Required single-user login name |
@@ -119,6 +124,37 @@ Copy the resulting `scrypt$...` value into `STOCK_DASHBOARD_PASSWORD_HASH`.
 Generate `STOCK_DASHBOARD_SESSION_SECRET` with a cryptographically random secret,
 for example `openssl rand -base64 48`. Restarting the backend invalidates existing
 browser sessions.
+
+### AI provider configuration
+
+Set these values in `backend/.env`, or in **`backend/.env.sample`** when using
+`npm run start:sample`. Restart that backend after changing them. Keys stay on
+the server; the browser cannot choose a different provider or supply credentials.
+
+| Provider | Settings |
+|----------|----------|
+| Gemini | `AI_PROVIDER=gemini`, `GOOGLE_GENERATIVE_AI_API_KEY=...`; optionally set `AI_MODEL` |
+| OpenAI API | `AI_PROVIDER=openai`, `OPENAI_API_KEY=...`, `AI_MODEL=<your model ID>` |
+| Anthropic Claude API | `AI_PROVIDER=anthropic`, `ANTHROPIC_API_KEY=...`, `AI_MODEL=<your model ID>` |
+| LM Studio | `AI_PROVIDER=lmstudio`, `LMSTUDIO_MODEL=<loaded model name>`; no cloud key needed |
+
+Choose an API model that supports tool calling. OpenAI uses the
+[Responses API](https://developers.openai.com/api/docs/guides/function-calling);
+Claude uses the [Anthropic adapter](https://ai-sdk.dev/providers/ai-sdk-providers/anthropic).
+These integrations use API keys, not Codex or Claude Code CLI logins.
+
+With no new settings, the existing Gemini primary/backup selection and local
+fallback remain. `AI_MODEL` overrides the primary; Gemini still tries
+`gemini-2.5-flash` as its backup unless that is already the primary.
+OpenAI and Anthropic do not fall back to another cloud. To enable LM Studio
+after either provider fails, set `AI_LOCAL_FALLBACK=true`; set it to `false`
+to disable local fallback, including for Gemini. Fallback stops once response
+content or tool input begins, so a partially executed conversation is not replayed.
+
+All providers receive the same permitted dashboard tools and simulator checks.
+The selected provider receives the conversation and any tool/context data used
+to answer it. OpenAI requests set `store: false`. For recordings, use only the
+sample portfolio and a key explicitly configured in `.env.sample`.
 
 ### Frontend
 
