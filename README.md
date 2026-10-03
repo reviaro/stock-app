@@ -1,9 +1,81 @@
 # Stock Dashboard
 
-A self-hosted stock research and portfolio management app: a market dashboard, a
-transaction-ledger portfolio, an AI analyst, and a paper-trading simulator —
-built with Express + SQLite on the backend, React + Vite on the frontend, and a
-small Python bridge to yfinance for market data.
+A self-hosted stock research and paper-trading workbench I use myself. It brings
+market data, a transaction-ledger portfolio, risk rules, and an AI analyst with
+tools into one app. The screenshots below use a fictional portfolio in a separate
+sample database.
+
+![Market dashboard with market pulse and a stock chart](docs/screenshots/01-dashboard.png)
+
+| Portfolio and risk rules | Paper-trading simulator |
+|---|---|
+| [![Fictional holdings, P&L, and a position-limit breach](docs/screenshots/02-portfolio.png)](docs/screenshots/02-portfolio.png) | [![Separate simulator sleeves and fictional trade history](docs/screenshots/04-simulator.png)](docs/screenshots/04-simulator.png) |
+
+[![AI analyst using the portfolio risk tool to explain a position-limit breach](docs/screenshots/03-ai-analyst.png)](docs/screenshots/03-ai-analyst.png)
+
+Live OpenAI response on the fictional account: the risk tool reports MSFT at
+18.15% against a 15% position limit. No trades were requested or executed.
+
+[![Portfolio Lab comparing five allocation methods with walk-forward results](docs/screenshots/05-portfolio-lab.png)](docs/screenshots/05-portfolio-lab.png)
+
+**Two-minute walkthrough:** recording pending. There is no hosted demo; use the
+[local sample setup](#local-sample-portfolio) to explore it yourself.
+
+## What I built and owned
+
+I owned the scope, architecture decisions, testing, deployment, and operations.
+Built with AI coding agents, whose commits appear under **Stock Dashboard
+Contributors**. My work includes defining the ledger and execution boundaries,
+verifying behavior with tests, and diagnosing integration failures across Node,
+Python, market-data providers, and paper-trading APIs.
+
+## How it fits together
+
+```mermaid
+flowchart LR
+    UI["React / Vite UI"] --> API["Express API"]
+    API --> Ledger["SQLite transaction ledger"]
+    Ledger --> Derived["Derived portfolio holdings, cost basis and P&L"]
+    API --> Python["Python bridge: yfinance"]
+    API --> Lab["Portfolio Lab worker: skfolio"]
+    API --> AI["AI analyst: Gemini / OpenAI / Claude"]
+    AI -. "optional fallback" .-> Local["LM Studio"]
+    AI --> Tools["Quotes, technicals, news, quality, risk and simulator tools"]
+    Tools --> API
+    API --> Paper["Alpaca paper API"]
+```
+
+## Safety design, with evidence
+
+| Boundary | Implementation | Enforcing tests |
+|---|---|---|
+| Broker configuration rejects the live Alpaca endpoint. | [Paper client](backend/services/alpaca_paper_service.js) | [Non-paper endpoint rejection](backend/test/alpaca_paper_service.test.js) |
+| Manual paper-order entry is disabled by default. | [Order route](backend/routes/alpaca_paper.js) | [No broker request while disabled](backend/test/alpaca_paper_order_submission.test.js) |
+| The v2 entry gate checks the kill switch, reconciliation, and monitor health; raw orders cannot bypass v2 account ownership. | [Entry gate](backend/services/alpaca_day_trade_v2_execution.js), [raw order gate](backend/routes/alpaca_paper.js) | [Entry refusals](backend/test/alpaca_day_trade_v2_execution.test.js), [account-wide route gate](backend/test/alpaca_day_trading_v2_routes.test.js) |
+| Simulator API tokens are scoped to one sleeve and its allowed operations. | [Capabilities](backend/services/api_capabilities.js) | [Cross-sleeve and operation denials](backend/test/simulator_capabilities.test.js) |
+| Chat receives an explicit tool allowlist; simulator trades still require the shared execution checks. | [AI tools](backend/services/ai_service.js) | [Tool scope, schemas and trade checks](backend/test/ai_simulator_tools.test.js) |
+| Single-user login, capability-checked API access, and loopback binding by default. | [Authentication](backend/services/auth.js), [server](backend/server.js) | [Login and access tests](backend/test/auth.test.js), [listen configuration](backend/test/server_config.test.js) |
+| Sample mode requires its marked database and uses separate credentials. | [Sample guards](backend/services/sample_mode.js), [launcher](backend/scripts/start-sample.js) | [Isolation and seed checks](backend/test/sample_mode.test.js) |
+
+## Numbers
+
+Counted from this branch and its passing test runs; test counts change as the app evolves.
+
+| Measure | Count |
+|---|---:|
+| Backend JavaScript tests / test files | 719 / 73 |
+| Frontend tests / test files | 72 / 23 |
+| API route files | 19 |
+| Standalone migration files | 2 |
+
+Schema initialization also lives in `backend/database/db.js`. See [Tests](#tests)
+for the commands, including the separate Portfolio Lab Python checks.
+
+## Hard problems
+
+- **One fill, two delivery paths:** [canonicalized REST activity IDs](https://github.com/reviaro/stock-app/commit/bf424bbeade55eee7e15917894458775df95ade3) so WebSocket and REST reconciliation don't double-count a fill.
+- **Partial market-data bars:** [normalized finite Yahoo bars and strict JSON output](https://github.com/reviaro/stock-app/commit/c3f4955b786e5a71451e76c9af38f5376938b5bd) so missing values cannot break the Python-to-Node boundary.
+- **Cancel versus fill:** [fixed a cancel/fill race](https://github.com/reviaro/stock-app/commit/f728b1a593e8479943cb6beb5eff290d3a63e956) in the paper execution lifecycle.
 
 ## Features
 
