@@ -14,7 +14,7 @@
     "dev": "node server.js",
     "seed:sample": "node scripts/seed-sample.js",
     "start:sample": "node scripts/start-sample.js",
-    "test": "node --test --test-concurrency=1"
+    "test": "node scripts/run-tests.js"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.127",

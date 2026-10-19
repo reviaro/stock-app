@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   workerApi: null as null | { sortEntries: ReturnType<typeof vi.fn> },
   memos: [] as Array<{ symbol: string; last_reviewed_at: string | null }>,
   earningsDate: null as string | null,
+  removeError: null as Error | null,
+  bucketError: null as Error | null,
   watchlist: [
     { symbol: 'AAPL', name: 'Apple', bucket: 'compounders', price: 100, changePercent: 1 },
     { symbol: 'GME', name: 'GameStop', bucket: 'speculative', price: 20, changePercent: -1 },
@@ -46,8 +48,8 @@ vi.mock('@/hooks/useWatchlist', () => ({
     error: null,
   }),
   useAddToWatchlist: () => ({ mutateAsync: vi.fn(), isPending: false, isError: false }),
-  useRemoveFromWatchlist: () => ({ mutateAsync: vi.fn(), isPending: false }),
-  useSetWatchlistBucket: () => ({ mutate: vi.fn() }),
+  useRemoveFromWatchlist: () => ({ mutateAsync: vi.fn(), isPending: false, isError: Boolean(mocks.removeError), error: mocks.removeError }),
+  useSetWatchlistBucket: () => ({ mutate: vi.fn(), isError: Boolean(mocks.bucketError), error: mocks.bucketError }),
   searchStocks: mocks.searchStocks,
 }))
 vi.mock('@/lib/store', () => ({
@@ -77,6 +79,8 @@ describe('Watchlist review regressions', () => {
     mocks.workerApi = null
     mocks.memos = []
     mocks.earningsDate = null
+    mocks.removeError = null
+    mocks.bucketError = null
     mocks.watchlist = defaultWatchlist()
   })
 
@@ -122,10 +126,12 @@ describe('Watchlist review regressions', () => {
 
     await act(async () => { older.resolve([{ symbol: 'STALE', name: 'Stale result' }]) })
     expect(screen.queryByText('STALE')).not.toBeInTheDocument()
-    expect(screen.getByText('No results found')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('network down')
+    expect(screen.queryByText('No results found')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry search' })).toBeInTheDocument()
   })
 
-  it('never renders rows from the prior bucket while the new bucket sort is pending', async () => {
+  it('sorts small buckets locally without redundant worker requests', async () => {
     const initialSort = deferred<typeof mocks.watchlist>()
     const bucketSort = deferred<typeof mocks.watchlist>()
     const sortEntries = vi.fn()
@@ -141,10 +147,10 @@ describe('Watchlist review regressions', () => {
 
     expect(screen.queryByText('GME')).not.toBeInTheDocument()
     expect(screen.getByText('AAPL')).toBeInTheDocument()
-    expect(sortEntries).toHaveBeenCalledTimes(2)
+    expect(sortEntries).not.toHaveBeenCalled()
   })
 
-  it('renders refreshed row data while the worker sort for the same symbols is pending', async () => {
+  it('renders refreshed row data immediately for small lists', async () => {
     const initialSort = deferred<typeof mocks.watchlist>()
     const refreshSort = deferred<typeof mocks.watchlist>()
     mocks.workerApi = {
@@ -187,6 +193,32 @@ describe('Watchlist review regressions', () => {
 
     const rowOrder = screen.getAllByRole('button', { name: /^Select / }).map((button) => button.getAttribute('aria-label'))
     expect(rowOrder).toEqual(['Select AAPL', 'Select GME'])
+  })
+
+  it('waits for the worker on large lists without performing a duplicate initial sort', async () => {
+    mocks.watchlist = Array.from({ length: 200 }, (_, index) => ({
+      symbol: `STOCK${index}`, name: `Stock ${index}`, bucket: 'unsorted', price: index, changePercent: index,
+    }))
+    const pending = deferred<typeof mocks.watchlist>()
+    mocks.workerApi = { sortEntries: vi.fn().mockReturnValue(pending.promise) }
+    const { container } = render(<Watchlist />)
+    expect(screen.getByText('Sorting watchlist…')).toHaveAttribute('role', 'status')
+    expect(container.querySelector('[aria-label^="Select "]')).toHaveAttribute('aria-label', 'Select STOCK0')
+    await act(async () => { pending.resolve([...mocks.watchlist].reverse()) })
+    expect(screen.queryByText('Sorting watchlist…')).not.toBeInTheDocument()
+    expect(container.querySelector('[aria-label^="Select "]')).toHaveAttribute('aria-label', 'Select STOCK199')
+  })
+
+  it('shows failed removal and bucket updates while keeping their controls available to retry', () => {
+    mocks.removeError = new Error('Removal unavailable')
+    const { rerender } = render(<Watchlist />)
+    expect(screen.getByRole('alert')).toHaveTextContent('Removal unavailable')
+    expect(screen.getByRole('button', { name: 'Remove AAPL from watchlist' })).toBeEnabled()
+    mocks.removeError = null
+    mocks.bucketError = new Error('Bucket update unavailable')
+    rerender(<Watchlist />)
+    expect(screen.getByRole('alert')).toHaveTextContent('Bucket update unavailable')
+    expect(screen.getByRole('combobox', { name: 'Bucket for AAPL' })).toBeEnabled()
   })
 
   it('advances time-sensitive earnings state while the watchlist remains mounted', () => {

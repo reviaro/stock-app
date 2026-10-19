@@ -1,3 +1,4 @@
+import { QuoteRefresh } from '@/components/QuoteRefresh'
 import { useMarketData } from '@/hooks/useMarketData'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -49,7 +50,7 @@ const INDEX_ORDER = ['^GSPC', '^DJI', '^IXIC']
  * Fetches live data from /api/market/indexes via useMarketData hook.
  */
 export function MarketPulse() {
-  const { data, isLoading, isError, error } = useMarketData()
+  const { data, isLoading, isError, error, refetch, isFetching, dataUpdatedAt } = useMarketData()
 
   return (
     <Card className="h-full">
@@ -57,12 +58,13 @@ export function MarketPulse() {
         <CardTitle>Market Pulse</CardTitle>
       </CardHeader>
       <CardContent>
+        <QuoteRefresh label="market indexes" updatedAt={dataUpdatedAt} isFetching={isFetching} isError={isError} onRefresh={refetch} />
         {isLoading && (
           <p className="text-muted-foreground text-sm">Loading market data...</p>
         )}
 
         {isError && (
-          <p className="text-destructive text-sm">
+          <p role="alert" className="text-destructive text-sm">
             Failed to load market data.{' '}
             {error instanceof Error ? error.message : 'Unknown error.'}
           </p>

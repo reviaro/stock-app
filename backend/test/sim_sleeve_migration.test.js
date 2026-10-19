@@ -1,11 +1,10 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
-const path = require('path');
 const sqlite3 = require('sqlite3');
 
-const TEST_DB = path.join(__dirname, 'test_sim_sleeve_migration.db');
-process.env.DB_PATH_OVERRIDE = TEST_DB;
+const { createTestDatabase } = require('../test-support/test_database');
+const TEST_DB = createTestDatabase();
 
 const db = require('../database/db');
 

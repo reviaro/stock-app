@@ -30,6 +30,9 @@ export function useMarketData() {
     queryKey: ['marketData'],
     queryFn: fetchMarketData,
     staleTime: 60_000,   // 1 minute — indexes don't need sub-minute refresh
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
     retry: 1,
   })
 }

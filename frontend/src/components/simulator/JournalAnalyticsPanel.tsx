@@ -21,7 +21,7 @@ export function JournalAnalyticsPanel({ accountId }: Props) {
 
   return (
     <Card>
-      <CardHeader className="pb-2"><CardTitle><h2>Structured Trade Journal</h2></CardTitle></CardHeader>
+      <CardHeader className="pb-2"><CardTitle>Structured Trade Journal</CardTitle></CardHeader>
       <CardContent className="space-y-4 px-3 pb-4">
         <p className="text-xs text-muted-foreground">Measures process by planned risk and setup—not by win rate alone.</p>
         {isLoading && <p className="text-xs text-muted-foreground">Loading structured journal…</p>}

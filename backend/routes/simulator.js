@@ -1,5 +1,5 @@
-const express = require('express');
-const router = express.Router();
+const { createAsyncRouter } = require('../services/http_errors');
+const router = createAsyncRouter();
 const controls = require('../services/simulator_controls');
 const performance = require('../services/simulator_performance');
 const db = require('../database/db');
@@ -48,6 +48,7 @@ async function accountAndTransactions(req) {
 
 function sendError(res, err) {
     const status = err.status ?? (/invalid|required/.test(err.message) ? 400 : 500);
+    if (status === 500) throw err;
     res.status(status).json({ status: 'error', error: err.message, ...(err.code ? { code: err.code } : {}) });
 }
 

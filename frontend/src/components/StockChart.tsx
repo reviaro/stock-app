@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   createChart,
@@ -15,6 +15,7 @@ import {
 } from 'lightweight-charts'
 import { useTickerStore } from '@/lib/store'
 import { useStockHistory, useTechnicalData } from '@/hooks/useMarketData'
+import type { StockHistory } from '@/types'
 
 /**
  * Normalizes OHLCV or line data to percentage change from the first data point.
@@ -24,11 +25,27 @@ import { useStockHistory, useTechnicalData } from '@/hooks/useMarketData'
 function normalizeToPercent(data: LineData<Time>[]): LineData<Time>[] {
   if (!data.length) return []
   const startPrice = data[0].value
-  if (startPrice === 0) return data
+  if (!Number.isFinite(startPrice) || startPrice <= 0) return []
   return data.map((d) => ({
     time: d.time,
     value: ((d.value - startPrice) / startPrice) * 100,
   }))
+}
+
+/** Compare identical trading dates, so both return series share a baseline and window. */
+function comparisonData(stock?: StockHistory, benchmark?: StockHistory) {
+  const closes = (history?: StockHistory) => new Map(
+    (history?.data ?? [])
+      .filter((point) => Number.isFinite(point.close) && point.close > 0)
+      .map((point) => [point.date.slice(0, 10), point.close]),
+  )
+  const stockCloses = closes(stock)
+  const benchmarkCloses = closes(benchmark)
+  const dates = [...stockCloses.keys()].filter((date) => benchmarkCloses.has(date)).sort()
+  return {
+    stock: normalizeToPercent(dates.map((time) => ({ time: time as Time, value: stockCloses.get(time)! }))),
+    benchmark: normalizeToPercent(dates.map((time) => ({ time: time as Time, value: benchmarkCloses.get(time)! }))),
+  }
 }
 
 // Indicator display configuration
@@ -40,10 +57,27 @@ interface IndicatorConfig {
 }
 
 const INDICATORS: IndicatorConfig[] = [
-  { key: 'sma50', label: 'SMA 50', color: '#f59e0b', lineWidth: 1 }, // amber-400
-  { key: 'sma200', label: 'SMA 200', color: '#3b82f6', lineWidth: 1 }, // blue-500
-  { key: 'ema21', label: 'EMA 21', color: '#a855f7', lineWidth: 1 }, // purple-500
+  { key: 'sma50', label: 'SMA 50', color: '--warning', lineWidth: 1 },
+  { key: 'sma200', label: 'SMA 200', color: '--info', lineWidth: 1 },
+  { key: 'ema21', label: 'EMA 21', color: '--highlight', lineWidth: 1 },
 ]
+
+function chartColor(token: string, fallback = '#737373') {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(token).trim()
+  return value ? `hsl(${value.split(/\s+/).join(', ')})` : fallback
+}
+
+function chartTheme() {
+  const text = chartColor('--muted-foreground')
+  const border = chartColor('--border')
+  return {
+    layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: text },
+    grid: { vertLines: { color: border }, horzLines: { color: border } },
+    crosshair: { vertLine: { color: text }, horzLine: { color: text } },
+    rightPriceScale: { borderColor: border },
+    timeScale: { borderColor: border, timeVisible: true, secondsVisible: false },
+  }
+}
 
 // S&P 500 symbol used for comparison overlay
 const SP500_SYMBOL = '^GSPC'
@@ -80,10 +114,16 @@ export function StockChart({ symbol, compact = false }: { symbol?: string; compa
 
   // Data hooks — target stock
   const { data: historyData, isLoading: histLoading, error: histError } = useStockHistory(selectedTicker)
-  const { data: technicalData } = useTechnicalData(selectedTicker)
+  const { data: technicalData, error: technicalError } = useTechnicalData(selectedTicker)
 
   // Data hook — S&P 500 (only fetches when comparison mode is active)
-  const { data: sp500Data } = useStockHistory(isComparisonMode ? SP500_SYMBOL : '')
+  const { data: sp500Data, error: comparisonError, isLoading: comparisonLoading } = useStockHistory(isComparisonMode ? SP500_SYMBOL : '')
+  const currentHistory = !histError && historyData?.symbol === selectedTicker ? historyData : undefined
+  const currentTechnical = !technicalError && technicalData?.symbol === selectedTicker ? technicalData : undefined
+  const benchmark = !comparisonError && sp500Data?.symbol === SP500_SYMBOL ? sp500Data : undefined
+
+  const comparison = useMemo(() => comparisonData(currentHistory, benchmark), [currentHistory, benchmark])
+  const recentPrices = useMemo(() => [...(currentHistory?.data ?? [])].sort((a, b) => a.date.localeCompare(b.date)).slice(-60), [currentHistory])
 
   // Chart DOM refs
   const chartContainerRef = useRef<HTMLDivElement>(null)
@@ -136,68 +176,51 @@ export function StockChart({ symbol, compact = false }: { symbol?: string; compa
     const chart = createChart(container, {
       width: container.clientWidth,
       height: container.clientHeight || 400,
-      layout: {
-        background: { type: ColorType.Solid, color: 'transparent' },
-        textColor: '#9ca3af', // gray-400 for dark theme
-      },
-      grid: {
-        vertLines: { color: 'rgba(255, 255, 255, 0.05)' },
-        horzLines: { color: 'rgba(255, 255, 255, 0.05)' },
-      },
-      crosshair: {
-        vertLine: { color: 'rgba(255, 255, 255, 0.2)' },
-        horzLine: { color: 'rgba(255, 255, 255, 0.2)' },
-      },
-      rightPriceScale: {
-        borderColor: 'rgba(255, 255, 255, 0.1)',
-      },
-      timeScale: {
-        borderColor: 'rgba(255, 255, 255, 0.1)',
-        timeVisible: true,
-        secondsVisible: false,
-      },
+      ...chartTheme(),
     })
 
     chartRef.current = chart
 
     // Candlestick series (normal mode)
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#22c55e',       // green-500
-      downColor: '#ef4444',     // red-500
-      borderUpColor: '#22c55e',
-      borderDownColor: '#ef4444',
-      wickUpColor: '#22c55e',
-      wickDownColor: '#ef4444',
+      upColor: chartColor('--positive'),
+      downColor: chartColor('--negative'),
+      borderUpColor: chartColor('--positive'),
+      borderDownColor: chartColor('--negative'),
+      wickUpColor: chartColor('--positive'),
+      wickDownColor: chartColor('--negative'),
       visible: true,
     })
     candleSeriesRef.current = candleSeries
 
     // Stock line series (comparison mode — shows normalized % from start)
     const stockLineSeries = chart.addSeries(LineSeries, {
-      color: '#22c55e',     // green-500, matches candlestick up color
+      color: chartColor('--positive'),
       lineWidth: 2 as LineWidth,
       visible: false,       // hidden by default — shown in comparison mode
       priceLineVisible: false,
       lastValueVisible: true,
+      priceFormat: { type: 'percent', precision: 2, minMove: 0.01 },
     })
     stockLineSeriesRef.current = stockLineSeries
 
     // S&P 500 overlay line series (comparison mode — dashed grey)
     const sp500Series = chart.addSeries(LineSeries, {
-      color: '#6b7280',     // gray-500 — subtle reference line
+      color: chartColor('--muted-foreground'),
       lineWidth: 1 as LineWidth,
       lineStyle: 2,         // dashed
       visible: false,       // hidden by default — shown in comparison mode
       priceLineVisible: false,
       lastValueVisible: true,
       title: 'S&P 500',
+      priceFormat: { type: 'percent', precision: 2, minMove: 0.01 },
     })
     sp500SeriesRef.current = sp500Series
 
     // Add a line series per indicator
     for (const ind of INDICATORS) {
       const lineSeries = chart.addSeries(LineSeries, {
-        color: ind.color,
+        color: chartColor(ind.color),
         lineWidth: ind.lineWidth,
         visible: true,
         priceLineVisible: false,
@@ -205,6 +228,20 @@ export function StockChart({ symbol, compact = false }: { symbol?: string; compa
       })
       lineSeriesRefs.current[ind.key] = lineSeries
     }
+
+    const updateTheme = () => {
+      chart.applyOptions(chartTheme())
+      const up = chartColor('--positive')
+      const down = chartColor('--negative')
+      candleSeries.applyOptions({ upColor: up, downColor: down, borderUpColor: up, borderDownColor: down, wickUpColor: up, wickDownColor: down })
+      stockLineSeries.applyOptions({ color: up })
+      sp500Series.applyOptions({ color: chartColor('--muted-foreground') })
+      for (const indicator of INDICATORS) {
+        lineSeriesRefs.current[indicator.key]?.applyOptions({ color: chartColor(indicator.color) })
+      }
+    }
+    const themeObserver = new MutationObserver(updateTheme)
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
 
     // ResizeObserver for fluid container responsiveness
     const resizeObserver = new ResizeObserver((entries) => {
@@ -217,6 +254,7 @@ export function StockChart({ symbol, compact = false }: { symbol?: string; compa
 
     return () => {
       resizeObserver.disconnect()
+      themeObserver.disconnect()
       // Always remove the chart and null refs to prevent memory leaks and
       // duplicate chart creation during rapid ticker switching or HMR reloads.
       if (chartRef.current) {
@@ -233,9 +271,9 @@ export function StockChart({ symbol, compact = false }: { symbol?: string; compa
   // ---- Candlestick data update (normal mode) ----
   useEffect(() => {
     const series = candleSeriesRef.current
-    if (!series || !historyData?.data?.length) return
+    if (!series) return
 
-    const candles: CandlestickData<Time>[] = historyData.data.map((pt) => ({
+    const candles: CandlestickData<Time>[] = (currentHistory?.data ?? []).map((pt) => ({
       // Normalise ISO datetime to YYYY-MM-DD for lightweight-charts Time
       time: pt.date.slice(0, 10) as Time,
       open: pt.open,
@@ -255,15 +293,12 @@ export function StockChart({ symbol, compact = false }: { symbol?: string; compa
 
     series.setData(sorted)
     chartRef.current?.timeScale().fitContent()
-  }, [historyData])
+  }, [currentHistory, selectedTicker])
 
   // ---- Technical indicator data update ----
   useEffect(() => {
-    if (!technicalData?.charts || !historyData?.data?.length) return
-
-    const charts = technicalData.charts
-    const dates = historyData.data.map((pt) => pt.date.slice(0, 10))
-    // Use the last N dates aligned with the chart series (backend returns last 60)
+    const charts = currentTechnical?.charts
+    const dates = (currentHistory?.data ?? []).map((pt) => pt.date.slice(0, 10))
     const chartDates = dates.slice(-60)
 
     const toLineData = (
@@ -285,15 +320,12 @@ export function StockChart({ symbol, compact = false }: { symbol?: string; compa
       const series = lineSeriesRefs.current[ind.key]
       if (!series) continue
 
-      const raw = charts[ind.key] as (number | null)[] | undefined
-      if (!raw?.length) continue
-
-      const lineData = toLineData(raw, chartDates)
-      if (lineData.length > 0) {
-        series.setData(lineData)
-      }
+      const raw = charts?.[ind.key] ?? []
+      const lineData = toLineData(raw, chartDates.slice(-raw.length))
+      const byDate = new Map(lineData.map((point) => [point.time as string, point]))
+      series.setData([...byDate.values()].sort((a, b) => String(a.time).localeCompare(String(b.time))))
     }
-  }, [technicalData, historyData])
+  }, [currentTechnical, currentHistory, selectedTicker])
 
   // ---- Comparison mode effect ----
   // Switches between candlestick (normal) and normalized line (comparison) views.
@@ -308,11 +340,12 @@ export function StockChart({ symbol, compact = false }: { symbol?: string; compa
     if (!chart || !candleSeries || !stockLineSeries || !sp500Series) return
 
     if (isComparisonMode) {
-      // Switch price scale to Percentage mode — both series start at 0%
-      chart.priceScale('right').applyOptions({ mode: PriceScaleMode.Percentage })
+      // Values are already returns. A percentage scale would divide by their zero baseline again.
+      chart.priceScale('right').applyOptions({ mode: PriceScaleMode.Normal })
 
       // Hide candlestick series; show stock line series
-      candleSeries.applyOptions({ visible: false })
+      // The first series also supplies the shared axis formatter, even when hidden.
+      candleSeries.applyOptions({ visible: false, priceFormat: { type: 'percent', precision: 2, minMove: 0.01 } })
       stockLineSeries.applyOptions({ visible: true })
 
       // Hide indicator overlays (they have absolute prices, not % — would distort)
@@ -320,41 +353,9 @@ export function StockChart({ symbol, compact = false }: { symbol?: string; compa
         lineSeriesRefs.current[ind.key]?.applyOptions({ visible: false })
       }
 
-      // Populate stock line series from historyData (use close prices)
-      if (historyData?.data?.length) {
-        const byDate = new Map<string, LineData<Time>>()
-        for (const pt of historyData.data) {
-          const d: LineData<Time> = { time: pt.date.slice(0, 10) as Time, value: pt.close }
-          byDate.set(pt.date.slice(0, 10), d)
-        }
-        const sorted = Array.from(byDate.values()).sort((a, b) =>
-          (a.time as string).localeCompare(b.time as string),
-        )
-        const normalized = normalizeToPercent(sorted)
-        if (normalized.length > 0) {
-          stockLineSeries.setData(normalized)
-        }
-      }
-
-      // Populate S&P 500 series if data is available
-      if (sp500Data?.data?.length) {
-        const byDate = new Map<string, LineData<Time>>()
-        for (const pt of sp500Data.data) {
-          const d: LineData<Time> = { time: pt.date.slice(0, 10) as Time, value: pt.close }
-          byDate.set(pt.date.slice(0, 10), d)
-        }
-        const sorted = Array.from(byDate.values()).sort((a, b) =>
-          (a.time as string).localeCompare(b.time as string),
-        )
-        const normalized = normalizeToPercent(sorted)
-        if (normalized.length > 0) {
-          sp500Series.setData(normalized)
-          sp500Series.applyOptions({ visible: true })
-        }
-      } else {
-        // SP500 data not yet loaded — hide until it arrives
-        sp500Series.applyOptions({ visible: false })
-      }
+      stockLineSeries.setData(comparison.stock)
+      sp500Series.setData(comparison.benchmark)
+      sp500Series.applyOptions({ visible: comparison.benchmark.length > 0 })
 
       chart.timeScale().fitContent()
     } else {
@@ -362,7 +363,7 @@ export function StockChart({ symbol, compact = false }: { symbol?: string; compa
       chart.priceScale('right').applyOptions({ mode: PriceScaleMode.Normal })
 
       // Show candlestick series; hide comparison line series
-      candleSeries.applyOptions({ visible: true })
+      candleSeries.applyOptions({ visible: true, priceFormat: { type: 'price', precision: 2, minMove: 0.01 } })
       stockLineSeries.applyOptions({ visible: false })
       sp500Series.applyOptions({ visible: false })
 
@@ -374,7 +375,7 @@ export function StockChart({ symbol, compact = false }: { symbol?: string; compa
       chart.timeScale().fitContent()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isComparisonMode, historyData, sp500Data])
+  }, [isComparisonMode, comparison, selectedTicker])
 
   // ---- Render ----
   return (
@@ -395,17 +396,11 @@ export function StockChart({ symbol, compact = false }: { symbol?: string; compa
       </AnimatePresence>
 
       {/* Indicator toggle controls — hidden in compact (chat) mode */}
-      {!compact && <div className="absolute top-2 right-2 z-10 flex gap-1 flex-wrap justify-end max-w-[60%]">
+      {!compact && <div className="order-2 flex gap-2 flex-wrap px-2 pb-2">
         {/* Compare with S&P 500 toggle */}
         <button
           onClick={() => setIsComparisonMode((prev) => !prev)}
-          className={`data-hover px-2 py-0.5 rounded text-xs font-medium border ${isComparisonMode ? 'opacity-100' : 'opacity-60'
-            }`}
-          style={{
-            borderColor: '#6b7280',
-            color: '#6b7280',
-            backgroundColor: isComparisonMode ? 'rgba(107, 114, 128, 0.15)' : 'transparent',
-          }}
+          className={`data-hover min-h-9 px-2 py-1 rounded text-xs font-medium border text-muted-foreground ${isComparisonMode ? 'bg-accent' : 'bg-transparent'}`}
           title="Compare with S&P 500"
           aria-pressed={isComparisonMode}
         >
@@ -417,18 +412,19 @@ export function StockChart({ symbol, compact = false }: { symbol?: string; compa
           <button
             key={ind.key}
             onClick={() => toggleIndicator(ind.key)}
-            className={`data-hover px-2 py-0.5 rounded text-xs font-medium border ${visible[ind.key]
-                ? 'opacity-100'
-                : 'opacity-40'
+            className={`data-hover min-h-9 px-2 py-1 rounded text-xs font-medium border ${visible[ind.key]
+                ? 'bg-accent'
+                : 'bg-transparent'
               }`}
             style={{
-              borderColor: ind.color,
-              color: ind.color,
+              borderColor: `hsl(var(${ind.color}))`,
+              color: `hsl(var(${ind.color}))`,
               backgroundColor: visible[ind.key]
-                ? `${ind.color}22`
+                ? `hsl(var(${ind.color}) / 0.12)`
                 : 'transparent',
             }}
             title={`Toggle ${ind.label}`}
+            aria-pressed={visible[ind.key]}
           >
             {ind.label}
           </button>
@@ -436,22 +432,42 @@ export function StockChart({ symbol, compact = false }: { symbol?: string; compa
       </div>}
 
       {/* Ticker label */}
-      <div className="absolute top-2 left-2 z-10 text-sm font-semibold text-muted-foreground">
+      <div className="order-1 flex flex-wrap gap-2 px-2 py-2 text-sm font-semibold text-muted-foreground">
         {selectedTicker}
         {isComparisonMode && (
-          <span className="ml-2 text-xs text-gray-400">vs S&P 500</span>
+          <span className="ml-2 text-xs text-muted-foreground">vs S&P 500</span>
         )}
-        {histError && (
-          <span className="ml-2 text-xs text-red-400">Error loading data</span>
-        )}
+        {histError && <span role="alert" className="ml-2 text-xs text-destructive">Unable to load {selectedTicker} history.</span>}
+        {!histLoading && !histError && !currentHistory?.data.length && <span className="ml-2 text-xs">No price history available.</span>}
+        {!isComparisonMode && technicalError && <span role="alert" className="ml-2 text-xs text-destructive">Indicators unavailable.</span>}
+        {isComparisonMode && comparisonLoading && <span role="status" className="ml-2 text-xs">Loading comparison…</span>}
+        {isComparisonMode && comparisonError && <span role="alert" className="ml-2 text-xs text-destructive">S&amp;P 500 comparison unavailable.</span>}
+        {isComparisonMode && currentHistory && benchmark && comparison.stock.length === 0 && <span className="ml-2 text-xs">No shared trading dates to compare.</span>}
       </div>
 
       {/* Chart container */}
       <div
         ref={chartContainerRef}
-        className="w-full h-full"
+        role="img"
+        aria-label={`${selectedTicker} ${isComparisonMode ? "return compared with S&P 500" : "price history"} chart. Open View price data below for daily values.`}
+        className="order-3 w-full flex-1"
         style={{ minHeight: compact ? '250px' : '400px' }}
       />
+      {currentHistory && <details className="order-4 px-2 py-2 text-xs">
+        <summary className="cursor-pointer rounded py-2 font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2">View price data</summary>
+        <div className="max-h-60 overflow-auto">
+          {isComparisonMode ? <table className="w-full text-right">
+            <caption className="py-2 text-left text-muted-foreground">Returns from the first shared trading date.</caption>
+            <thead><tr><th scope="col" className="text-left">Date</th><th scope="col">{selectedTicker}</th><th scope="col">S&amp;P 500</th></tr></thead>
+            <tbody>{comparison.stock.map((point, index) => <tr key={String(point.time)}><th scope="row" className="py-1 text-left font-normal">{String(point.time)}</th><td>{point.value.toFixed(2)}%</td><td>{comparison.benchmark[index].value.toFixed(2)}%</td></tr>)}</tbody>
+          </table> : <table className="w-full text-right">
+            <caption className="py-2 text-left text-muted-foreground">Most recent {recentPrices.length} daily prices for {selectedTicker}.</caption>
+            <thead><tr><th scope="col" className="text-left">Date</th>{['Open', 'High', 'Low', 'Close'].map((label) => <th scope="col" key={label}>{label}</th>)}</tr></thead>
+            <tbody>{recentPrices.map((point) => <tr key={point.date}><th scope="row" className="py-1 text-left font-normal">{point.date.slice(0, 10)}</th>{[point.open, point.high, point.low, point.close].map((value, index) => <td key={index} className="pl-2">{value.toFixed(2)}</td>)}</tr>)}</tbody>
+          </table>}
+        </div>
+      </details>}
+
     </div>
   )
 }

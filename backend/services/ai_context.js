@@ -64,16 +64,19 @@ async function aggregateWatchlistContext() {
 async function aggregatePortfolioContext() {
     const transactions = db.listTransactions ? await db.listTransactions() : [];
     if (!transactions.length) {
-        return { positions: [], breaches: [], overdueMemos: [], cash: 0 };
+        return { positions: [], breaches: [], overdueMemos: [], cash: 0, valuationComplete: true, missingPriceSymbols: [], riskAssessment: 'not_assessed' };
     }
 
-    const { buildSummary } = require('./portfolio_ledger');
+    const { buildSummary, computeHoldings, isValuationPrice } = require('./portfolio_ledger');
     const currentPrices = {};
-    const symbols = [...new Set(transactions.map((txn) => txn.symbol).filter(Boolean))];
+    const infoBySymbol = {};
+    const symbols = Object.entries(computeHoldings(transactions))
+        .filter(([, holding]) => holding.shares > 0).map(([symbol]) => symbol);
 
     await Promise.all(symbols.map(async (symbol) => {
         const info = await safeCall(() => pybridge.getStockInfo(symbol), { data: null });
-        if (typeof info?.data?.price === 'number') currentPrices[symbol] = info.data.price;
+        infoBySymbol[symbol] = info;
+        if (isValuationPrice(info?.data?.price)) currentPrices[symbol] = info.data.price;
     }));
 
     const summary = buildSummary(transactions, currentPrices);
@@ -81,7 +84,7 @@ async function aggregatePortfolioContext() {
     const stopBySymbol = Object.fromEntries((stops || []).map((stop) => [stop.symbol, stop.stop_loss]));
 
     const positions = await Promise.all(Object.entries(summary.holdings).map(async ([symbol, holding]) => {
-        const info = await safeCall(() => pybridge.getStockInfo(symbol), { data: null });
+        const info = infoBySymbol[symbol];
         const memo = db.getMemo ? await safeCall(() => db.getMemo(symbol), null) : null;
         const currentPrice = currentPrices[symbol] ?? null;
         return {
@@ -91,7 +94,7 @@ async function aggregatePortfolioContext() {
             total_cost: holding.total_cost,
             dividends_received: holding.dividends_received,
             currentPrice,
-            currentValue: currentPrice != null ? currentPrice * holding.shares : null,
+            currentValue: holding.shares === 0 ? 0 : currentPrice != null ? currentPrice * holding.shares : null,
             pnl: summary.unrealized[symbol] ?? null,
             sector: info?.data?.sector ?? null,
             stop_loss: stopBySymbol[symbol] ?? null,
@@ -101,11 +104,16 @@ async function aggregatePortfolioContext() {
     }));
 
     let breaches = [];
+    let riskAssessment = 'not_assessed';
     try {
         const { computeBreaches } = require('./risk_engine');
         const rules = db.getRiskRules ? await db.getRiskRules() : null;
         if (rules) {
-            breaches = computeBreaches({ positions, cash: summary.cash, rules }).breaches;
+            const risk = computeBreaches({ positions, cash: summary.cash, rules });
+            breaches = risk.breaches;
+            riskAssessment = risk.riskAssessment;
+        } else {
+            riskAssessment = 'not_configured';
         }
     } catch {
         breaches = [];
@@ -117,7 +125,10 @@ async function aggregatePortfolioContext() {
         .filter((position) => Date.now() - new Date(position.memo_last_reviewed_at).getTime() > THIRTY_DAYS_MS)
         .map((position) => position.symbol);
 
-    return { positions, breaches, overdueMemos, cash: summary.cash };
+    return {
+        positions, breaches, overdueMemos, cash: summary.cash, riskAssessment,
+        valuationComplete: summary.valuationComplete, missingPriceSymbols: summary.missingPriceSymbols,
+    };
 }
 
 module.exports = {

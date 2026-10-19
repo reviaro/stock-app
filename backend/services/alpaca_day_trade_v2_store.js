@@ -5,6 +5,8 @@
 // identifiers live in plan/fill columns so the monitor can resolve broker truth, but they are
 // never written into the journal and never returned by reader routes.
 const db = require('../database/db');
+const { createProcessIdentity, beginEntryAttempt, endEntryAttempt, isEntrySenderActive } = require('./alpaca_day_trade_v2_process_owner');
+const processIdentity = createProcessIdentity();
 
 const PLAN_STATES = ['pending_submission', 'submission_unknown', 'working', 'active', 'time_exit_pending', 'attention_required', 'closed', 'cancelled', 'rejected'];
 const TERMINAL_STATES = ['closed', 'cancelled', 'rejected'];
@@ -193,11 +195,68 @@ async function getMonitorState(c) {
     return c.get('SELECT * FROM alpaca_dt_v2_monitor_state WHERE id = 1');
 }
 
+async function listEntrySubmissions(c) {
+    return c.all(`SELECT e.plan_id, e.event_key FROM alpaca_dt_v2_events e
+        WHERE e.event_type = 'submission' AND e.action = 'entry_admitted'
+          AND NOT EXISTS (SELECT 1 FROM alpaca_dt_v2_events settled
+              WHERE settled.event_key = 'plan:' || e.plan_id || ':entry_settled')`);
+}
+
+async function assertNoEntrySubmissions(c) {
+    if ((await listEntrySubmissions(c)).length) {
+        throw storeError('ALPACA_V2_SUBMISSION_IN_PROGRESS', 'entry submission is in progress; retry after reconciliation');
+    }
+}
+
+async function admitEntrySubmission(c, planId, { owner = processIdentity.owner, occurredAt = nowIso() } = {}) {
+    if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 0
+        || (owner.start != null && !/^\d+$/.test(owner.start))
+        || (owner.attempt != null && !/^[a-f0-9-]{36}$/.test(owner.attempt))) throw new Error('invalid entry sender');
+    await assertNoEntrySubmissions(c);
+    return insertEvent(c, {
+        // The private key carries process ownership; reader routes never return event keys.
+        event_key: `plan:${planId}:entry_admitted:${owner.pid}:${owner.start ?? 'unknown'}${owner.attempt ? `:${owner.attempt}` : ''}`,
+        plan_id: planId, event_type: 'submission', action: 'entry_admitted', outcome: 'pending', occurred_at: occurredAt,
+    });
+}
+
+async function settleEntrySubmission(c, planId, occurredAt = nowIso()) {
+    return insertEvent(c, {
+        event_key: `plan:${planId}:entry_settled`, plan_id: planId,
+        event_type: 'submission', action: 'entry_settled', outcome: 'settled', occurred_at: occurredAt,
+    });
+}
+
+async function recoverEntrySubmissions(c, { isOwnerAlive = isEntrySenderActive, occurredAt = nowIso() } = {}) {
+    const activePlanIds = [];
+    for (const admission of await listEntrySubmissions(c)) {
+        const match = admission.event_key.match(/^plan:\d+:entry_admitted:(\d+):(\d+|unknown)(?::([a-f0-9-]{36}))?$/);
+        const owner = match ? { pid: Number(match[1]), start: match[2] === 'unknown' ? null : match[2], attempt: match[3] } : null;
+        if (!owner || isOwnerAlive(owner)) {
+            activePlanIds.push(admission.plan_id);
+            continue;
+        }
+        // An exited process or completed local attempt cannot start another POST.
+        // Its broker outcome remains unknown:
+        // release only the send admission, retaining a durable attention latch and plan.
+        await latchAttentionRow(c, {
+            planId: admission.plan_id, code: 'SUBMISSION_INTERRUPTED',
+            eventKey: `plan:${admission.plan_id}:attention:SUBMISSION_INTERRUPTED`, occurredAt,
+        });
+        await settleEntrySubmission(c, admission.plan_id, occurredAt);
+    }
+    return { activePlanIds };
+}
+
 async function updateMonitorStateRow(c, patch = {}) {
     const keys = Object.keys(patch);
     const unknown = keys.filter((key) => !MONITOR_UPDATE_FIELDS.has(key));
     if (unknown.length) throw new Error(`unknown v2 monitor field: ${unknown.join(', ')}`);
     if (!keys.length) return getMonitorState(c);
+    if (patch.mode !== undefined || patch.kill_switch === 0 || patch.kill_switch === false
+        || patch.attention_required === 0 || patch.attention_required === false) {
+        await assertNoEntrySubmissions(c);
+    }
     const values = keys.map((key) => (typeof patch[key] === 'boolean' ? Number(patch[key]) : patch[key]));
     await c.run(`UPDATE alpaca_dt_v2_monitor_state SET ${keys.map((key) => `${key} = ?`).join(', ')}, updated_at = ? WHERE id = 1`, [...values, nowIso()]);
     return getMonitorState(c);
@@ -282,11 +341,18 @@ const ops = {
         return c.all('SELECT * FROM alpaca_dt_v2_fills ORDER BY executed_at ASC, id ASC');
     },
     getMonitorState,
+    getAttentionVersion: async (c) => (await c.get("SELECT COALESCE(MAX(id), 0) AS version FROM alpaca_dt_v2_events WHERE event_type = 'anomaly'")).version,
+    getEntryVersion: async (c) => (await c.get("SELECT COALESCE(MAX(id), 0) AS version FROM alpaca_dt_v2_events WHERE action = 'entry_admitted'")).version,
+    listEntrySubmissions,
+    assertNoEntrySubmissions,
+    admitEntrySubmission,
+    settleEntrySubmission,
+    recoverEntrySubmissions,
     updateMonitorState: updateMonitorStateRow,
     latchAttention: latchAttentionRow,
 };
 
-const READ_OPS = new Set(['getPlan', 'getPlanByClientOrderId', 'listPlans', 'listNonterminalPlans', 'getEventByKey', 'listEvents', 'listFills', 'getMonitorState']);
+const READ_OPS = new Set(['getPlan', 'getPlanByClientOrderId', 'listPlans', 'listNonterminalPlans', 'getEventByKey', 'listEvents', 'listFills', 'getMonitorState', 'getAttentionVersion', 'getEntryVersion', 'listEntrySubmissions', 'assertNoEntrySubmissions']);
 
 function bind(c) {
     return Object.fromEntries(Object.entries(ops).map(([name, fn]) => [name, (...args) => fn(c, ...args)]));
@@ -302,6 +368,8 @@ const api = Object.fromEntries(Object.entries(ops).map(([name, fn]) => [
 module.exports = {
     ...api,
     transaction,
+    beginEntryAttempt,
+    endEntryAttempt,
     sanitizeDetail,
     PLAN_STATES,
     TERMINAL_STATES,

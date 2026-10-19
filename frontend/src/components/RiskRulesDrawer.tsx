@@ -37,7 +37,7 @@ function RiskRulesForm({ open, onOpenChange, rules }: Props) {
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="w-[420px] sm:max-w-none">
+      <SheetContent side="right" className="w-full max-w-[calc(100vw-1rem)] sm:w-[420px] sm:max-w-none">
         <SheetHeader>
           <SheetTitle>Risk Rules</SheetTitle>
         </SheetHeader>

@@ -31,24 +31,25 @@ export function PortfolioPanel() {
   const summary = data?.summary
   const holdings = data?.holdings ?? []
   const transactions = data?.recentTransactions ?? []
-  const totalValue = summary?.totalValue ?? 0
-  const totalPnl = (summary?.realizedPnl ?? 0) + (summary?.unrealizedPnl ?? 0)
-  const totalPnlPct = totalValue > 0 ? (totalPnl / totalValue) * 100 : 0
+  const totalValue = summary?.totalValue ?? null
+  const totalPnl = summary?.unrealizedPnl != null ? summary.realizedPnl + summary.unrealizedPnl : null
+  const totalPnlPct = totalValue != null && totalValue > 0 && totalPnl != null ? (totalPnl / totalValue) * 100 : null
+  const incompleteValuation = summary?.valuationComplete === false
 
   return (
     <Card className="h-full flex flex-col">
       <CardHeader className="pb-2">
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <CardTitle>Portfolio</CardTitle>
             {summary && (
               <p className="text-xs text-muted-foreground mt-0.5">
-                Value: <span className="font-mono text-foreground">${fmt(totalValue)}</span>
-                <span className={`ml-2 font-mono ${totalPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                  {totalPnl >= 0 ? '+' : ''}${fmt(totalPnl)} ({fmtPct(totalPnlPct)})
+                Value: <span className="font-mono text-foreground">{totalValue == null ? 'Unavailable' : `$${fmt(totalValue)}`}</span>
+                <span className={`ml-2 font-mono ${totalPnl == null ? 'text-muted-foreground' : totalPnl >= 0 ? 'text-positive' : 'text-negative'}`}>
+                  {totalPnl == null ? 'P&L unavailable' : `${totalPnl >= 0 ? '+' : ''}$${fmt(totalPnl)} (${fmtPct(totalPnlPct)})`}
                 </span>
-                <span className={`ml-2 ${summary.cashPct != null && data?.rules && summary.cashPct < data.rules.target_cash_pct ? 'text-amber-400' : ''}`}>
-                  Cash: {summary.cashPct == null ? '—' : `${fmt(summary.cashPct, 1)}%`}
+                <span className={`ml-2 ${summary.cashPct != null && data?.rules && summary.cashPct < data.rules.target_cash_pct ? 'text-warning' : ''}`}>
+                  Cash: ${fmt(summary.cash)}{summary.cashPct == null ? '' : ` (${fmt(summary.cashPct, 1)}%)`}
                 </span>
               </p>
             )}
@@ -84,6 +85,12 @@ export function PortfolioPanel() {
 
         {isLoading && <p className="text-muted-foreground text-sm">Loading portfolio...</p>}
         {isError && <p className="text-destructive text-sm">Failed to load portfolio.</p>}
+        {incompleteValuation && (
+          <p role="status" className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-foreground">
+            Quotes unavailable for {summary.missingPriceSymbols?.join(', ') || 'some holdings'}. Portfolio value, total P&amp;L, allocation percentages, and risk checks are unavailable until prices return. Cash and recorded transactions remain available.
+          </p>
+        )}
+        {deleteTransaction.isError && <p role="alert" className="text-destructive text-sm">Could not delete the transaction. Try again.</p>}
         {!isLoading && !isError && (!holdings || holdings.length === 0) && (
           <p className="text-muted-foreground text-sm">No positions yet. Click "+ Add" to track a trade.</p>
         )}
@@ -93,7 +100,7 @@ export function PortfolioPanel() {
           const pricePct = pos.currentPrice && pos.avg_cost > 0
             ? ((pos.currentPrice - pos.avg_cost) / pos.avg_cost) * 100
             : null
-          const weight = totalValue > 0 && pos.currentValue != null
+          const weight = totalValue != null && totalValue > 0 && pos.currentValue != null
             ? (pos.currentValue / totalValue) * 100
             : null
 
@@ -126,8 +133,9 @@ export function PortfolioPanel() {
                   {pos.currentPrice != null && (
                     <span className="text-xs font-mono text-foreground">${fmt(pos.currentPrice)}</span>
                   )}
+                  {pos.currentPrice == null && pos.shares > 0 && <span className="text-xs text-muted-foreground">Quote unavailable</span>}
                   {pos.pnl != null && (
-                    <span className={`text-xs font-mono font-semibold ${isGain ? 'text-green-400' : 'text-red-400'}`}>
+                    <span className={`text-xs font-mono font-semibold ${isGain ? 'text-positive' : 'text-negative'}`}>
                       {isGain ? '+' : ''}${fmt(pos.pnl)} ({fmtPct(pricePct)})
                     </span>
                   )}
@@ -140,8 +148,9 @@ export function PortfolioPanel() {
                   type="button"
                   onClick={(e) => { e.stopPropagation(); setMemoSymbol(pos.symbol) }}
                   title={memoMap.has(pos.symbol) ? 'Edit memo' : 'Add memo'}
+                  aria-label={`${memoMap.has(pos.symbol) ? 'Edit' : 'Add'} memo for ${pos.symbol}`}
                   className={[
-                    'text-[10px] px-1.5 py-0.5 rounded border shrink-0',
+                    'min-h-11 min-w-11 text-[10px] px-1.5 py-0.5 rounded border shrink-0',
                     memoMap.has(pos.symbol) ? 'border-primary text-primary' : 'border-border text-muted-foreground',
                   ].join(' ')}
                 >
@@ -163,7 +172,7 @@ export function PortfolioPanel() {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="font-mono text-foreground">${fmt(txn.amount)}</span>
-                  <button type="button" onClick={() => deleteTransaction.mutate(txn.id)} className="text-muted-foreground hover:text-destructive">
+                  <button type="button" onClick={() => deleteTransaction.mutate(txn.id)} disabled={deleteTransaction.isPending} aria-label={`Delete ${txn.type} transaction for ${txn.symbol ?? 'cash'} on ${txn.txn_date}`} className="min-h-11 min-w-11 text-muted-foreground hover:text-destructive disabled:opacity-50">
                     ×
                   </button>
                 </div>

@@ -5,8 +5,8 @@ const http = require('http');
 const path = require('path');
 const express = require('express');
 
-const TEST_DB = path.join(__dirname, 'test_alpaca_paper_order_submission.db');
-process.env.DB_PATH_OVERRIDE = TEST_DB;
+const { createTestDatabase } = require('../test-support/test_database');
+const TEST_DB = createTestDatabase();
 const db = require('../database/db');
 
 function post(port, body, requestPath = '/api/alpaca-paper/orders') {

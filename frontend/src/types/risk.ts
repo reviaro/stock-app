@@ -25,4 +25,7 @@ export interface RiskPayload {
   cashPct: number | null
   positions: RiskPosition[]
   breaches: PortfolioBreach[]
+  riskAssessment?: 'complete' | 'incomplete'
+  valuationComplete?: boolean
+  missingPriceSymbols?: string[]
 }

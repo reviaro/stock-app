@@ -1,4 +1,4 @@
-const express = require('express');
+const { createAsyncRouter } = require('../services/http_errors');
 const { createPaperClient } = require('../services/alpaca_paper_service');
 const store = require('../services/alpaca_day_trade_store');
 const { DEFAULT_DAY_TRADE_POLICY } = require('../services/alpaca_day_trade_order_policy');
@@ -8,7 +8,7 @@ const { computeDayTradeJournalAnalytics, computeDailyRealizedPnl } = require('..
 
 const TERMINAL_PLAN_STATES = ['closed', 'cancelled', 'error'];
 
-const router = express.Router();
+const router = createAsyncRouter();
 
 // v1 is retired: this router is read-only historical visibility. Every former mutation is
 // refused before any store write or broker client construction; the v2 strategy lab lives

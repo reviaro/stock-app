@@ -10,10 +10,10 @@ function fmt(n: number | null | undefined, d = 2) {
 }
 
 function actionClass(action: string) {
-  if (action === 'Candidate') return 'bg-green-900/40 text-green-300 border-green-500/40'
-  if (action === 'Avoid') return 'bg-red-900/40 text-red-300 border-red-500/40'
-  if (action === 'Wait') return 'bg-amber-900/40 text-amber-300 border-amber-500/40'
-  return 'bg-blue-900/40 text-blue-300 border-blue-500/40'
+  if (action === 'Candidate') return 'bg-green-900/40 text-positive border-green-500/40'
+  if (action === 'Avoid') return 'bg-red-900/40 text-negative border-red-500/40'
+  if (action === 'Wait') return 'bg-amber-900/40 text-warning border-amber-500/40'
+  return 'bg-blue-900/40 text-info border-blue-500/40'
 }
 
 export function OpportunitiesPage() {
@@ -23,7 +23,7 @@ export function OpportunitiesPage() {
   return (
     <div className="min-h-screen bg-background p-4">
       <div className="max-w-[1600px] mx-auto space-y-4">
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-bold text-foreground">Opportunities</h1>
             <p className="text-sm text-muted-foreground">Quality/value triage for the watchlist. A high score means “research first,” not “buy blindly.”</p>

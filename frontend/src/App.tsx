@@ -1,6 +1,8 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
+import { WorkspaceErrorBoundary } from '@/components/WorkspaceErrorBoundary'
+import { useQueryClient } from '@tanstack/react-query'
+import { AnimatePresence, motion, MotionConfig } from 'framer-motion'
 
 const Dashboard = lazy(() => import('@/components/Dashboard').then((module) => ({ default: module.Dashboard })))
 const SimulatorPage = lazy(() => import('@/pages/SimulatorPage').then((module) => ({ default: module.SimulatorPage })))
@@ -104,6 +106,8 @@ function LoginPage({ onAuthenticated, initialError }: {
 }
 
 function App() {
+  const queryClient = useQueryClient()
+  const [logoutError, setLogoutError] = useState('')
   const [activeTab, setActiveTab] = useState<Tab>('dashboard')
   const [auth, setAuth] = useState<AuthState>({ status: 'loading' })
 
@@ -126,11 +130,15 @@ function App() {
   }, [])
 
   async function logout() {
+    setLogoutError('')
     try {
-      await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' })
-    } finally {
+      const response = await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' })
+      if (!response.ok) throw new Error('Sign out failed. Please try again.')
+      queryClient.clear()
       setActiveTab('dashboard')
       setAuth({ status: 'guest' })
+    } catch {
+      setLogoutError('Unable to sign out. Check your connection and try again.')
     }
   }
 
@@ -142,15 +150,18 @@ function App() {
   }
 
   return (
-    <div>
-      <nav className="sticky top-0 z-50 flex items-end gap-1 overflow-x-auto border-b border-border bg-background/90 backdrop-blur-sm px-4 pt-3 pb-0">
+    <MotionConfig reducedMotion="user">
+      <a href="#workspace-content" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[70] focus:rounded focus:bg-background focus:p-3 focus:text-foreground">Skip to workspace</a>
+      <nav aria-label="Workspaces" className="sticky top-0 z-50 flex items-end gap-1 overflow-x-auto border-b border-border bg-background/90 backdrop-blur-sm px-4 pt-3 pb-0">
         {TABS.map((tab) => (
           <button
             key={tab.id}
             type="button"
+            aria-current={activeTab === tab.id ? 'page' : undefined}
+            aria-controls="workspace-content"
             onClick={() => setActiveTab(tab.id)}
             className={[
-              'px-4 py-1.5 text-sm rounded-t-md border border-b-0 transition-colors',
+              'shrink-0 whitespace-nowrap px-4 py-2 text-sm rounded-t-md border border-b-0 transition-colors',
               activeTab === tab.id
                 ? 'border-border bg-card text-foreground font-semibold'
                 : 'border-transparent text-muted-foreground hover:text-foreground',
@@ -172,7 +183,10 @@ function App() {
         </div>
       </nav>
 
-      <AnimatePresence mode="sync" initial={false}>
+      {logoutError && <p role="alert" className="p-3 text-sm text-destructive">{logoutError}</p>}
+      <section id="workspace-content" tabIndex={-1} aria-label={TABS.find((tab) => tab.id === activeTab)?.label}>
+      <WorkspaceErrorBoundary key={activeTab} onReturn={activeTab === 'dashboard' ? undefined : () => setActiveTab('dashboard')}>
+      <AnimatePresence mode="wait" initial={false}>
         <motion.div
           key={activeTab}
           initial={{ opacity: 0, y: 12 }}
@@ -195,7 +209,9 @@ function App() {
           </Suspense>
         </motion.div>
       </AnimatePresence>
-    </div>
+      </WorkspaceErrorBoundary>
+      </section>
+    </MotionConfig>
   )
 }
 

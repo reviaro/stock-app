@@ -100,7 +100,7 @@ export function MemoDrawer({ symbol, open, onOpenChange, initialDraft = null }: 
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="w-[480px] sm:max-w-none overflow-y-auto">
+      <SheetContent side="right" className="w-full max-w-[calc(100vw-1rem)] sm:w-[480px] sm:max-w-none overflow-y-auto">
         <SheetHeader>
           <SheetTitle>{symbol} — Memo</SheetTitle>
           <SheetDescription>Capture thesis, valuation, rules, and risks for {symbol}.</SheetDescription>

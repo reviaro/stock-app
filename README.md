@@ -59,12 +59,13 @@ flowchart LR
 
 ## Numbers
 
-Counted from this branch and its passing test runs; test counts change as the app evolves.
+Counts reflect this branch's source files and passing full-suite or targeted test runs;
+they change as the app evolves.
 
 | Measure | Count |
 |---|---:|
-| Backend JavaScript tests / test files | 719 / 73 |
-| Frontend tests / test files | 72 / 23 |
+| Backend JavaScript tests / test files | 758 / 79 |
+| Frontend tests / test files | 88 / 27 |
 | API route files | 19 |
 | Standalone migration files | 2 |
 
@@ -133,7 +134,9 @@ from port 3002.
 
 ### Prerequisites
 
-- Node.js **20.17.0 or newer** (required by the backend's `sqlite3` dependency)
+- Node.js **24** is recommended and used by CI. The frontend also supports
+  Node.js **20.19+** or **22.12+** within those major versions; earlier versions
+  cannot run the installed Vite and jsdom dependencies.
 - Python **3.11 or newer** (required by the backend's `pandas` dependency)
 
 ### Backend
@@ -323,14 +326,26 @@ scoped automation contract, adjustable risk limits, immutable runs, and rollout
 requirements. New evaluated buys require an explicitly configured risk policy.
 
 ```bash
-cd backend && npm test        # node --test — routes, ledger, tax math, migration, AI simulator tools
+cd backend && npm test        # isolated node:test suite; no application credentials needed
+cd backend && venv/bin/python -m unittest discover -s python -p 'test_quality.py' -v
 cd backend && portfolio_lab/venv/bin/python -m unittest portfolio_lab/test_worker.py -v
 cd frontend && npm test       # vitest + testing-library
 cd frontend && npx tsc -b     # type check
+cd frontend && npm run lint
 ```
 
-Backend tests stub the Python bridge and run against throwaway SQLite files, so
-they need no network and never touch `stocks.db`.
+`npm test` in the backend clears inherited application settings, disables local
+`.env` loading in test processes and their Node children, and assigns temporary
+SQLite databases before application imports. Database fixtures use unique
+operating-system temporary directories, including their journals and migration
+backups. Each file runs in its own process; do not disable test process isolation.
+Tests use mocked market-data and broker responses and local HTTP/WebSocket
+fixtures. They require local socket access, but no external API credentials or
+market-data requests. Install the Python environments above before running them.
+
+To run one backend file, use `npm test -- test/portfolio_ledger.test.js` from
+`backend/`. The launcher allows two minutes per test file and twenty minutes for
+the suite. CI runs the backend, frontend, and Portfolio Lab checks on pull requests.
 
 ## Notes
 

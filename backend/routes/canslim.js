@@ -1,5 +1,5 @@
-const express = require('express');
-const router = express.Router();
+const { createAsyncRouter } = require('../services/http_errors');
+const router = createAsyncRouter();
 const pybridge = require('../services/pybridge');
 
 // GET /api/canslim/market/direction - Get current market direction (FTD analysis)
@@ -8,7 +8,7 @@ router.get('/market/direction', async (req, res) => {
         const result = await pybridge.getMarketDirection();
         res.json({ status: 'success', data: result });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 
@@ -24,7 +24,7 @@ router.get('/:symbol', async (req, res) => {
         
         res.json(result);
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 

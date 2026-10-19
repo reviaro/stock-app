@@ -1,8 +1,7 @@
-const { test, before, after } = require('node:test');
+const { test, before } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sim-run-'));
-process.env.DB_PATH_OVERRIDE = path.join(dir, 'test.db');
+const { createTestDatabase } = require('../test-support/test_database');
+createTestDatabase();
 const hybrid = require('../services/hybrid_market_data');
 let price = 100;
 hybrid.getDefaultHybridQuote = async (symbol) => ({ symbol, price: symbol === 'SPY' ? 100 : price,
@@ -23,7 +22,6 @@ before(async () => {
     version = await strategy.addVersion(exp.id, { rules: { evaluation_policy: { min_observations: 2, min_closed_trades: 1,
         max_drawdown_pct: 20, min_return_pct: 0, min_excess_return_pct: 0 } } });
 });
-after(() => fs.rmSync(dir, { recursive: true, force: true }));
 const config = () => ({ strategy_version_id: version.id, model_id: 'frozen-test-model', prompt_hash: 'a'.repeat(64), benchmark_symbol: 'SPY' });
 
 test('archived runs preserve immutable source, quotes, decisions and independently computed net outcomes', async () => {

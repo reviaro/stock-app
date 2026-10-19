@@ -21,7 +21,7 @@ function holdingPeriodLabel(oldestLotDate: string | null) {
 
 function moveClass(n: number | null) {
   if (n == null) return 'text-muted-foreground'
-  return n >= 0 ? 'text-green-400' : 'text-red-400'
+  return n >= 0 ? 'text-positive' : 'text-negative'
 }
 
 function fmtMove(change: number | null, pct: number | null) {
@@ -73,10 +73,10 @@ export function HoldingsPanel({ accountId, onSell }: Props) {
                     {fmtMove(h.priceChange, h.priceChangePct)}
                   </td>
                   <td className="font-mono text-right py-1 pr-2">{h.currentValue != null ? `$${fmt(h.currentValue)}` : '—'}</td>
-                  <td className={`font-mono text-right py-1 pr-2 ${h.pnl != null && h.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  <td className={`font-mono text-right py-1 pr-2 ${h.pnl != null && h.pnl >= 0 ? 'text-positive' : 'text-negative'}`}>
                     {h.pnl != null ? `${h.pnl >= 0 ? '+' : ''}$${fmt(h.pnl)}` : '—'}
                   </td>
-                  <td className={`font-mono text-right py-1 pr-2 ${h.pnlPct != null && h.pnlPct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  <td className={`font-mono text-right py-1 pr-2 ${h.pnlPct != null && h.pnlPct >= 0 ? 'text-positive' : 'text-negative'}`}>
                     {h.pnlPct != null ? `${h.pnlPct >= 0 ? '+' : ''}${fmt(h.pnlPct)}%` : '—'}
                   </td>
                   <td className="text-right py-1 pr-2 text-muted-foreground">{holdingPeriodLabel(h.oldest_lot_date)}</td>

@@ -4,8 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 
-const TEST_DB = path.join(__dirname, 'test_stocks_routes.db');
-process.env.DB_PATH_OVERRIDE = TEST_DB;
+const { createTestDatabase } = require('../test-support/test_database');
+const TEST_DB = createTestDatabase();
 
 const express = require('express');
 const db = require('../database/db');

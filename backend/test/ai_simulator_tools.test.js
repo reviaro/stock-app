@@ -2,10 +2,9 @@ const { seedRiskPolicies } = require('../test-support/simulator_risk_fixture');
 const { test, before, beforeEach, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
-const path = require('path');
 
-const TEST_DB = path.join(__dirname, 'test_ai_sim_tools.db');
-process.env.DB_PATH_OVERRIDE = TEST_DB;
+const { createTestDatabase } = require('../test-support/test_database');
+const TEST_DB = createTestDatabase();
 
 // Stub pybridge before ai_service is loaded
 const Module = require('module');

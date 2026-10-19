@@ -1,4 +1,10 @@
 function computeBreaches({ positions = [], cash = 0, rules }) {
+    const missingPriceSymbols = positions
+        .filter((position) => position.shares !== 0 && (!Number.isFinite(position.currentValue) || position.currentValue < 0))
+        .map((position) => position.symbol).sort();
+    if (missingPriceSymbols.length > 0) {
+        return { totalValue: null, cashPct: null, breaches: [], riskAssessment: 'incomplete', missingPriceSymbols };
+    }
     const {
         max_position_pct,
         max_sector_pct,
@@ -12,7 +18,7 @@ function computeBreaches({ positions = [], cash = 0, rules }) {
     const cashPct = totalValue > 0 && cash != null ? (cashValue / totalValue) * 100 : null;
     const breaches = [];
 
-    if (totalValue <= 0) return { totalValue, cashPct, breaches };
+    if (totalValue <= 0) return { totalValue, cashPct, breaches, riskAssessment: 'complete', missingPriceSymbols };
 
     for (const position of positions) {
         if (position.currentValue == null) continue;
@@ -72,7 +78,7 @@ function computeBreaches({ positions = [], cash = 0, rules }) {
         });
     }
 
-    return { totalValue, cashPct, breaches };
+    return { totalValue, cashPct, breaches, riskAssessment: 'complete', missingPriceSymbols };
 }
 
 module.exports = { computeBreaches };

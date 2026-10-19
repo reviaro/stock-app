@@ -21,6 +21,7 @@ export function ModeInputsPanel({ mode, inputs, onChange, onRun, disabled }: Pro
         {fields.map((field) => (
           <input
             key={field}
+            aria-label={field}
             value={(inputs[field] ?? '').toString()}
             onChange={(e) => onChange({ ...inputs, [field]: e.target.value.toUpperCase() })}
             placeholder={field}

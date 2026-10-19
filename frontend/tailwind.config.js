@@ -10,6 +10,11 @@ export default {
   			sm: 'calc(var(--radius) - 4px)'
   		},
   		colors: {
+        positive: 'hsl(var(--positive))',
+        negative: 'hsl(var(--negative))',
+        warning: 'hsl(var(--warning))',
+        info: 'hsl(var(--info))',
+        highlight: 'hsl(var(--highlight))',
   			background: 'hsl(var(--background))',
   			foreground: 'hsl(var(--foreground))',
   			card: {

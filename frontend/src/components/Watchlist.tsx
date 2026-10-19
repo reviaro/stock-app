@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { QuoteRefresh } from '@/components/QuoteRefresh'
 import { MemoDrawer } from '@/components/MemoDrawer'
 import { useMemosListQuery } from '@/hooks/useMemo'
 import { useWatchlist, useAddToWatchlist, useRemoveFromWatchlist, useSetWatchlistBucket, searchStocks } from '@/hooks/useWatchlist'
@@ -44,12 +45,13 @@ interface WatchlistRowProps {
   hasMemo: boolean
   isMemoStale: boolean
   isRemoving: boolean
+  isChangingBucket?: boolean
   displayMode: SortField
   snapshots?: Partial<Record<'openish' | 'midday' | 'closeish' | 'manual-open', { price: number; captured_at: string }>>
   now: number
 }
 
-function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketChange, hasMemo, isMemoStale, isRemoving, displayMode, snapshots, now }: WatchlistRowProps) {
+function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketChange, hasMemo, isMemoStale, isRemoving, isChangingBucket, displayMode, snapshots, now }: WatchlistRowProps) {
   const isPositive = (entry.changePercent ?? 0) >= 0
   const hasPriceData = entry.price !== undefined
 
@@ -113,7 +115,7 @@ function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketC
   return (
     <motion.div
       className={[
-        'group w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg',
+        'group w-full flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-lg',
         'data-hover text-left border border-transparent',
         isSelected ? 'bg-accent border-border ring-1 ring-primary' : '',
       ].join(' ')}
@@ -122,7 +124,7 @@ function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketC
       <button
         type="button"
         onClick={() => onSelect(entry.symbol)}
-        className="flex-1 min-w-0"
+        className="basis-full sm:basis-auto flex-1 min-w-0 rounded-md text-left"
         aria-pressed={isSelected}
         aria-label={`Select ${entry.symbol}`}
       >
@@ -134,7 +136,7 @@ function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketC
                 {entry.sector ?? '—'}
               </span>
               {showEarningsBadge && earningsDaysAway != null && (
-                <Badge variant="outline" className="text-[9px] py-0 px-1 text-amber-400 border-amber-400/40">
+                <Badge variant="outline" className="text-[9px] py-0 px-1 text-warning border-amber-400/40">
                   ER {earningsDaysAway === 0 ? 'today' : `in ${earningsDaysAway}d`}
                 </Badge>
               )}
@@ -145,12 +147,12 @@ function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketC
             {(nearHigh || isVolumeSurge) && (
               <div className="mt-1 flex items-center gap-1 flex-wrap">
                 {nearHigh && pctFrom52High != null && (
-                  <Badge variant="outline" className="text-[9px] py-0 px-1 text-green-400 border-green-400/40">
+                  <Badge variant="outline" className="text-[9px] py-0 px-1 text-positive border-green-400/40">
                     {pctFrom52High >= 0 ? 'NEW HIGH' : `${pctFrom52High.toFixed(1)}% 52w`}
                   </Badge>
                 )}
                 {isVolumeSurge && entry.volume != null && entry.avgVolume != null && (
-                  <Badge variant="outline" className="text-[9px] py-0 px-1 text-blue-400 border-blue-400/40">
+                  <Badge variant="outline" className="text-[9px] py-0 px-1 text-info border-blue-400/40">
                     VOL {(entry.volume / entry.avgVolume).toFixed(1)}x
                   </Badge>
                 )}
@@ -172,9 +174,11 @@ function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketC
 
       <select
         value={entry.bucket}
+        aria-label={`Bucket for ${entry.symbol}`}
+        disabled={isChangingBucket}
         onChange={(e) => onBucketChange(entry.symbol, e.target.value as Bucket)}
         onClick={(e) => e.stopPropagation()}
-        className="text-[10px] px-1.5 py-1 rounded bg-secondary border border-border shrink-0"
+        className="text-xs px-2 py-2 rounded bg-secondary border border-border shrink-0"
       >
         {BUCKETS.map(b => <option key={b} value={b}>{BUCKET_LABELS[b]}</option>)}
       </select>
@@ -184,7 +188,7 @@ function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketC
         onClick={(e) => { e.stopPropagation(); onMemo(entry.symbol) }}
         title={hasMemo ? 'Edit research memo' : 'Add research memo'}
         className={[
-          'data-hover relative z-10 text-[10px] px-2 py-1 rounded border shrink-0 transition-colors',
+          'data-hover relative z-10 text-xs px-3 py-2 rounded border shrink-0 transition-colors',
           hasMemo ? 'border-primary text-primary bg-primary/10' : 'border-border text-muted-foreground hover:text-foreground hover:border-primary',
           isMemoStale ? 'ring-1 ring-amber-500/60' : '',
         ].join(' ')}
@@ -196,7 +200,7 @@ function WatchlistRow({ entry, isSelected, onSelect, onRemove, onMemo, onBucketC
         type="button"
         onClick={(e) => { e.stopPropagation(); onRemove(entry.symbol) }}
         disabled={isRemoving}
-        className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive p-1 rounded shrink-0"
+        className="flex min-h-9 min-w-9 items-center justify-center text-muted-foreground hover:text-destructive focus-visible:text-destructive rounded border border-border shrink-0"
         aria-label={`Remove ${entry.symbol} from watchlist`}
         title="Remove from watchlist"
       >
@@ -222,6 +226,7 @@ function AddStockSearch({ onClose }: { onClose: () => void }) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<StockSearchResult[]>([])
   const [isSearching, setIsSearching] = useState(false)
+  const [searchError, setSearchError] = useState('')
   const addMutation = useAddToWatchlist()
   const inputRef = useRef<HTMLInputElement>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -236,11 +241,15 @@ function AddStockSearch({ onClose }: { onClose: () => void }) {
   const runSearch = useCallback(async (searchQuery: string) => {
     const generation = ++requestGenerationRef.current
     setIsSearching(true)
+    setSearchError('')
     try {
       const data = await searchStocks(searchQuery)
       if (generation === requestGenerationRef.current) setResults(data)
-    } catch {
-      if (generation === requestGenerationRef.current) setResults([])
+    } catch (error) {
+      if (generation === requestGenerationRef.current) {
+        setResults([])
+        setSearchError(error instanceof Error ? error.message : 'Unable to search stocks. Please try again.')
+      }
     } finally {
       if (generation === requestGenerationRef.current) setIsSearching(false)
     }
@@ -284,17 +293,19 @@ function AddStockSearch({ onClose }: { onClose: () => void }) {
         <div className="relative flex-1">
           <input
             ref={inputRef}
-            type="text"
+            type="search"
+            aria-label="Search stocks by symbol or name"
             value={query}
             onChange={(e) => {
               const nextQuery = e.target.value
               requestGenerationRef.current += 1
               setQuery(nextQuery)
               setResults([])
+              setSearchError('')
               setIsSearching(Boolean(nextQuery.trim()))
             }}
             placeholder="Search by symbol or name…"
-            className="w-full pl-3 pr-8 py-1.5 rounded-md bg-secondary text-foreground text-sm border border-border focus:border-primary focus:outline-none transition-colors placeholder:text-muted-foreground"
+            className="w-full pl-3 pr-12 py-2 rounded-md bg-secondary text-foreground text-sm border border-border focus:border-primary focus:outline-none transition-colors placeholder:text-muted-foreground"
             onKeyDown={(e) => {
               if (e.key === 'Escape') onClose()
               if (e.key === 'Enter') {
@@ -307,7 +318,7 @@ function AddStockSearch({ onClose }: { onClose: () => void }) {
           <button
             type="button"
             onClick={() => void triggerSearch()}
-            className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground p-0.5 rounded transition-colors"
+            className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground min-h-9 min-w-9 flex items-center justify-center rounded transition-colors"
             aria-label="Search"
             title="Search"
           >
@@ -334,7 +345,8 @@ function AddStockSearch({ onClose }: { onClose: () => void }) {
           {isSearching && (
             <p className="text-xs text-muted-foreground px-3 py-2">Searching…</p>
           )}
-          {!isSearching && results.length === 0 && (
+          {searchError && <div role="alert" className="px-3 py-2 text-xs text-destructive">{searchError} <button type="button" onClick={() => void triggerSearch()} className="ml-2 rounded border border-border px-2 py-1">Retry search</button></div>}
+          {!isSearching && !searchError && results.length === 0 && (
             <p className="text-xs text-muted-foreground px-3 py-2">No results found</p>
           )}
           {results.map((stock) => (
@@ -356,7 +368,7 @@ function AddStockSearch({ onClose }: { onClose: () => void }) {
       )}
       {/* Error message */}
       {addMutation.isError && (
-        <p className="text-xs text-destructive mt-1">
+        <p role="alert" className="text-xs text-destructive mt-1">
           {addMutation.error instanceof Error ? addMutation.error.message : 'Failed to add stock'}
         </p>
       )}
@@ -384,7 +396,7 @@ export function Watchlist() {
     return now - new Date(m.last_reviewed_at).getTime() > 30 * 86400000
   }
 
-  const { data, isLoading, isError, error } = useWatchlist()
+  const { data, isLoading, isError, error, refetch, isFetching, dataUpdatedAt } = useWatchlist()
   const { data: snapshotMap } = useTodaySnapshotMap()
   const selectedTicker = useTickerStore((s) => s.selectedTicker)
   const setSelectedTicker = useTickerStore((s) => s.setSelectedTicker)
@@ -402,7 +414,8 @@ export function Watchlist() {
     [bucketFilter, data]
   )
 
-  const { workerApi } = useAnalysisWorker()
+  const { workerApi, failed: workerFailed } = useAnalysisWorker()
+  const useWorkerSort = filteredData.length >= 200
   const [workerSort, setWorkerSort] = useState<{
     source: WatchlistEntry[]
     sortIdx: number
@@ -451,7 +464,7 @@ export function Watchlist() {
   )
 
   useEffect(() => {
-    if (!filteredData.length || !workerApi) return
+    if (!useWorkerSort || !workerApi) return
 
     let cancelled = false
     const option = SORT_OPTIONS[activeSortIdx]
@@ -466,14 +479,16 @@ export function Watchlist() {
       if (!cancelled) setWorkerSort({ source: filteredData, sortIdx: activeSortIdx, entries })
     })
     return () => { cancelled = true }
-  }, [filteredData, activeSortIdx, workerApi, sortLocal])
+  }, [filteredData, activeSortIdx, workerApi, sortLocal, useWorkerSort])
 
   const displayData = useMemo(() => {
     if (!filteredData.length) return []
+    if (!useWorkerSort || workerFailed) return sortLocal(filteredData, activeSortIdx)
     return workerSort?.source === filteredData && workerSort.sortIdx === activeSortIdx
       ? workerSort.entries
-      : sortLocal(filteredData, activeSortIdx)
-  }, [filteredData, workerSort, sortLocal, activeSortIdx])
+      : filteredData
+  }, [filteredData, workerSort, sortLocal, activeSortIdx, useWorkerSort, workerFailed])
+  const sorting = useWorkerSort && !workerFailed && (workerSort?.source !== filteredData || workerSort?.sortIdx !== activeSortIdx)
 
   const handleRemove = async (symbol: string) => {
     try {
@@ -535,6 +550,12 @@ export function Watchlist() {
         </div>
       </CardHeader>
       <CardContent className="px-3 flex-1 overflow-y-auto min-h-0 pb-4">
+        <div className="mb-3"><QuoteRefresh label="watchlist" updatedAt={dataUpdatedAt} isFetching={isFetching} isError={isError} onRefresh={refetch} /></div>
+        {(removeMutation.isError || setBucket.isError) && (
+          <p role="alert" className="mb-3 text-sm text-destructive">
+            {removeMutation.isError ? `Unable to remove stock: ${removeMutation.error?.message ?? 'Please try again.'}` : `Unable to change bucket: ${setBucket.error?.message ?? 'Please try again.'}`}
+          </p>
+        )}
         <div className="flex flex-wrap gap-1 mb-3">
           {(['all', ...BUCKETS] as const).map(b => {
             const count = bucketCounts[b] ?? 0
@@ -542,6 +563,7 @@ export function Watchlist() {
             return (
               <button key={b}
                 onClick={() => setBucketFilter(b)}
+                aria-pressed={active}
                 className={[
                   'data-hover text-[10px] px-2 py-0.5 rounded-full border',
                   active ? 'bg-primary text-primary-foreground border-primary' : 'border-border text-muted-foreground hover:border-primary',
@@ -565,7 +587,7 @@ export function Watchlist() {
         )}
 
         {isError && (
-          <p className="text-destructive text-sm px-3">
+          <p role="alert" className="text-destructive text-sm px-3">
             Failed to load watchlist.{' '}
             {error instanceof Error ? error.message : 'Unknown error.'}
           </p>
@@ -573,10 +595,11 @@ export function Watchlist() {
 
         {!isLoading && !isError && displayData.length === 0 && (
           <p className="text-muted-foreground text-sm px-3">
-            Your watchlist is empty. Click "+ Add" to get started.
+            {bucketFilter === 'all' ? 'Your watchlist is empty. Click "+ Add" to get started.' : 'No stocks in this bucket. Choose All to see your watchlist.'}
           </p>
         )}
 
+        {sorting && <p role="status" className="mb-2 text-xs text-muted-foreground">Sorting watchlist…</p>}
         {displayData.length > 0 && (
           <div className="flex flex-col gap-1">
             <AnimatePresence initial={false}>
@@ -599,6 +622,7 @@ export function Watchlist() {
                     isMemoStale={isStale(memoMap.get(entry.symbol))}
                     now={now}
                     isRemoving={removeMutation.isPending}
+                    isChangingBucket={setBucket.isPending}
                     displayMode={SORT_OPTIONS[activeSortIdx].field}
                     snapshots={snapshotMap?.get(entry.symbol)}
                   />

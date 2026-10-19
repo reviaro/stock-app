@@ -1,10 +1,11 @@
-const express = require('express');
+const { createAsyncRouter } = require('../services/http_errors');
 const strategyLab = require('../services/strategy_lab');
 
-const router = express.Router();
+const router = createAsyncRouter();
 
 function sendError(res, error) {
     const status = error.statusCode || 500;
+    if (status >= 500) throw error;
     res.status(status).json({ status: 'error', error: error.message });
 }
 

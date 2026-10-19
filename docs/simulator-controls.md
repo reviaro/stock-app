@@ -24,8 +24,8 @@ trades, and record abstentions. They cannot fund/reset a sleeve, record manual
 fills/dividends, administer runs, write research evidence, invoke built-in chat,
 or execute broker orders. The built-in chat no longer exposes deposit/reset tools.
 
-With `manage_limits: true`, Buffett can use `PUT /api/simulator/risk-policy` to
-change the following settings on the authorized sleeve. The operator can use
+With `manage_limits: true`, an automation client can use `PUT /api/simulator/risk-policy`
+to change the following settings on the authorized sleeve. The operator can use
 the same endpoint with an authenticated browser session and valid Origin.
 
 | Field | Meaning |
@@ -38,13 +38,13 @@ the same endpoint with an authenticated browser session and valid Origin.
 
 Supply all five fields as finite numbers from 0 to 100; only `min_cash_pct`
 may be zero. There are no implicit live defaults. An operator or delegated
-Buffett credential must configure initial limits before new evaluated buys.
+automation credential must configure initial limits before new evaluated buys.
 `GET /api/simulator/risk-policy?account_id=2` reports the active policy and
 whether entry configuration exists; it is not an assurance that market data
 or a particular order will pass.
 
 Every change appends a policy version with actor and timestamp. Orders record
-the version they used. Buffett should change limits when the user requests it,
+the version they used. An automation client should change limits only when authorized,
 then read back and explain the saved values, rather than silently relaxing them
 to fit a proposed trade. This intent restriction is prompt guidance; possession
 of a `manage_limits` credential technically allows limit updates within its sleeve.
@@ -127,21 +127,19 @@ Manually entered Strategy Lab metrics remain unverified. This implementation
 produces verified **simulator paper** artifacts only. Verified backtest and
 out-of-sample artifacts still need a reproducible replay runner with frozen
 datasets. Promotion gates remain blocked while those artifacts are missing;
-labels alone cannot satisfy them. This does not complete the whole F06/F07/F12
-research roadmap or the F08/F09 intraday/broker lifecycle.
+labels alone cannot satisfy them. These simulator artifacts do not establish
+intraday execution quality or validate an external broker's order lifecycle.
 
-## Rollout
+## Deployment checklist
 
-Build/test in development. Before a separately approved production deployment:
+Build and test changes before deploying them to an installation with saved data:
 
 - Back up code, runtime configuration, and the database.
-- Provision separate sleeve credentials, with delegated limit management for
-  Buffett as requested, and ensure the agent receives only the intended secret.
-- Update cron HTTP calls to send their scoped token; loopback writes will be
-  rejected under the new release. Preserve price-free, idempotent trade payloads.
-- Configure initial limits through the operator session or Buffett's delegated
-  credential, then verify their readback and a denied cross-sleeve/admin request.
+- Provision separate sleeve credentials and grant limit management only to
+  authorized clients. Share each credential only with its intended client.
+- Configure automated HTTP calls to send their scoped token; loopback access
+  permits reads only. Preserve price-free, idempotent trade payloads.
+- Configure initial limits through the operator session or an authorized
+  limit-management credential. Verify readback and denial of cross-sleeve and
+  administrative requests from scoped clients.
 - Start a fresh evaluation run when desired; do not relabel historical trades.
-
-The existing stock-dashboard production deployment is documented separately in
-the local readiness review. Updating this source does not deploy it.

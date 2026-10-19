@@ -9,6 +9,7 @@ interface Props {
 export function ModesDropdown({ value, onChange, disabled }: Props) {
   return (
     <select
+      aria-label="Analyst mode"
       value={value}
       onChange={(e) => onChange(e.target.value as ModeName)}
       disabled={disabled}

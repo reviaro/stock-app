@@ -5,8 +5,8 @@ const http = require('http');
 const path = require('path');
 const express = require('express');
 
-const TEST_DB = path.join(__dirname, 'test_alpaca_day_trading_v2_routes.db');
-process.env.DB_PATH_OVERRIDE = TEST_DB;
+const { createTestDatabase } = require('../test-support/test_database');
+const TEST_DB = createTestDatabase();
 const db = require('../database/db');
 const store = require('../services/alpaca_day_trade_v2_store');
 const { createV2Router } = require('../routes/alpaca_day_trading_v2');
@@ -301,6 +301,35 @@ test('operator resolve needs the typed symbol and a flat broker; it never mutate
     assert.strictEqual((await store.getPlan(plan.id)).state, 'cancelled');
     assert.strictEqual(broker.calls.mutations, 0);
 });
+
+for (const reconciledState of ['attention_required', 'closed']) {
+    test(`operator resolve preserves concurrent reconciliation to ${reconciledState}`, async () => {
+        const { plan } = await store.createPlan({
+            client_order_id: 'dt2-20260923-nvda-orb', symbol: 'NVDA', setup: 'orb', catalyst: 'c', thesis: 't', invalidation: 'i',
+            planned_qty: 10, planned_entry_price: 100.5, planned_stop: 98, planned_target: 104, planned_risk_dollars: 25,
+            exit_deadline: '2026-09-23T19:30:00.000Z',
+        });
+        await store.latchAttention({ planId: plan.id, code: 'SUBMISSION_UNKNOWN', eventKey: 'resolve-race' });
+        let reconciled;
+        broker.client.getPosition = async () => {
+            reconciled = await store.updatePlan(plan.id, {
+                state: reconciledState, filled_entry_qty: 10, avg_entry_price: 100, filled_exit_qty: 10, avg_exit_price: 104,
+                exit_reason: 'take_profit', realized_pnl: 40, realized_r: 1.6,
+                ...(reconciledState === 'closed' ? { closed_at: '2026-09-23T18:00:00.000Z' } : {}),
+            });
+            return null;
+        };
+        broker.client.getOrderByClientOrderId = async () => ({ found: true, order: { status: 'filled', filled_qty: '10' } });
+
+        const response = await withServer(OPERATOR, (server) => request(server, 'POST', `/v2/plans/${plan.id}/resolve`, { confirm: 'NVDA' }));
+
+        assert.strictEqual(response.status, 409, response.text);
+        assert.strictEqual(response.body.code, 'ALPACA_V2_CONTROL_STATE_CHANGED');
+        assert.deepStrictEqual(await store.getPlan(plan.id), reconciled);
+        assert.strictEqual((await store.listEvents(plan.id)).some((event) => event.action === 'operator_resolved'), false);
+        assert.strictEqual(broker.calls.mutations, 0);
+    });
+}
 
 // ---- readers ----
 

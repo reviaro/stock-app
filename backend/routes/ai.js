@@ -1,4 +1,4 @@
-const express = require('express');
+const { createAsyncRouter } = require('../services/http_errors');
 const { convertToModelMessages, stepCountIs } = require('ai');
 const { getAIModels, AIConfigurationError } = require('../services/ai_models');
 const { generateWithModels, streamWithModels } = require('../services/ai_generation');
@@ -7,7 +7,7 @@ const pybridgeAI = require('../services/pybridge');
 const { getMode, validateInputs } = require('../services/ai_modes');
 const aiContext = require('../services/ai_context');
 
-const router = express.Router();
+const router = createAsyncRouter();
 
 const db = require('../database/db');
 
@@ -133,7 +133,7 @@ router.delete('/history', async (req, res) => {
     await db.clearChatHistory(sessionId);
     res.json({ status: 'success' });
   } catch (err) {
-    res.status(500).json({ status: 'error', error: err.message });
+    throw err;
   }
 });
 
@@ -191,8 +191,10 @@ router.post('/chat', async (req, res) => {
 
 // POST /api/ai/memo-draft — generate a memo draft for a symbol
 router.post('/memo-draft', async (req, res) => {
-  const symbol = (req.body?.symbol || '').toUpperCase();
-  if (!symbol) return res.status(400).json({ status: 'error', error: 'symbol required' });
+  const symbol = typeof req.body?.symbol === 'string' ? req.body.symbol.trim().toUpperCase() : '';
+  if (!symbol || symbol.length > 32 || !/^[A-Z0-9^][A-Z0-9.^=/-]*$/.test(symbol)) {
+    return res.status(400).json({ status: 'error', error: 'symbol must be a valid ticker string' });
+  }
 
   try {
     const [info, quality, tech, news] = await Promise.all([
@@ -214,14 +216,16 @@ router.post('/memo-draft', async (req, res) => {
     const draft = JSON.parse(jsonMatch[0]);
     res.json({ status: 'success', data: draft });
   } catch (err) {
-    res.status(500).json({ status: 'error', error: err.message });
+    throw err;
   }
 });
 
 // POST /api/ai/pressure-test — write a bear case against the saved memo
 router.post('/pressure-test', async (req, res) => {
-  const symbol = (req.body?.symbol || '').toUpperCase();
-  if (!symbol) return res.status(400).json({ status: 'error', error: 'symbol required' });
+  const symbol = typeof req.body?.symbol === 'string' ? req.body.symbol.trim().toUpperCase() : '';
+  if (!symbol || symbol.length > 32 || !/^[A-Z0-9^][A-Z0-9.^=/-]*$/.test(symbol)) {
+    return res.status(400).json({ status: 'error', error: 'symbol must be a valid ticker string' });
+  }
 
   try {
     const [memo, info, news] = await Promise.all([
@@ -240,7 +244,7 @@ router.post('/pressure-test', async (req, res) => {
 
     res.json({ status: 'success', data: { bear_case: text } });
   } catch (err) {
-    res.status(500).json({ status: 'error', error: err.message });
+    throw err;
   }
 });
 

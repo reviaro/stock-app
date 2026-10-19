@@ -94,7 +94,7 @@ export function DayTradingJournalCard() {
 
   return (
     <Card aria-label="Alpaca Day Trading journal analytics">
-      <CardHeader className="pb-2"><CardTitle><h2>Day Trading journal</h2></CardTitle></CardHeader>
+      <CardHeader className="pb-2"><CardTitle>Day Trading journal</CardTitle></CardHeader>
       <CardContent className="space-y-4 px-3 pb-4">
         {isLoading && <p className="text-xs text-muted-foreground">Loading journal…</p>}
         {isError && <p className="text-xs text-destructive">Journal analytics unavailable.</p>}

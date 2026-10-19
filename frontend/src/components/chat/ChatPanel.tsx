@@ -57,7 +57,7 @@ export function ChatPanel() {
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     // Submit on Enter (Shift+Enter inserts a newline)
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault()
       handleSend()
     }
@@ -109,8 +109,8 @@ export function ChatPanel() {
 
   return (
     <Card className="h-full flex flex-col min-h-[400px]">
-        <CardHeader className="pb-2 pt-3 px-4 flex flex-row items-center justify-between shrink-0 space-y-0">
-        <div className="flex items-center gap-2">
+        <CardHeader className="pb-2 pt-3 px-4 flex flex-row flex-wrap gap-2 items-center justify-between shrink-0 space-y-0">
+        <div className="flex flex-wrap items-center gap-2">
           <CardTitle className="text-base flex items-center gap-2">
             <span className="inline-block w-2 h-2 rounded-full bg-green-400 animate-pulse" />
             AI Financial Analyst
@@ -137,6 +137,7 @@ export function ChatPanel() {
               className="h-8 px-2 text-muted-foreground hover:text-destructive"
               onClick={() => setMessages([])}
               title="Clear conversation"
+              aria-label="Clear conversation"
             >
               <Trash2 className="h-4 w-4" />
             </Button>
@@ -149,6 +150,10 @@ export function ChatPanel() {
         {/* Message list */}
         <div
           ref={scrollRef}
+          role="log"
+          aria-label="Analyst conversation"
+          aria-live="polite"
+          aria-busy={isLoading}
           className="flex-1 overflow-y-auto space-y-2 pr-1"
           style={{ minHeight: 0 }}
         >
@@ -180,7 +185,7 @@ export function ChatPanel() {
 
           {/* Error display */}
           {error && (
-            <div className="text-xs text-destructive bg-destructive/10 rounded-md p-2 mt-2">
+            <div role="alert" className="text-xs text-destructive bg-destructive/10 rounded-md p-2 mt-2">
               Error: {error.message || 'Something went wrong. Please try again.'}
             </div>
           )}
@@ -189,12 +194,13 @@ export function ChatPanel() {
         {/* Input area */}
         <div className="flex gap-2 items-end shrink-0">
           <textarea
+            aria-label="Message to financial analyst"
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="Ask about a stock, sector, or market condition..."
             rows={1}
-            className="flex-1 min-h-[36px] max-h-[120px] resize-none rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            className="flex-1 min-w-0 min-h-[36px] max-h-[120px] resize-none rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
             disabled={isLoading}
           />
 
@@ -205,6 +211,7 @@ export function ChatPanel() {
               size="icon"
               onClick={stop}
               title="Stop generation"
+              aria-label="Stop generation"
               className="shrink-0"
             >
               <Square className="h-4 w-4" />
@@ -216,6 +223,7 @@ export function ChatPanel() {
               disabled={mode === 'free' ? !inputValue.trim() : false}
               onClick={handleSend}
               title="Send message"
+              aria-label="Send message"
               className="shrink-0"
             >
               <Send className="h-4 w-4" />

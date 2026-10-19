@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { applySavedTheme } from './theme'
 
 describe('applySavedTheme', () => {
@@ -17,4 +17,11 @@ describe('applySavedTheme', () => {
     applySavedTheme()
     expect(document.documentElement).not.toHaveClass('dark')
   })
+  it('still starts when browser storage is unavailable', () => {
+    const storage = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('Storage blocked') })
+    expect(() => applySavedTheme()).not.toThrow()
+    expect(document.documentElement).toHaveClass('dark')
+    storage.mockRestore()
+  })
+
 })

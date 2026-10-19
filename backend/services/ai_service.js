@@ -2,7 +2,7 @@ const { tool } = require('ai');
 const { z } = require('zod');
 const pybridge = require('./pybridge');
 const dbModule = require('../database/db');
-const { buildSummary } = require('./portfolio_ledger');
+const { buildSummary, computeHoldings: computePortfolioHoldings, isValuationPrice } = require('./portfolio_ledger');
 const { computeBreaches } = require('./risk_engine');
 const {
     computeLotsForSymbol,
@@ -129,17 +129,18 @@ const tools = {
         dbModule.listPositionStops ? dbModule.listPositionStops() : Promise.resolve([]),
       ]);
 
-      if (!rules) return { status: 'success', data: { breaches: [] } };
+      if (!rules) return { status: 'success', data: { breaches: [], riskAssessment: 'not_configured' } };
 
       const stopBySymbol = Object.fromEntries((stops || []).map((stop) => [stop.symbol, stop.stop_loss]));
-      const symbols = [...new Set(transactions.map((txn) => txn.symbol).filter(Boolean))];
+      const symbols = Object.entries(computePortfolioHoldings(transactions))
+        .filter(([, holding]) => holding.shares > 0).map(([symbol]) => symbol);
       const prices = {};
       const sectors = {};
 
       await Promise.all(symbols.map(async (symbol) => {
         try {
           const info = await pybridge.getStockInfo(symbol);
-          if (typeof info?.data?.price === 'number') prices[symbol] = info.data.price;
+          if (isValuationPrice(info?.data?.price)) prices[symbol] = info.data.price;
           sectors[symbol] = info?.data?.sector ?? null;
         } catch {
           sectors[symbol] = null;
@@ -151,7 +152,7 @@ const tools = {
         symbol,
         shares: holding.shares,
         currentPrice: prices[symbol] ?? null,
-        currentValue: prices[symbol] != null ? prices[symbol] * holding.shares : null,
+        currentValue: holding.shares === 0 ? 0 : prices[symbol] != null ? prices[symbol] * holding.shares : null,
         sector: sectors[symbol] ?? null,
         stop_loss: stopBySymbol[symbol] ?? null,
       }));

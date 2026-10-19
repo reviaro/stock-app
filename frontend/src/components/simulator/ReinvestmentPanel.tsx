@@ -139,7 +139,7 @@ export function ReinvestmentPanel({ accountId }: Props) {
             {updateSettings.isPending ? 'Saving…' : 'Save compounding settings'}
           </button>
         </div>
-        {updateSettings.isError && <p className="text-xs text-red-400">Could not save compounding settings.</p>}
+        {updateSettings.isError && <p className="text-xs text-negative">Could not save compounding settings.</p>}
 
         {showDividendForm && (
           <form onSubmit={submitDividend} className="grid grid-cols-1 items-end gap-3 rounded-md border border-border p-3 md:grid-cols-[1fr_1fr_1fr_1fr_auto]">
@@ -200,7 +200,7 @@ export function ReinvestmentPanel({ accountId }: Props) {
             >
               {recordDividend.isPending ? 'Applying…' : 'Apply dividend'}
             </button>
-            {recordDividend.isError && <p className="text-xs text-red-400 md:col-span-4">Dividend was not recorded. Check the position, amount, and whether this payment was already entered.</p>}
+            {recordDividend.isError && <p className="text-xs text-negative md:col-span-4">Dividend was not recorded. Check the position, amount, and whether this payment was already entered.</p>}
           </form>
         )}
       </CardContent>

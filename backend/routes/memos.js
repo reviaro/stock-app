@@ -1,5 +1,5 @@
-const express = require('express');
-const router = express.Router();
+const { createAsyncRouter } = require('../services/http_errors');
+const router = createAsyncRouter();
 const db = require('../database/db');
 
 // GET /api/memos — list all memos
@@ -8,7 +8,7 @@ router.get('/', async (req, res) => {
     const data = await db.listMemos();
     res.json({ status: 'success', data });
   } catch (err) {
-    res.status(500).json({ status: 'error', error: err.message });
+    throw err;
   }
 });
 
@@ -19,7 +19,7 @@ router.get('/:symbol', async (req, res) => {
     if (!memo) return res.status(404).json({ status: 'error', error: 'not found' });
     res.json({ status: 'success', data: memo });
   } catch (err) {
-    res.status(500).json({ status: 'error', error: err.message });
+    throw err;
   }
 });
 
@@ -29,7 +29,7 @@ router.put('/:symbol', async (req, res) => {
     const result = await db.upsertMemo(req.params.symbol, req.body || {});
     res.json({ status: 'success', data: result });
   } catch (err) {
-    res.status(500).json({ status: 'error', error: err.message });
+    throw err;
   }
 });
 
@@ -39,7 +39,7 @@ router.post('/:symbol/reviewed', async (req, res) => {
     const result = await db.markMemoReviewed(req.params.symbol);
     res.json({ status: 'success', data: result });
   } catch (err) {
-    res.status(500).json({ status: 'error', error: err.message });
+    throw err;
   }
 });
 
@@ -49,7 +49,7 @@ router.delete('/:symbol', async (req, res) => {
     const result = await db.deleteMemo(req.params.symbol);
     res.json({ status: 'success', data: result });
   } catch (err) {
-    res.status(500).json({ status: 'error', error: err.message });
+    throw err;
   }
 });
 

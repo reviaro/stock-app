@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, useEffect } from 'react'
+import { lazy, Suspense, useState, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { Sun, Moon } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -10,6 +10,7 @@ import { QualityScorecard } from '@/components/QualityScorecard'
 import { Glossary } from '@/components/Glossary'
 import { HistoryPanel } from '@/components/HistoryPanel'
 import { PortfolioPanel } from '@/components/PortfolioPanel'
+import { savedThemeIsDark, setTheme } from '@/theme'
 import { SectorRotation } from '@/components/SectorRotation'
 
 const StockChart = lazy(() => import('@/components/StockChart').then((module) => ({ default: module.StockChart })))
@@ -39,12 +40,12 @@ const panelMotion = {}
 
 export function Dashboard() {
   const selectedTicker = useTickerStore((s) => s.selectedTicker)
+  const glossaryTrigger = useRef<HTMLButtonElement>(null)
   const [glossaryOpen, setGlossaryOpen] = useState(false)
-  const [isDark, setIsDark] = useState(() => localStorage.getItem('theme') !== 'light')
+  const [isDark, setIsDark] = useState(savedThemeIsDark)
 
   useEffect(() => {
-    document.documentElement.classList.toggle('dark', isDark)
-    localStorage.setItem('theme', isDark ? 'dark' : 'light')
+    setTheme(isDark)
   }, [isDark])
 
   const toggleTheme = () => {
@@ -53,10 +54,10 @@ export function Dashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-background p-4">
+    <main className="min-h-screen bg-background p-4">
       <div className="max-w-[1600px] mx-auto">
         {/* Header with title and glossary button */}
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <h1 className="text-2xl font-bold text-foreground">Stock Dashboard</h1>
           <div className="flex items-center gap-2">
             <button
@@ -67,14 +68,17 @@ export function Dashboard() {
               title={isDark ? 'Light mode' : 'Dark mode'}
             >
               {isDark ? (
-                <><Sun size={16} className="text-yellow-400" /> Light</>
+                <><Sun size={16} className="text-warning" /> Light</>
               ) : (
-                <><Moon size={16} className="text-blue-400" /> Dark</>
+                <><Moon size={16} className="text-info" /> Dark</>
               )}
             </button>
             <button
               type="button"
               onClick={() => setGlossaryOpen(true)}
+              ref={glossaryTrigger}
+              aria-haspopup="dialog"
+              aria-expanded={glossaryOpen}
               className="data-hover flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border border-border text-muted-foreground hover:text-foreground"
             >
               <span>📖</span> Glossary
@@ -84,7 +88,7 @@ export function Dashboard() {
 
         {/* Bento Grid Layout */}
         <div
-          className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-4"
+          className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-4 [&>*]:min-w-0"
           style={{ gridAutoFlow: 'dense' }}
         >
 
@@ -223,8 +227,8 @@ export function Dashboard() {
       </div>
 
       {/* Glossary Modal */}
-      <Glossary isOpen={glossaryOpen} onClose={() => setGlossaryOpen(false)} />
-    </div>
+      <Glossary returnFocusRef={glossaryTrigger} isOpen={glossaryOpen} onClose={() => setGlossaryOpen(false)} />
+    </main>
   )
 }
 

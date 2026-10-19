@@ -15,9 +15,9 @@ const METRIC_LABELS: Record<string, string> = {
 
 function scoreColor(score: number | null) {
   if (score == null) return 'text-muted-foreground'
-  if (score >= 80) return 'text-green-400'
-  if (score >= 65) return 'text-amber-400'
-  return 'text-red-400'
+  if (score >= 80) return 'text-positive'
+  if (score >= 65) return 'text-warning'
+  return 'text-negative'
 }
 
 function formatMetricValue(value: number | null, unit: string) {

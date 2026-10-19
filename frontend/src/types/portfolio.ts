@@ -26,10 +26,12 @@ export interface PortfolioPosition {
 export interface PortfolioSummary {
   cash: number
   cashPct: number | null
-  holdingsValue: number
-  totalValue: number
+  holdingsValue: number | null
+  totalValue: number | null
   realizedPnl: number
-  unrealizedPnl: number
+  unrealizedPnl: number | null
+  valuationComplete?: boolean
+  missingPriceSymbols?: string[]
 }
 
 export interface PortfolioTransaction {
@@ -49,6 +51,7 @@ export interface PortfolioResponse {
   holdings: PortfolioPosition[]
   recentTransactions: PortfolioTransaction[]
   breaches?: PortfolioBreach[]
+  riskAssessment?: 'complete' | 'incomplete' | 'not_configured'
   rules?: {
     max_position_pct: number
     max_sector_pct: number

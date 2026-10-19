@@ -41,4 +41,11 @@ describe('useAnalysisWorker', () => {
     await waitFor(() => expect(result.current.workerApi).toBe(mocks.api))
     expect(mocks.api).not.toHaveBeenCalled()
   })
+  it('allows local sorting when the browser blocks worker creation', async () => {
+    vi.stubGlobal('Worker', class { constructor() { throw new Error('Worker blocked') } })
+    const { result } = renderHook(() => useAnalysisWorker())
+    await waitFor(() => expect(result.current.failed).toBe(true))
+    expect(result.current.workerApi).toBeNull()
+  })
+
 })

@@ -37,7 +37,7 @@ export function V2SetupAnalyticsCard() {
   return (
     <section aria-label="Setup analytics">
       <Card>
-        <CardHeader className="pb-2"><CardTitle><h2>Setup analytics (v2 only)</h2></CardTitle></CardHeader>
+        <CardHeader className="pb-2"><CardTitle>Setup analytics (v2 only)</CardTitle></CardHeader>
         <CardContent className="space-y-3 px-3 pb-4 text-xs">
           {isLoading && <p className="text-muted-foreground">Loading analytics…</p>}
           {isError && <p className="text-destructive">Unable to load analytics.</p>}

@@ -272,6 +272,7 @@ export function HistoryPanel() {
           <CardTitle>Daily Price History</CardTitle>
           <div className="flex items-center gap-2 flex-wrap">
             <select
+              aria-label="History date range"
               value={rangeDays}
               onChange={(e) => {
                 setRangeDays(Number(e.target.value) as (typeof HISTORY_RANGE_OPTIONS)[number]['value'])
@@ -284,6 +285,7 @@ export function HistoryPanel() {
               ))}
             </select>
             <select
+              aria-label="History date"
               value={dateFilter}
               onChange={(e) => setDateFilter(e.target.value)}
               className="data-hover text-xs px-2 py-1 rounded-md border bg-transparent text-muted-foreground border-border focus:border-primary focus:outline-none"
@@ -294,6 +296,7 @@ export function HistoryPanel() {
               ))}
             </select>
             <select
+              aria-label="History snapshot time"
               value={slotFilter}
               onChange={(e) => setSlotFilter(e.target.value as 'all' | 'openish' | 'midday' | 'closeish' | 'manual-open')}
               className="data-hover text-xs px-2 py-1 rounded-md border bg-transparent text-muted-foreground border-border focus:border-primary focus:outline-none"

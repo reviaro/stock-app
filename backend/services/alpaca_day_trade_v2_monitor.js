@@ -232,6 +232,7 @@ function createV2Monitor({
     }
 
     async function tick() {
+        await store.recoverEntrySubmissions({ occurredAt: now().toISOString() });
         const state = await store.getMonitorState();
         if (state.mode === 'disabled') return { skipped: true, exposure: false };
         try {
@@ -253,6 +254,7 @@ function createV2Monitor({
     // Restart recovery: every unresolved plan is resolved by stored parent id or exact client
     // id before anything is classified. No broker match keeps it latched; never assume rejected.
     async function startup() {
+        await store.recoverEntrySubmissions({ occurredAt: now().toISOString() });
         const state = await store.getMonitorState();
         if (state.mode === 'disabled') return { skipped: true, exposure: false };
         for (const plan of await store.listNonterminalPlans()) {

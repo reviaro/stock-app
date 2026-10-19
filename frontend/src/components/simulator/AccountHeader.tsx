@@ -36,19 +36,19 @@ export function AccountHeader({ accountId }: Props) {
       </div>
       <div>
         <p className="text-xs text-muted-foreground">Total P&amp;L</p>
-        <p className={`font-mono text-sm font-semibold ${totalPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+        <p className={`font-mono text-sm font-semibold ${totalPnl >= 0 ? 'text-positive' : 'text-negative'}`}>
           {totalPnl >= 0 ? '+' : ''}${fmt(totalPnl)}
         </p>
       </div>
       <div>
         <p className="text-xs text-muted-foreground">Unrealized</p>
-        <p className={`font-mono text-sm ${(account?.unrealized_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+        <p className={`font-mono text-sm ${(account?.unrealized_pnl ?? 0) >= 0 ? 'text-positive' : 'text-negative'}`}>
           {(account?.unrealized_pnl ?? 0) >= 0 ? '+' : ''}${fmt(account?.unrealized_pnl ?? 0)}
         </p>
       </div>
       <div>
         <p className="text-xs text-muted-foreground">Realized</p>
-        <p className={`font-mono text-sm ${(account?.realized_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+        <p className={`font-mono text-sm ${(account?.realized_pnl ?? 0) >= 0 ? 'text-positive' : 'text-negative'}`}>
           {(account?.realized_pnl ?? 0) >= 0 ? '+' : ''}${fmt(account?.realized_pnl ?? 0)}
         </p>
       </div>

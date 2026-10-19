@@ -7,8 +7,8 @@ const http = require('http');
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 
-const TEST_DB = path.join(__dirname, `test_sim_routes_${process.pid}.db`);
-process.env.DB_PATH_OVERRIDE = TEST_DB;
+const { createTestDatabase } = require('../test-support/test_database');
+const TEST_DB = createTestDatabase();
 
 // Stub pybridge before any route module is loaded
 const Module = require('module');

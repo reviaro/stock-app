@@ -1,14 +1,10 @@
 const { seedRiskPolicies, executeTestOrder } = require('../test-support/simulator_risk_fixture');
-const { test, before, after } = require('node:test');
+const { test, before } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sim-atomic-'));
-process.env.DB_PATH_OVERRIDE = path.join(dir, 'test.db');
+const { createTestDatabase } = require('../test-support/test_database');
+createTestDatabase();
 const db = require('../database/db');
 before(async () => { await db.initDb(); await seedRiskPolicies(); });
-after(() => fs.rmSync(dir, { recursive: true, force: true }));
 const buy = (extra = {}) => ({ account_id: 1, type: 'buy', symbol: 'AAPL', shares: 1, price: 10, txn_date: '2026-09-04', ...extra });
 test('normalization rejects malformed new writes without changing historical rows', async () => {
     for (const extra of [{ fees: -1 }, { fees: Infinity }, { shares: Infinity }, { price: NaN }, { shares: 1e308, price: 1e308 }, { txn_date: '2026-02-30' }, { symbol: 'AAPL/US' }]) {
