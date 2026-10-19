@@ -1,6 +1,7 @@
 const { createGoogleGenerativeAI } = require('@ai-sdk/google');
 const { createOpenAI } = require('@ai-sdk/openai');
 const { createAnthropic } = require('@ai-sdk/anthropic');
+const http = require('./http_runtime');
 
 class AIConfigurationError extends Error {
   constructor(message) {
@@ -11,7 +12,7 @@ class AIConfigurationError extends Error {
 
 // Resolve per request so configuration errors don't prevent the rest of the app
 // from starting. No browser-supplied keys, model IDs, or provider URLs are used.
-function getAIModels(env = process.env, { fetch } = {}) {
+function getAIModels(env = process.env, { fetch = http.fetch } = {}) {
   const provider = (env.AI_PROVIDER || 'gemini').trim().toLowerCase();
   const modelId = env.AI_MODEL?.trim();
   const localFallback = env.AI_LOCAL_FALLBACK?.trim().toLowerCase();

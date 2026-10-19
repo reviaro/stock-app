@@ -1,3 +1,4 @@
+const httpRuntime = require('../services/http_runtime');
 const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -409,9 +410,9 @@ test('the generic paper order route is refused while v2 owns the account in pape
     await store.updateMonitorState({ mode: 'paper_execute' });
     process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED = 'true';
     process.env.ALPACA_PAPER_ORDER_ENTRY_TOKEN = 'paper-order-token';
-    const savedFetch = global.fetch;
+    const savedFetch = httpRuntime.fetch;
     let fetched = false;
-    global.fetch = async () => { fetched = true; throw new Error('no'); };
+    httpRuntime.fetch = async () => { fetched = true; throw new Error('no'); };
     const app = express();
     app.use(express.json());
     app.use('/api/alpaca-paper', require('../routes/alpaca_paper'));
@@ -425,7 +426,7 @@ test('the generic paper order route is refused while v2 owns the account in pape
         assert.strictEqual(fetched, false);
     } finally {
         await new Promise((resolve) => server.close(resolve));
-        global.fetch = savedFetch;
+        httpRuntime.fetch = savedFetch;
         delete process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED;
         delete process.env.ALPACA_PAPER_ORDER_ENTRY_TOKEN;
     }

@@ -1,3 +1,4 @@
+const httpRuntime = require('../services/http_runtime');
 const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -54,7 +55,7 @@ beforeEach(async () => {
 
 function enableMockBroker({ cash = '1000.00', position = null, openOrders = [], postResult = { id: 'private-broker-id', status: 'accepted' }, postError = null, postStatus = 200, orderEntryEnabled = true } = {}) {
     const saved = {
-        fetch: global.fetch, key: process.env.ALPACA_API_KEY, secret: process.env.ALPACA_API_SECRET,
+        fetch: httpRuntime.fetch, key: process.env.ALPACA_API_KEY, secret: process.env.ALPACA_API_SECRET,
         entryEnabled: process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED, entryToken: process.env.ALPACA_PAPER_ORDER_ENTRY_TOKEN,
     };
     process.env.ALPACA_API_KEY = 'paper-key';
@@ -68,7 +69,7 @@ function enableMockBroker({ cash = '1000.00', position = null, openOrders = [], 
     }
     const requests = [];
     const currentOpenOrders = [...openOrders];
-    global.fetch = async (url, options = {}) => {
+    httpRuntime.fetch = async (url, options = {}) => {
         requests.push({ url, options });
         if (url.endsWith('/v2/account')) return { ok: true, json: async () => ({ status: 'ACTIVE', cash }) };
         if (url.endsWith('/v2/assets/MSFT')) return { ok: true, json: async () => ({ class: 'us_equity', status: 'active', tradable: true }) };
@@ -85,7 +86,7 @@ function enableMockBroker({ cash = '1000.00', position = null, openOrders = [], 
         throw new Error(`unexpected broker request: ${url}`);
     };
     return { requests, restore() {
-        global.fetch = saved.fetch;
+        httpRuntime.fetch = saved.fetch;
         if (saved.key == null) delete process.env.ALPACA_API_KEY; else process.env.ALPACA_API_KEY = saved.key;
         if (saved.secret == null) delete process.env.ALPACA_API_SECRET; else process.env.ALPACA_API_SECRET = saved.secret;
         if (saved.entryEnabled == null) delete process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED; else process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED = saved.entryEnabled;

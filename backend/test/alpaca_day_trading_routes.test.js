@@ -1,3 +1,4 @@
+const httpRuntime = require('../services/http_runtime');
 const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -97,7 +98,7 @@ function enableDayTradingGate() {
         token: process.env.ALPACA_DAY_TRADING_ENTRY_TOKEN,
         key: process.env.ALPACA_API_KEY,
         secret: process.env.ALPACA_API_SECRET,
-        fetch: global.fetch,
+        fetch: httpRuntime.fetch,
     };
     process.env.ALPACA_DAY_TRADING_ENTRY_ENABLED = 'true';
     process.env.ALPACA_DAY_TRADING_ENTRY_TOKEN = 'test-day-trading-token';
@@ -109,7 +110,7 @@ function enableDayTradingGate() {
             if (saved.token == null) delete process.env.ALPACA_DAY_TRADING_ENTRY_TOKEN; else process.env.ALPACA_DAY_TRADING_ENTRY_TOKEN = saved.token;
             if (saved.key == null) delete process.env.ALPACA_API_KEY; else process.env.ALPACA_API_KEY = saved.key;
             if (saved.secret == null) delete process.env.ALPACA_API_SECRET; else process.env.ALPACA_API_SECRET = saved.secret;
-            global.fetch = saved.fetch;
+            httpRuntime.fetch = saved.fetch;
         },
     };
 }
@@ -125,7 +126,7 @@ function mockAlpacaBroker({
     // parameter (evaluated synchronously at call time, before the quote fetch's several awaits),
     // making the quote look like it's from the future.
     const quoteTimestamp = new Date().toISOString();
-    global.fetch = async (url, options = {}) => {
+    httpRuntime.fetch = async (url, options = {}) => {
         requests.push({ url, options });
         if (url.endsWith('/v2/account')) {
             return { ok: true, json: async () => ({ status: 'ACTIVE', trading_blocked: false, account_blocked: false, cash, equity }) };
@@ -233,7 +234,7 @@ test('POST /orders stays available while Day Trading has not taken over the acco
 });
 
 function mockKillSwitchClearBroker({ positionQty = 0, legsCovered = true, activities = [] } = {}) {
-    global.fetch = async (url) => {
+    httpRuntime.fetch = async (url) => {
         if (url.endsWith('/v2/clock')) {
             return { ok: true, json: async () => ({ is_open: true, next_close: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString() }) };
         }
@@ -295,7 +296,7 @@ test('GET /day-trading/monitor-health requires only dashboard auth, no Day Tradi
 
 test('GET /day-trading/monitor-health never contacts the broker, so it stays answerable during an outage', async () => {
     await store.updateMonitorState({ mode: 'shadow' });
-    global.fetch = async (url) => { throw new Error(`must never be called: ${url}`); };
+    httpRuntime.fetch = async (url) => { throw new Error(`must never be called: ${url}`); };
     const app = createApp();
     const server = app.listen(0);
     const result = await get(server.address().port, '/api/alpaca-paper/day-trading/monitor-health');
@@ -309,7 +310,7 @@ function mockSnapshotBroker({
 } = {}) {
     process.env.ALPACA_API_KEY = 'paper-key';
     process.env.ALPACA_API_SECRET = 'paper-secret';
-    global.fetch = async (url) => {
+    httpRuntime.fetch = async (url) => {
         if (url.endsWith('/v2/account')) return { ok: true, json: async () => ({ status: 'ACTIVE', cash, equity, buying_power: '200000.00' }) };
         if (url.endsWith('/v2/clock')) return { ok: true, json: async () => ({ is_open: true, timestamp: '2026-09-17T14:00:00Z', next_open: '2026-09-18T13:30:00Z', next_close: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString() }) };
         if (url.endsWith('/v2/positions')) return { ok: true, json: async () => positions };
@@ -484,7 +485,7 @@ test('GET /day-trading/plans/:id reports live orders as unavailable, not silentl
     const plan = await seedActivePlan();
     process.env.ALPACA_API_KEY = 'paper-key';
     process.env.ALPACA_API_SECRET = 'paper-secret';
-    global.fetch = async () => { throw new Error('network down'); };
+    httpRuntime.fetch = async () => { throw new Error('network down'); };
     const app = createApp();
     const server = app.listen(0);
     const result = await get(server.address().port, `/api/alpaca-paper/day-trading/plans/${plan.id}`);
@@ -497,7 +498,7 @@ test('GET /day-trading/plans/:id reports live orders as unavailable, not silentl
 test('GET /day-trading/plans/:id has no live orders for a terminal plan, and never calls the broker for one', async () => {
     const plan = await seedActivePlan();
     await db.updateAlpacaDayTradePlan(plan.id, { state: 'closed', closed_at: '2026-09-17T14:00:00Z' });
-    global.fetch = async (url) => { throw new Error(`unexpected broker request in this test: ${url}`); };
+    httpRuntime.fetch = async (url) => { throw new Error(`unexpected broker request in this test: ${url}`); };
     const app = createApp();
     const server = app.listen(0);
     const result = await get(server.address().port, `/api/alpaca-paper/day-trading/plans/${plan.id}`);

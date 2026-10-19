@@ -9,6 +9,7 @@ const MARKET_DATA_BASE_URL = 'https://data.alpaca.markets';
 // no route to accidentally point the live socket at a real-money account.
 const TRADE_UPDATES_URL = 'wss://paper-api.alpaca.markets/stream';
 const db = require('../database/db');
+const http = require('./http_runtime');
 const { validatePaperOrder } = require('./alpaca_order_policy');
 
 function getPaperCredentials(env = process.env) {
@@ -41,7 +42,7 @@ function getPaperConfiguration(env = process.env) {
     };
 }
 
-function createPaperClient({ env = process.env, fetchImpl = global.fetch, timeoutMs = 10_000 } = {}) {
+function createPaperClient({ env = process.env, fetchImpl = http.fetch, timeoutMs = 10_000 } = {}) {
     const config = getPaperConfiguration(env);
     if (!config.configured) {
         const error = new Error('Alpaca paper credentials are not configured');

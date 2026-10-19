@@ -1,3 +1,4 @@
+const httpRuntime = require('../services/http_runtime');
 const { test } = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
@@ -56,10 +57,10 @@ test('GET status reports unconfigured paper integration without secrets', async 
 test('GET status verifies the configured paper account without exposing account identifiers', async () => {
     const savedKey = process.env.ALPACA_API_KEY;
     const savedSecret = process.env.ALPACA_API_SECRET;
-    const savedFetch = global.fetch;
+    const savedFetch = httpRuntime.fetch;
     process.env.ALPACA_API_KEY = 'paper-key';
     process.env.ALPACA_API_SECRET = 'paper-secret';
-    global.fetch = async () => ({
+    httpRuntime.fetch = async () => ({
         ok: true,
         json: async () => ({
             status: 'ACTIVE', cash: '100000.00', equity: '100000.00', portfolio_value: '100000.00',
@@ -77,7 +78,7 @@ test('GET status verifies the configured paper account without exposing account 
 
     if (savedKey == null) delete process.env.ALPACA_API_KEY; else process.env.ALPACA_API_KEY = savedKey;
     if (savedSecret == null) delete process.env.ALPACA_API_SECRET; else process.env.ALPACA_API_SECRET = savedSecret;
-    global.fetch = savedFetch;
+    httpRuntime.fetch = savedFetch;
 
     assert.strictEqual(result.status, 200);
     assert.strictEqual(result.body.data.connection, 'verified');
@@ -89,10 +90,10 @@ test('GET status verifies the configured paper account without exposing account 
 test('GET snapshot returns broker clock, positions, and open orders without private identifiers', async () => {
     const savedKey = process.env.ALPACA_API_KEY;
     const savedSecret = process.env.ALPACA_API_SECRET;
-    const savedFetch = global.fetch;
+    const savedFetch = httpRuntime.fetch;
     process.env.ALPACA_API_KEY = 'paper-key';
     process.env.ALPACA_API_SECRET = 'paper-secret';
-    global.fetch = async (url) => ({
+    httpRuntime.fetch = async (url) => ({
         ok: true,
         json: async () => {
             if (url.endsWith('/v2/clock')) return { is_open: false, timestamp: '2026-08-06T17:00:00-04:00', next_open: '2026-08-07T09:30:00-04:00', next_close: '2026-08-07T16:00:00-04:00' };
@@ -111,7 +112,7 @@ test('GET snapshot returns broker clock, positions, and open orders without priv
 
     if (savedKey == null) delete process.env.ALPACA_API_KEY; else process.env.ALPACA_API_KEY = savedKey;
     if (savedSecret == null) delete process.env.ALPACA_API_SECRET; else process.env.ALPACA_API_SECRET = savedSecret;
-    global.fetch = savedFetch;
+    httpRuntime.fetch = savedFetch;
 
     assert.strictEqual(result.status, 200);
     assert.strictEqual(result.body.data.clock.isOpen, false);
