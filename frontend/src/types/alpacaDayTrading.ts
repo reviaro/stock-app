@@ -250,6 +250,22 @@ export interface AlpacaV2Plan {
   exitReason: string | null
   realizedPnl: number | null
   realizedR: number | null
+  setupId: string
+  strategyVersion: string
+  catalystClass: string
+  entryEvidence: Record<string, string | number | boolean | null>
+  actualInitialRiskDollars: number | null
+  actualRiskR: number | null
+  fillEvidenceComplete: boolean
+  observations?: {
+    count: number | null
+    mfeDollars: number | null
+    maeDollars: number | null
+    firstAt: string | null
+    lastAt: string | null
+    complete: boolean
+    note: string | null
+  }
   createdAt: string
   openedAt: string | null
   closedAt: string | null
@@ -271,6 +287,7 @@ export interface AlpacaV2GroupStats {
   realizedPnl: number | null
   expectancyDollars: number | null
   expectancyR: number | null
+  expectancyActualRiskR?: number | null
 }
 
 export interface AlpacaV2Analytics {
@@ -285,16 +302,22 @@ export interface AlpacaV2Analytics {
   averageLoss: number | null
   expectancyDollars: number | null
   expectancyR: number | null
+  expectancyActualRiskR: number | null
   realizedPnl: number | null
   maxConsecutiveLosses: number
+  maxClosedTradeDrawdownDollars: number | null
   averageHoldMinutes: number | null
   bySetup: Record<string, AlpacaV2GroupStats>
   byCatalyst: Record<string, AlpacaV2GroupStats>
   byWindow: Record<string, AlpacaV2GroupStats>
   bySessionDate: Record<string, AlpacaV2GroupStats>
+  byStrategyVersion: Record<string, AlpacaV2GroupStats>
+  byExitReason: Record<string, AlpacaV2GroupStats>
+  evidence: { classifiedTrades: number; measuredTrades: number; totalTrades: number; sampledObservationCount: number }
   noTrade: { count: number; byReason: Record<string, number> }
   attention: { count: number; byCode: Record<string, number> }
   excludedOperatorResolved: number
+  excludedIncompleteFills: number
   sample: { size: number; preliminary: boolean; note: string }
 }
 
@@ -302,4 +325,114 @@ export interface AlpacaV2Journal {
   analytics: AlpacaV2Analytics
   trades: AlpacaV2Plan[]
   events: AlpacaV2Event[]
+}
+
+export type AlpacaV2ExperimentDefinition = {
+  name: string
+  setupId: string
+  strategyVersion: string
+  durationDays: number
+  minTrades: number
+  costBps: number
+} & (
+  | { kind: 'stall_exit'; parameters: { afterMinutes: number; minimumProgressR: number } }
+  | { kind: 'atr_target'; parameters: { atrMultiple: number } }
+)
+
+export type AlpacaV2Experiment = Omit<AlpacaV2ExperimentDefinition, 'durationDays' | 'kind' | 'parameters'> & (
+  | { kind: 'stall_exit'; parameters: { afterMinutes: number; minimumProgressR: number } }
+  | { kind: 'atr_target'; parameters: { atrMultiple: number } }
+) & {
+  id: number
+  createdAt: string
+  endsAt: string
+  results: {
+    status: 'collecting' | 'complete'
+    eligibleCount: number
+    excludedCount: number
+    triggeredCount: number
+    baselineGrossPnl: number | null
+    baselineNetPnl: number | null
+    shadowGrossPnl: number | null
+    shadowNetPnl: number | null
+    differenceNetPnl: number | null
+    meanDifferenceNetPnl: number | null
+    minimumTradesMet: boolean
+    exclusions: Record<string, number>
+  }
+}
+
+export interface AlpacaV2Experiments { experiments: AlpacaV2Experiment[] }
+
+export interface AlpacaV2DailyRisk {
+  complete: boolean
+  sessionDate: string | null
+  realizedPnl: number | null
+  fillCount: number
+  reasonCodes: string[]
+  maxDailyLossPct: number
+  minRewardRiskRatio: number
+  scope: 'v2_realized'
+}
+
+export interface AlpacaHistoryValues {
+  state: string | null
+  entryQty: number | null
+  exitQty: number | null
+  entryPrice: number | null
+  exitPrice: number | null
+  realizedPnl: number | null
+  realizedR: number | null
+  openedAt: string | null
+  closedAt: string | null
+  exitReason: string | null
+}
+
+export interface AlpacaHistoryRepair {
+  planId: number
+  symbol: string
+  kind: 'restore_closed_history'
+  requiresAttributionReview: boolean
+  missingFillCount: number
+  linkedFillCount: number
+  before: AlpacaHistoryValues
+  after: AlpacaHistoryValues
+}
+
+interface AlpacaHistoryCounts {
+  planCount: number
+  fillCount: number
+  canonicalFillCount: number
+  duplicateRows: number
+  unlinkedFills: number
+}
+
+export interface AlpacaHistoryPreview {
+  reviewToken: string
+  monitorModes: { v1: string | null; v2: string | null }
+  summary: {
+    v1: AlpacaHistoryCounts
+    v2: AlpacaHistoryCounts
+    broker: { fillCount: number; complete: boolean }
+    repairablePlans: number
+    attributionReviewPlans: number
+  }
+  issues: { code: string; severity: 'warning' | 'error'; version?: string; planId?: number; symbol?: string; count?: number; message: string }[]
+  applyBlockers: string[]
+  repairs: AlpacaHistoryRepair[]
+}
+
+export interface AlpacaHistoryApplyInput {
+  reviewToken: string
+  selectedPlanIds: number[]
+  attributionPlanIds: number[]
+  confirm: 'APPLY_HISTORY_REPAIR'
+}
+
+export interface AlpacaHistoryApplyResult {
+  applied: boolean
+  replayed: boolean
+  repairedPlanCount: number
+  importedFillCount: number
+  linkedFillCount: number
 }

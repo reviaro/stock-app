@@ -57,6 +57,7 @@ function fakeClient(overrides = {}) {
         getAsset: async () => ({ class: 'us_equity', status: 'active', tradable: true }),
         getLatestQuote: async () => ({ symbol: 'NVDA', quote: { t: '2026-09-23T14:59:59.000Z', bp: 99.98, bs: 3, ap: 100, as: 2 } }),
         getOrders: async () => [],
+        getOrder: async (id) => ({ ...ACK, id, legs: ACK.legs.map((leg) => ({ ...leg, symbol: 'NVDA', filled_qty: '0' })) }),
         submitOrder: async (order) => { calls.submit.push(order); return ACK; },
         getOrderByClientOrderId: async (id) => { calls.byClientId.push(id); return { found: false, order: null }; },
         ...overrides,
@@ -88,7 +89,7 @@ test('healthy entry: pending plan and event first, exactly one submit, parent an
     assert.strictEqual(plan.parent_order_id, 'parent-uuid-1');
     assert.strictEqual(plan.stop_order_id, 'stop-uuid-1');
     assert.strictEqual(plan.target_order_id, 'target-uuid-1');
-    const events = (await store.listEvents(plan.id)).map((e) => e.action);
+    const events = (await store.listEvents(plan.id)).filter((e) => e.event_type === 'submission').map((e) => e.action);
     assert.deepStrictEqual(events, ['submission_started', 'entry_admitted', 'submission_acknowledged', 'entry_settled']);
 });
 
@@ -504,3 +505,134 @@ for (const found of [false, true]) {
         assert.deepStrictEqual(await store.listEntrySubmissions(), []);
     });
 }
+
+async function seedRiskPlan({ entryQty = 100, exitQty = 0, exitPrice = 80 } = {}) {
+    const { plan } = await store.createPlan({
+        client_order_id: 'dt2-synthetic-risk-evidence', symbol: 'XYZ', setup: 'synthetic', catalyst: 'synthetic', thesis: 'synthetic', invalidation: 'synthetic',
+        planned_qty: entryQty, planned_entry_price: 100, planned_stop: 80, planned_target: 120,
+        planned_risk_dollars: entryQty * 20, exit_deadline: '2026-09-23T19:30:00.000Z', occurred_at: '2026-09-23T14:00:00.000Z',
+    });
+    await store.recordFill({ execution_id: 'synthetic-risk-entry', plan_id: plan.id, order_id: 'synthetic-risk-parent',
+        symbol: 'XYZ', side: 'buy', role: 'entry', qty: entryQty, price: 100, executed_at: '2026-09-23T14:00:01.000Z', source: 'rest' });
+    if (exitQty) await store.recordFill({ execution_id: 'synthetic-risk-exit', plan_id: plan.id, order_id: 'synthetic-risk-stop',
+        symbol: 'XYZ', side: 'sell', role: 'bracket_exit', qty: exitQty, price: exitPrice, executed_at: '2026-09-23T14:30:00.000Z', source: 'rest' });
+    return store.updatePlan(plan.id, { state: exitQty === entryQty ? 'closed' : 'active',
+        parent_order_id: 'synthetic-risk-parent', stop_order_id: 'synthetic-risk-stop', target_order_id: 'synthetic-risk-target',
+        filled_entry_qty: entryQty, avg_entry_price: 100, filled_exit_qty: exitQty, avg_exit_price: exitQty ? exitPrice : null,
+        ...(exitQty === entryQty ? { closed_at: '2026-09-23T14:30:01.000Z' } : {}),
+    });
+}
+
+function riskParent({ entryQty = 100, exitQty = 100, exitPrice = 80 } = {}) {
+    return { id: 'synthetic-risk-parent', symbol: 'XYZ', side: 'buy', status: 'filled', filled_qty: String(entryQty), filled_avg_price: '100',
+        legs: [
+            { id: 'synthetic-risk-stop', symbol: 'XYZ', side: 'sell', status: 'filled', filled_qty: String(exitQty), filled_avg_price: String(exitPrice) },
+            { id: 'synthetic-risk-target', symbol: 'XYZ', side: 'sell', status: 'canceled', filled_qty: '0', filled_avg_price: null },
+        ] };
+}
+
+for (const entryQty of [100, 200]) {
+    test(`daily loss gate counts ${entryQty === 100 ? 'closed' : 'partial open-plan'} exits and refuses at the 2 percent boundary`, async () => {
+        await seedRiskPlan({ entryQty, exitQty: 100 });
+        const { client, calls } = fakeClient({ getOrder: async () => riskParent({ entryQty }) });
+        await assert.rejects(createV2Execution({ store, client, now: () => NOW }).submitEntry(intent()),
+            (error) => error.code === 'ALPACA_V2_DAILY_LOSS_LIMIT_REACHED');
+        assert.strictEqual(calls.submit.length, 0);
+        assert.strictEqual(await store.getPlanByClientOrderId(intent().client_order_id), null);
+        const refused = (await store.listEvents()).find((event) => event.event_type === 'entry_refused');
+        assert.strictEqual(JSON.parse(refused.detail_json).daily_realized_pnl, -2000);
+    });
+}
+
+test('a broker exit ahead of the local canonical fills refuses new entry instead of understating loss', async () => {
+    await seedRiskPlan({ exitQty: 80 });
+    const { client, calls } = fakeClient({ getOrder: async () => riskParent({ exitQty: 100 }) });
+    await assert.rejects(createV2Execution({ store, client, now: () => NOW }).submitEntry(intent()),
+        (error) => error.code === 'ALPACA_V2_DAILY_PNL_UNAVAILABLE');
+    assert.strictEqual(calls.submit.length, 0);
+});
+
+for (const scenario of ['slow account read', 'clock moved backward', 'slow time-exit read']) {
+    test(`broker fill proof must remain current at admission: ${scenario}`, async () => {
+        const plan = await seedRiskPlan({ exitQty: 100, exitPrice: 99 });
+        if (scenario === 'slow time-exit read') await store.updatePlan(plan.id, { exit_order_id: 'synthetic-time-exit' });
+        let clock = NOW.getTime();
+        const { client, calls } = fakeClient({
+            getOrder: async (id) => {
+                if (id !== 'synthetic-time-exit') return riskParent({ exitPrice: 99 });
+                clock += 11_000;
+                return { id, symbol: 'XYZ', side: 'sell', filled_qty: '0' };
+            },
+            getAccount: async () => {
+                if (scenario === 'slow account read') clock += 11_000;
+                if (scenario === 'clock moved backward') clock -= 1_000;
+                return { status: 'ACTIVE', cash: '50000', equity: '100000' };
+            },
+            getLatestQuote: async () => ({ symbol: 'NVDA', quote: {
+                t: new Date(clock - 1_000).toISOString(), bp: 99.98, bs: 3, ap: 100, as: 2,
+            } }),
+        });
+        await assert.rejects(createV2Execution({ store, client, now: () => new Date(clock) }).submitEntry(intent()),
+            (error) => error.code === 'ALPACA_V2_DAILY_PNL_UNAVAILABLE' && error.message.includes('no longer current'));
+        assert.strictEqual(calls.submit.length, 0);
+        assert.strictEqual(await store.getPlanByClientOrderId(intent().client_order_id), null);
+    });
+}
+
+test('a realized loss committed during broker reads is included in the final admission transaction', async () => {
+    const plan = await seedRiskPlan();
+    const { client, calls } = fakeClient({
+        getOrder: async () => riskParent(),
+        getAccount: async () => {
+            await store.transaction(async (repo) => {
+                await repo.recordFill({ execution_id: 'synthetic-risk-exit-race', plan_id: plan.id, order_id: 'synthetic-risk-stop',
+                    symbol: 'XYZ', side: 'sell', role: 'bracket_exit', qty: 100, price: 80, executed_at: '2026-09-23T14:59:59.000Z', source: 'rest' });
+                await repo.updatePlan(plan.id, { state: 'closed', filled_exit_qty: 100, avg_exit_price: 80, closed_at: NOW.toISOString() });
+            });
+            return { status: 'ACTIVE', cash: '50000', equity: '100000' };
+        },
+    });
+    await assert.rejects(createV2Execution({ store, client, now: () => NOW }).submitEntry(intent()),
+        (error) => error.code === 'ALPACA_V2_DAILY_LOSS_LIMIT_REACHED');
+    assert.strictEqual(calls.submit.length, 0);
+});
+
+test('refusals and changed retries preserve separate sanitized quote and intent evidence', async () => {
+    const { client, calls } = fakeClient();
+    const execution = createV2Execution({ store, client, now: () => NOW });
+    await assert.rejects(execution.submitEntry(intent({ target: 102 })), (error) => error.code === 'ALPACA_V2_REWARD_RISK_TOO_LOW');
+    await assert.rejects(execution.submitEntry(intent({ target: 102.5, catalyst: 'revision https://private.example/token' })),
+        (error) => error.code === 'ALPACA_V2_REWARD_RISK_TOO_LOW');
+    const result = await execution.submitEntry(intent({ setup_id: 'opening_range_hold', strategy_version: 'v1', catalyst_class: 'earnings',
+        candidate_evidence: { observed_at: '2026-09-23T14:59:30.000Z', relative_volume: 2,
+            revision_reason: 'Fresh base with a supported target' } }));
+    assert.strictEqual(calls.submit.length, 1);
+    const events = await store.listEvents();
+    const refused = events.filter((event) => event.event_type === 'entry_refused');
+    assert.strictEqual(refused.length, 2);
+    assert.notStrictEqual(refused[0].event_key, refused[1].event_key);
+    assert.deepStrictEqual(refused.map((event) => JSON.parse(event.detail_json).target), [102, 102.5]);
+    assert.ok(refused.every((event) => JSON.parse(event.detail_json).quote_ask === 100));
+    assert.doesNotMatch(JSON.stringify(events.map((event) => event.detail_json)), /private\.example|dt2-20260923/);
+    const approved = events.find((event) => event.action === 'entry_policy_approved');
+    const evidence = JSON.parse(approved.detail_json);
+    assert.strictEqual(evidence.setup_id, 'opening_range_hold');
+    assert.strictEqual(evidence.quote_feed, 'iex');
+    assert.strictEqual(evidence.quote_spread_bps, 2.0002);
+    assert.strictEqual(evidence.candidate_relative_volume, 2);
+    assert.strictEqual(result.plan.setup_id, 'opening_range_hold');
+});
+
+test('quote evidence records when the quote arrives, independently of a later account response', async () => {
+    let clock = NOW.getTime();
+    const { client } = fakeClient({
+        getAccount: async () => {
+            await new Promise((resolve) => setImmediate(resolve));
+            clock += 1_000;
+            return { status: 'ACTIVE', cash: '50000', equity: '100000' };
+        },
+    });
+    const { plan } = await createV2Execution({ store, client, now: () => new Date(clock) }).submitEntry(intent());
+    assert.strictEqual(JSON.parse(plan.entry_evidence_json).quote_retrieved_at, NOW.toISOString());
+    assert.strictEqual(clock, NOW.getTime() + 1_000);
+});

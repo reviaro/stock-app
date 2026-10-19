@@ -8,6 +8,8 @@ import { V2ActivePlansCard } from '@/components/alpacaDayTrading/V2ActivePlansCa
 import { V2PositionsCard } from '@/components/alpacaDayTrading/V2PositionsCard'
 import { V2DecisionJournalCard } from '@/components/alpacaDayTrading/V2DecisionJournalCard'
 import { V2SetupAnalyticsCard } from '@/components/alpacaDayTrading/V2SetupAnalyticsCard'
+import { V2ExitExperimentsCard } from '@/components/alpacaDayTrading/V2ExitExperimentsCard'
+import { V2HistoryAuditCard } from '@/components/alpacaDayTrading/V2HistoryAuditCard'
 import { DayTradingJournalCard } from '@/components/alpacaDayTrading/DayTradingJournalCard'
 
 // v1 execution is retired. Its journal stays readable here, collapsed by default and kept out
@@ -63,7 +65,9 @@ export function AlpacaPaperPage() {
         <V2ActivePlansCard />
         <V2PositionsCard />
         <V2SetupAnalyticsCard />
+        <V2ExitExperimentsCard />
         <V2DecisionJournalCard />
+        <V2HistoryAuditCard />
         <HistoricalV1Section />
       </div>
     </main>

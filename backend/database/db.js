@@ -592,6 +592,11 @@ function initDb() {
                 )
             `);
             db.run(`INSERT OR IGNORE INTO alpaca_dt_v2_monitor_state (id, mode) VALUES (1, 'disabled')`);
+            db.run("ALTER TABLE alpaca_dt_v2_plans ADD COLUMN setup_id TEXT NOT NULL DEFAULT 'legacy_unclassified'", ignoreDuplicateColumnError);
+            db.run("ALTER TABLE alpaca_dt_v2_plans ADD COLUMN strategy_version TEXT NOT NULL DEFAULT 'legacy_unversioned'", ignoreDuplicateColumnError);
+            db.run("ALTER TABLE alpaca_dt_v2_plans ADD COLUMN catalyst_class TEXT NOT NULL DEFAULT 'unclassified'", ignoreDuplicateColumnError);
+            db.run("ALTER TABLE alpaca_dt_v2_plans ADD COLUMN entry_evidence_json TEXT NOT NULL DEFAULT '{}'", ignoreDuplicateColumnError);
+            for (const sql of require('../services/alpaca_day_trade_v2_research').schema) db.run(sql);
 
             // Strategy Lab is an evidence registry only. These isolated tables contain
             // experiment definitions, versioned rules, and observed test/paper runs.
@@ -714,21 +719,30 @@ function initDb() {
                 // let initDb resolve over a partially migrated database. The setup
                 // connection was closed above, so verify on a fresh connection.
                 const REQUIRED_TABLES = ['watchlist', 'simulator_sleeves', 'sim_transactions', 'sim_reinvestment_settings', 'sim_dividends', 'sim_trade_plans',
-                    'alpaca_dt_v2_plans', 'alpaca_dt_v2_fills', 'alpaca_dt_v2_events', 'alpaca_dt_v2_monitor_state'];
+                    'alpaca_dt_v2_plans', 'alpaca_dt_v2_fills', 'alpaca_dt_v2_events', 'alpaca_dt_v2_monitor_state',
+                    'alpaca_dt_v2_observations', 'alpaca_dt_v2_experiments'];
                 const verifyDb = getDb();
                 verifyDb.all(
                     `SELECT name FROM sqlite_master WHERE type = 'table'`,
                     [],
                     (tablesErr, tables) => {
-                        verifyDb.close();
-                        if (tablesErr) return reject(tablesErr);
+                        if (tablesErr) { verifyDb.close(); return reject(tablesErr); }
                         const present = new Set((tables || []).map((row) => row.name));
                         const missing = REQUIRED_TABLES.filter((name) => !present.has(name));
                         if (missing.length > 0) {
+                            verifyDb.close();
                             return reject(new Error(`initDb failed: missing tables after initialization: ${missing.join(', ')}`));
                         }
-                        console.log('Database initialized');
-                        resolve();
+                        verifyDb.all('PRAGMA table_info(alpaca_dt_v2_plans)', [], (columnsErr, columns) => {
+                            verifyDb.close();
+                            if (columnsErr) return reject(columnsErr);
+                            const names = new Set(columns.map((column) => column.name));
+                            if (['setup_id', 'strategy_version', 'catalyst_class', 'entry_evidence_json'].some((name) => !names.has(name))) {
+                                return reject(new Error('initDb failed: missing trading evidence columns'));
+                            }
+                            console.log('Database initialized');
+                            resolve();
+                        });
                     },
                 );
             });

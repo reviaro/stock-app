@@ -8,7 +8,7 @@ const {
 const NOW = new Date('2026-09-23T15:00:00.000Z');
 
 function inputs(overrides = {}) {
-    const { intent = {}, account = {}, clock = {}, asset = {}, quote = {}, ...rest } = overrides;
+    const { intent = {}, account = {}, clock = {}, asset = {}, quote = {}, context = {}, ...rest } = overrides;
     return {
         intent: {
             account_id: 2,
@@ -29,7 +29,8 @@ function inputs(overrides = {}) {
         asset: { class: 'us_equity', status: 'active', tradable: true, ...asset },
         quote: { symbol: 'NVDA', quote: { t: '2026-09-23T14:59:58.000Z', bp: 99.98, bs: 3, ap: 100.00, as: 2 }, ...quote },
         openOrders: [],
-        context: { hasActivePlanForSymbol: false, currentOpenRiskDollars: 0 },
+        context: { hasActivePlanForSymbol: false, currentOpenRiskDollars: 0,
+            dailyRisk: { complete: true, sessionDate: '2026-09-23', realizedPnl: 0 }, ...context },
         now: NOW,
         ...rest,
     };
@@ -63,7 +64,8 @@ test('builds exactly one long, DAY, regular-hours bracket with a sell-limit targ
 test('the caller allowlist is exactly the documented intent fields', () => {
     assert.deepStrictEqual([...ALLOWED_INTENT_FIELDS].sort(), [
         'account_id', 'catalyst', 'client_order_id', 'exit_deadline', 'invalidation', 'qty', 'setup', 'stop', 'symbol', 'target', 'thesis',
-    ]);
+        'setup_id', 'strategy_version', 'catalyst_class', 'candidate_evidence',
+    ].sort());
 });
 
 test('rejects every field outside the allowlist, including broker-owned ones', () => {
@@ -123,6 +125,58 @@ test('rejects invalid price geometry and off-tick prices', () => {
     rejectsWith('ALPACA_V2_GEOMETRY_INVALID', { intent: { target: '104' } });
 });
 
+test('reward must cover risk at the authorized limit, even when the quoted ask would pass', () => {
+    // At the ask of 100, target 102 offers 1:1 against stop 98. At the
+    // authorized limit of 100.50 it offers only 1.50 reward for 2.50 risk.
+    rejectsWith('ALPACA_V2_REWARD_RISK_TOO_LOW', { intent: { target: 102 } });
+    const boundary = buildV2EntryOrder(inputs({ intent: { target: 103 } }));
+    assert.strictEqual(boundary.order.limit_price, 100.5);
+    assert.strictEqual(boundary.order.take_profit.limit_price, 103);
+    rejectsWith('ALPACA_V2_REWARD_RISK_TOO_LOW', { intent: { target: 102.99 } });
+});
+
+test('daily realized loss blocks at the 2 percent boundary with no missing-data fallback', () => {
+    const dailyRisk = { complete: true, sessionDate: '2026-09-23', realizedPnl: -1999.99 };
+    assert.ok(buildV2EntryOrder(inputs({ context: { dailyRisk } })).order);
+    for (const realizedPnl of [-2000, -2000.01]) {
+        rejectsWith('ALPACA_V2_DAILY_LOSS_LIMIT_REACHED', { context: { dailyRisk: { ...dailyRisk, realizedPnl } } });
+    }
+    for (const invalid of [undefined, { ...dailyRisk, complete: false }, { ...dailyRisk, realizedPnl: null },
+        { ...dailyRisk, realizedPnl: NaN }, { ...dailyRisk, sessionDate: '2026-09-22' }]) {
+        rejectsWith('ALPACA_V2_DAILY_PNL_UNAVAILABLE', { context: { dailyRisk: invalid } });
+    }
+});
+
+test('new limits cannot be disabled by an invalid policy override', () => {
+    for (const patch of [{ minRewardRiskRatio: 0 }, { minRewardRiskRatio: NaN }, { maxDailyLossPct: 0 }, { maxDailyLossPct: 0.5 },
+        { maxCandidateAgeMs: NaN }, { maxCandidateAgeMs: -1 }]) {
+        rejectsWith('ALPACA_V2_POLICY_INVALID', { policy: { ...DEFAULT_V2_POLICY, ...patch } });
+    }
+});
+
+test('legacy callers remain marked unclassified while structured evidence is validated and retained', () => {
+    const legacy = buildV2EntryOrder(inputs()).plan;
+    assert.strictEqual(legacy.setup_id, 'legacy_unclassified');
+    assert.strictEqual(legacy.entry_evidence.candidate_evidence_status, 'not_provided');
+    assert.strictEqual(legacy.entry_evidence.quote_ask, 100);
+    assert.strictEqual(legacy.entry_evidence.quote_source_at, '2026-09-23T14:59:58.000Z');
+    const plan = buildV2EntryOrder(inputs({ intent: {
+        setup_id: 'opening_range_hold', strategy_version: 'v3.1', catalyst_class: 'earnings',
+        candidate_evidence: { observed_at: '2026-09-23T14:59:00.000Z', catalyst_at: '2026-09-23T12:00:00.000Z',
+            relative_volume: 2.1, relative_strength_pct: 0.8, trend: 'up', entry_trigger: 'support_reclaim', atr: 1.2,
+            revision_reason: 'New base formed above support' },
+    } })).plan;
+    assert.strictEqual(plan.setup_id, 'opening_range_hold');
+    assert.strictEqual(plan.entry_evidence.metadata_status, 'classified');
+    assert.strictEqual(plan.entry_evidence.candidate_relative_volume, 2.1);
+    assert.strictEqual(plan.entry_evidence.candidate_revision_reason, 'New base formed above support');
+    for (const candidate_evidence of [{ observed_at: '2026-09-23T15:01:00Z' }, { observed_at: '2026-09-23T15:00:00.000001Z' }, { observed_at: '2026-09-23T14:40:00Z' },
+        { observed_at: '2026-09-23T14:59:00Z', catalyst_at: '2026-09-23T15:00:00Z' },
+        { observed_at: '2026-09-23T14:59:00Z', api_key: 'must-never-be-stored' }, { observed_at: '2026-02-30T14:59:00Z' }]) {
+        rejectsWith('ALPACA_V2_EVIDENCE_INVALID', { intent: { candidate_evidence } });
+    }
+});
+
 test('sizes affordability against cash only, never buying power', () => {
     // $1,005 of entry cost against $1,000 cash on a 4x margin account must be refused.
     rejectsWith('ALPACA_V2_INSUFFICIENT_CASH', { account: { cash: '1000', equity: '100000', buying_power: '400000' } });
@@ -137,7 +191,7 @@ test('cash already committed to open buy orders is not available for a second en
 
 test('keeps the account-2 risk caps: position size, per-trade risk, total open risk, and cash reserve', () => {
     rejectsWith('ALPACA_V2_POSITION_LIMIT_EXCEEDED', { intent: { qty: 300 }, account: { cash: '90000' } });
-    rejectsWith('ALPACA_V2_RISK_PER_TRADE_EXCEEDED', { intent: { qty: 200, stop: 94 } });
+    rejectsWith('ALPACA_V2_RISK_PER_TRADE_EXCEEDED', { intent: { qty: 200, stop: 94, target: 108 } });
     rejectsWith('ALPACA_V2_TOTAL_OPEN_RISK_EXCEEDED', { context: { hasActivePlanForSymbol: false, currentOpenRiskDollars: 1990 } });
     rejectsWith('ALPACA_V2_MIN_CASH_RESERVE_BREACHED', { intent: { qty: 20 }, account: { cash: '11000' } });
 });

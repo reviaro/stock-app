@@ -9,11 +9,21 @@ const { createTestDatabase } = require('../test-support/test_database');
 const TEST_DB = createTestDatabase();
 const db = require('../database/db');
 const store = require('../services/alpaca_day_trade_v2_store');
-const { computeV2Analytics, PRELIMINARY_SAMPLE_SIZE } = require('../services/alpaca_day_trade_v2_analytics');
+const { computeV2Analytics: computeVerifiedAnalytics, PRELIMINARY_SAMPLE_SIZE } = require('../services/alpaca_day_trade_v2_analytics');
+
+function fillsFor(plans) {
+    return plans.filter((p) => p.state === 'closed').flatMap((p) => [
+        { execution_id: `buy-${p.id}`, plan_id: p.id, symbol: p.symbol, role: 'entry', side: 'buy', qty: 10, price: 100, executed_at: p.opened_at },
+        { execution_id: `sell-${p.id}`, plan_id: p.id, symbol: p.symbol, role: 'bracket_exit', side: 'sell', qty: 10, price: 100 + p.realized_pnl / 10, executed_at: p.closed_at },
+    ]);
+}
+function computeV2Analytics(input) { return computeVerifiedAnalytics({ ...input, fills: fillsFor(input.plans) }); }
 
 function plan(overrides) {
     return {
         id: 1, symbol: 'NVDA', setup: 'orb', catalyst: 'Earnings', state: 'closed', exit_reason: 'take_profit',
+        planned_qty: 10, planned_stop: 97.5, setup_id: overrides?.setup || 'orb',
+        catalyst_class: String(overrides?.catalyst || 'Earnings').trim().toLowerCase(), strategy_version: 'test_v1',
         planned_risk_dollars: 25, realized_pnl: 0, realized_r: 0, opened_at: '2026-09-23T13:45:00.000Z', closed_at: '2026-09-23T14:15:00.000Z',
         ...overrides,
     };
@@ -93,6 +103,30 @@ test('the sample is flagged preliminary until it is large enough, with an explic
     assert.match(a.sample.note, /preliminary/i);
     const many = Array.from({ length: PRELIMINARY_SAMPLE_SIZE }, (_, i) => plan({ id: i + 1, realized_pnl: 1, realized_r: 0.04 }));
     assert.strictEqual(computeV2Analytics({ plans: many, events: [] }).sample.preliminary, false);
+});
+
+test('missing executions exclude a cached profit and actual fill times determine hold and realized drawdown', () => {
+    const trades = [plan({ id: 1, realized_pnl: 20 }), plan({ id: 2, realized_pnl: -30,
+        opened_at: '2026-09-23T14:30:00.000Z', closed_at: '2026-09-23T15:00:00.000Z' })];
+    const fills = fillsFor(trades);
+    const cached = trades.map((p) => ({ ...p, realized_pnl: 9999, closed_at: '2026-09-24T15:00:00.000Z' }));
+    const result = computeVerifiedAnalytics({ plans: cached, fills });
+    assert.equal(result.realizedPnl, -10);
+    assert.equal(result.averageHoldMinutes, 30);
+    assert.equal(result.maxClosedTradeDrawdownDollars, 30);
+    assert.equal(result.expectancyActualRiskR, -0.2);
+    const incomplete = computeVerifiedAnalytics({ plans: cached, fills: fills.slice(0, -1) });
+    assert.equal(incomplete.closedTradeCount, 1);
+    assert.equal(incomplete.excludedIncompleteFills, 1);
+});
+
+test('legacy prose is grouped as unclassified instead of being mistaken for a stable setup class', () => {
+    const p = plan({ setup_id: undefined, strategy_version: undefined, catalyst_class: undefined });
+    const result = computeV2Analytics({ plans: [p] });
+    assert.equal(result.bySetup.legacy_unclassified.count, 1);
+    assert.equal(result.byStrategyVersion.legacy_unversioned.count, 1);
+    assert.equal(result.byCatalyst.unclassified.count, 1);
+    assert.equal(result.evidence.classifiedTrades, 0);
 });
 
 // ---- journal route integration: v1 data never reaches v2 analytics ----

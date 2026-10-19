@@ -5,6 +5,8 @@
 // long, DAY, regular-hours Alpaca bracket order -- or throws one specific code. Every broker
 // field in the returned order is computed here; the caller cannot supply any of them.
 const { validateAndAnnotateQuote } = require('./alpaca_market_data');
+const { normalizeEntryMetadata, captureEntryEvidence } = require('./alpaca_day_trade_v2_evidence');
+const { easternSessionDate } = require('./alpaca_day_trade_v2_risk');
 
 // account-2 caps carried over from v1 (dropping them silently would be a regression); every
 // percentage reads against account equity. Cash affordability reads against cash only.
@@ -17,10 +19,14 @@ const DEFAULT_V2_POLICY = Object.freeze({
     minCashPct: 0.10,
     maxRiskPerTradePct: 0.01,
     maxTotalOpenRiskPct: 0.02,
+    minRewardRiskRatio: 1,
+    maxDailyLossPct: 0.02,
+    maxCandidateAgeMs: 15 * 60_000,
 });
 
 const ALLOWED_INTENT_FIELDS = Object.freeze([
     'account_id', 'client_order_id', 'symbol', 'qty', 'setup', 'catalyst', 'thesis', 'invalidation', 'stop', 'target', 'exit_deadline',
+    'setup_id', 'strategy_version', 'catalyst_class', 'candidate_evidence',
 ]);
 
 // Alpaca allows client_order_id up to 128 characters; v2 ids stay well below that so the
@@ -97,9 +103,16 @@ function committedBuyCash(openOrders = []) {
 }
 
 function buildV2EntryOrder({
-    intent, account, clock, asset, quote, openOrders = [], context = {}, policy = DEFAULT_V2_POLICY, now = new Date(),
+    intent, account, clock, asset, quote, quoteRetrievedAt, openOrders = [], context = {}, policy = DEFAULT_V2_POLICY, now = new Date(),
 }) {
+    policy = { ...DEFAULT_V2_POLICY, ...policy };
+    if (!Number.isFinite(policy.minRewardRiskRatio) || policy.minRewardRiskRatio < 1
+        || !Number.isFinite(policy.maxDailyLossPct) || policy.maxDailyLossPct <= 0 || policy.maxDailyLossPct > 0.02
+        || !Number.isFinite(policy.maxCandidateAgeMs) || policy.maxCandidateAgeMs < 0) {
+        throw policyError('ALPACA_V2_POLICY_INVALID', 'entry risk policy is invalid');
+    }
     assertIntentShape(intent);
+    const metadata = normalizeEntryMetadata(intent, { now, maxAgeMs: policy.maxCandidateAgeMs });
     const symbol = typeof intent.symbol === 'string' ? intent.symbol.trim().toUpperCase() : '';
     if (!SYMBOL.test(symbol)) throw policyError('ALPACA_V2_SYMBOL_INVALID', 'a US equity ticker symbol is required');
 
@@ -128,6 +141,10 @@ function buildV2EntryOrder({
     if (!tickAligned(stop) || !tickAligned(target) || !(stop < entryPrice) || !(entryPrice < target)) {
         throw policyError('ALPACA_V2_GEOMETRY_INVALID', 'stop < entry < target with tick-aligned prices is required');
     }
+    const plannedRewardRisk = (target - entryPrice) / (entryPrice - stop);
+    if (plannedRewardRisk + 1e-9 < policy.minRewardRiskRatio) {
+        throw policyError('ALPACA_V2_REWARD_RISK_TOO_LOW', 'reward must cover the risk at the maximum permitted entry price');
+    }
 
     const qty = intent.qty;
     const cost = qty * entryPrice;
@@ -135,6 +152,14 @@ function buildV2EntryOrder({
     const equity = Number(account.equity);
     if (!Number.isFinite(cash) || !Number.isFinite(equity) || equity <= 0) {
         throw policyError('ALPACA_V2_ACCOUNT_NOT_TRADABLE', 'account cash and equity are unavailable');
+    }
+    const daily = context.dailyRisk;
+    if (!daily?.complete || typeof daily.realizedPnl !== 'number' || !Number.isFinite(daily.realizedPnl)
+        || daily.sessionDate !== easternSessionDate(now)) {
+        throw policyError('ALPACA_V2_DAILY_PNL_UNAVAILABLE', 'today\'s reconciled v2 realized result is unavailable');
+    }
+    if (daily.realizedPnl <= -equity * policy.maxDailyLossPct) {
+        throw policyError('ALPACA_V2_DAILY_LOSS_LIMIT_REACHED', 'the daily v2 realized loss limit has been reached');
     }
     const availableCash = cash - committedBuyCash(openOrders);
     if (cost > availableCash) throw policyError('ALPACA_V2_INSUFFICIENT_CASH', 'entry cost exceeds uncommitted cash (margin is never used)');
@@ -174,6 +199,14 @@ function buildV2EntryOrder({
             planned_target: target,
             planned_risk_dollars: riskDollars,
             exit_deadline: exitDeadline,
+            setup_id: metadata.setup_id,
+            strategy_version: metadata.strategy_version,
+            catalyst_class: metadata.catalyst_class,
+            entry_evidence: {
+                ...captureEntryEvidence(intent, { quote, policy, now, retrievedAt: quoteRetrievedAt }),
+                entry_price: entryPrice, planned_reward_risk: plannedRewardRisk, min_reward_risk: policy.minRewardRiskRatio,
+                daily_realized_pnl: daily.realizedPnl, daily_loss_limit: equity * policy.maxDailyLossPct, session_date: daily.sessionDate,
+            },
         },
     };
 }

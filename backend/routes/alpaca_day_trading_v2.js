@@ -5,13 +5,15 @@
 // bodies, account ids, URLs, credentials, or exception text. Operator controls require an
 // authenticated operator session; the scoped automation principal may only submit entries,
 // NO TRADE decisions, and reviews for account 2.
-const crypto = require('node:crypto');
 const { createAsyncRouter } = require('../services/http_errors');
 const defaultStore = require('../services/alpaca_day_trade_v2_store');
 const { createPaperClient } = require('../services/alpaca_paper_service');
 const { createV2Execution, ENTRY_HEARTBEAT_MAX_AGE_MS } = require('../services/alpaca_day_trade_v2_execution');
 const { timeExitClientOrderId, DEFAULT_V2_POLICY } = require('../services/alpaca_day_trade_v2_policy');
 const { computeV2Analytics } = require('../services/alpaca_day_trade_v2_analytics');
+const { computeV2DailyRisk } = require('../services/alpaca_day_trade_v2_risk');
+const { deriveFillTrade, observationSummary, evaluateExperiment } = require('../services/alpaca_day_trade_v2_research');
+const { createHistoryAuditService, collectBrokerHistory } = require('../services/alpaca_day_trade_history_audit');
 
 const MODES = ['disabled', 'shadow', 'paper_execute'];
 const UNRESOLVED_STATES = ['attention_required', 'submission_unknown', 'pending_submission'];
@@ -28,6 +30,25 @@ const ERRORS = {
     ALPACA_V2_SYMBOL_INVALID: [400, 'a US equity symbol is required'],
     ALPACA_V2_EXIT_DEADLINE_INVALID: [400, 'the exit deadline must fall within the current session'],
     ALPACA_V2_GEOMETRY_INVALID: [400, 'stop and target are not valid for this entry'],
+    ALPACA_V2_EVIDENCE_INVALID: [400, 'entry evidence must be valid and current'],
+    ALPACA_V2_REWARD_RISK_TOO_LOW: [422, 'reward at the maximum entry price is below the minimum risk multiple'],
+    ALPACA_V2_DAILY_LOSS_LIMIT_REACHED: [422, 'the daily v2 realized-loss limit has been reached'],
+    ALPACA_V2_DAILY_PNL_UNAVAILABLE: [503, 'daily realized risk could not be verified'],
+    ALPACA_V2_EXPERIMENT_INVALID: [400, 'the prospective experiment definition is invalid'],
+    ALPACA_V2_POLICY_INVALID: [503, 'the entry safety policy is unavailable'],
+    ALPACA_HISTORY_STALE_PREVIEW: [409, 'refresh the history preview before applying changes'],
+    ALPACA_HISTORY_STALE_BROKER_SNAPSHOT: [409, 'refresh the broker snapshot before applying changes'],
+    ALPACA_HISTORY_BROKER_STATE_CHANGED: [409, 'broker activity changed; refresh the history preview'],
+    ALPACA_HISTORY_BROKER_UNAVAILABLE: [503, 'broker history could not be read'],
+    ALPACA_HISTORY_INCOMPLETE_BROKER_HISTORY: [409, 'complete broker history is required'],
+    ALPACA_HISTORY_BROKER_NOT_FLAT: [409, 'historical repairs require no broker positions or open orders'],
+    ALPACA_HISTORY_MONITORS_ENABLED: [409, 'disable both trading monitors before repairing history'],
+    ALPACA_HISTORY_ACTIVE_EXECUTION: [409, 'historical repairs are blocked while execution is active'],
+    ALPACA_HISTORY_RECENT_PLAN: [409, 'a recent trade is still being reconciled'],
+    ALPACA_HISTORY_FILL_CONFLICT: [409, 'conflicting execution evidence requires review'],
+    ALPACA_HISTORY_CONFIRMATION_REQUIRED: [400, 'explicit confirmation is required'],
+    ALPACA_HISTORY_SELECTION_INVALID: [400, 'select only plans in the reviewed repair preview'],
+    ALPACA_HISTORY_ATTRIBUTION_CONFIRMATION_REQUIRED: [400, 'confirm ownership of each inferred exit before applying it'],
     ALPACA_V2_KILL_SWITCH_ACTIVE: [403, 'the kill switch is active'],
     ALPACA_V2_EXECUTION_DISABLED: [403, 'v2 execution is not in paper_execute mode'],
     ALPACA_V2_ATTENTION_REQUIRED: [403, 'an attention latch blocks new entries'],
@@ -63,10 +84,14 @@ function respondError(res, err) {
 
 const isOperator = (req) => req.auth?.type === 'session' && req.auth?.role === 'operator';
 const isScopedCaller = (req) => isOperator(req) || req.auth?.role === 'alpaca-day-trading-agent';
-const hashKey = (value) => crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, 16);
 const num = (value) => (value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value));
 
-function sanitizePlan(plan) {
+function sanitizePlan(plan, evidence = {}) {
+    const verified = evidence.fills ? deriveFillTrade(plan, evidence.fills) : null;
+    let entryEvidence = {};
+    try { entryEvidence = defaultStore.sanitizeDetail(JSON.parse(plan.entry_evidence_json || '{}')); } catch { /* Unavailable evidence remains explicit. */ }
+    const actualRisk = verified?.actual_initial_risk_dollars ?? (plan.filled_entry_qty > 0 && plan.avg_entry_price > plan.planned_stop
+        ? Math.round(plan.filled_entry_qty * (plan.avg_entry_price - plan.planned_stop) * 1e6) / 1e6 : null);
     return {
         id: plan.id,
         symbol: plan.symbol,
@@ -74,6 +99,14 @@ function sanitizePlan(plan) {
         catalyst: plan.catalyst,
         thesis: plan.thesis,
         invalidation: plan.invalidation,
+        setupId: plan.setup_id || 'legacy_unclassified',
+        strategyVersion: plan.strategy_version || 'legacy_unversioned',
+        catalystClass: plan.catalyst_class || 'unclassified',
+        entryEvidence,
+        fillEvidenceComplete: Boolean(verified),
+        actualInitialRiskDollars: actualRisk,
+        actualRiskR: verified?.actual_risk_r ?? null,
+        ...(plan.state === 'closed' ? { observations: observationSummary(verified, evidence.observations) } : {}),
         plannedQty: plan.planned_qty,
         plannedEntryPrice: plan.planned_entry_price,
         plannedStop: plan.planned_stop,
@@ -87,11 +120,11 @@ function sanitizePlan(plan) {
         filledExitQty: plan.filled_exit_qty,
         avgExitPrice: plan.avg_exit_price,
         exitReason: plan.exit_reason,
-        realizedPnl: plan.realized_pnl,
-        realizedR: plan.realized_r,
+        realizedPnl: evidence.fills && plan.state === 'closed' ? verified?.realized_pnl ?? null : plan.realized_pnl,
+        realizedR: evidence.fills && plan.state === 'closed' ? verified?.realized_r ?? null : plan.realized_r,
         createdAt: plan.created_at,
-        openedAt: plan.opened_at,
-        closedAt: plan.closed_at,
+        openedAt: verified?.opened_at || plan.opened_at,
+        closedAt: verified?.closed_at || plan.closed_at,
     };
 }
 
@@ -108,8 +141,10 @@ function sanitizeFill(fill) {
     return { side: fill.side, qty: fill.qty, price: fill.price, role: fill.role, executedAt: fill.executed_at, source: fill.source };
 }
 
-function createV2Router({ store = defaultStore, createClient = createPaperClient, now = () => new Date(), policy = DEFAULT_V2_POLICY } = {}) {
+function createV2Router({ store = defaultStore, createClient = createPaperClient, now = () => new Date(), policy = DEFAULT_V2_POLICY,
+    historyService = createHistoryAuditService({ now }) } = {}) {
     const router = createAsyncRouter();
+    const historyPreviews = new Map();
     let execution = null;
     function getExecution() {
         if (!execution) execution = createV2Execution({ store, client: createClient(), now, policy });
@@ -138,7 +173,6 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
 
     router.post('/entries', async (req, res) => {
         if (!requireScope(req, res)) return undefined;
-        const clientOrderId = typeof req.body?.client_order_id === 'string' ? req.body.client_order_id : '';
         try {
             const result = await getExecution().submitEntry(req.body);
             const data = { planId: result.plan.id, symbol: result.plan.symbol, state: result.plan.state, outcome: result.outcome };
@@ -148,13 +182,6 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
             if (result.outcome === 'unresolved') return res.status(409).json({ status: 'error', code: 'ALPACA_V2_SUBMISSION_UNRESOLVED', error: 'this entry could not be matched at the broker; operator attention is required', data });
             return res.status(200).json({ status: 'success', data });
         } catch (err) {
-            if (err?.code && clientOrderId) {
-                await store.appendEvent({
-                    event_key: `entry_refused:${hashKey(clientOrderId)}:${err.code}`, event_type: 'entry_refused', action: 'submit_entry', outcome: 'refused',
-                    reason_code: err.code, detail: { symbol: typeof req.body?.symbol === 'string' ? req.body.symbol.toUpperCase() : null, qty: num(req.body?.qty) },
-                    occurred_at: now().toISOString(),
-                }).catch(() => {});
-            }
             return respondError(res, err);
         }
     });
@@ -331,6 +358,95 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
 
     // ---- readers ----
 
+    async function readEvidence() {
+        return store.transaction(async (repo) => ({
+            plans: await repo.listPlans(), fills: await repo.listFills(),
+            observations: await repo.listObservations(), events: await repo.listEvents(),
+            experiments: await repo.listExperiments(),
+        }));
+    }
+
+    router.get('/risk', async (_req, res) => {
+        try {
+            const evidence = await readEvidence();
+            return res.json({ status: 'success', data: { ...computeV2DailyRisk({ ...evidence, now: now() }),
+                maxDailyLossPct: policy.maxDailyLossPct, minRewardRiskRatio: policy.minRewardRiskRatio, scope: 'v2_realized' } });
+        } catch (err) { return respondError(res, err); }
+    });
+
+    router.get('/experiments', async (_req, res) => {
+        try {
+            const evidence = await readEvidence();
+            return res.json({ status: 'success', data: { experiments: evidence.experiments.map((experiment) =>
+                evaluateExperiment(experiment, { ...evidence, now: now() })) } });
+        } catch (err) { return respondError(res, err); }
+    });
+
+    router.post('/experiments', async (req, res) => {
+        if (!requireOperator(req, res)) return undefined;
+        try {
+            const experiment = await store.createExperiment(req.body, now());
+            return res.status(201).json({ status: 'success', data: evaluateExperiment(experiment, { now: now() }) });
+        } catch (err) { return respondError(res, err); }
+    });
+
+    const historyError = (code) => Object.assign(new Error('historical evidence unavailable'), { code });
+    async function brokerHistoryFacts(bounds) {
+        const client = createClient();
+        const after = bounds?.after || await store.getHistoryStart() || new Date(now().getTime() - 30 * 86_400_000).toISOString();
+        const until = bounds?.until || now().toISOString();
+        const history = await collectBrokerHistory(client, { after, until });
+        // A later fill can invalidate the flat-inventory inference even when the
+        // positions have become flat again. Recheck the interval after preview.
+        const tailUntil = now().toISOString();
+        if (Date.parse(tailUntil) > Date.parse(until)) {
+            const tail = await collectBrokerHistory(client, { after: until, until: tailUntil });
+            if (!tail.coverage.complete || tail.brokerActivities.length > 0) {
+                throw historyError('ALPACA_HISTORY_BROKER_STATE_CHANGED');
+            }
+        }
+        let positions; let openOrders;
+        try { [positions, openOrders] = await Promise.all([client.getPositions(), client.getOrders({ status: 'open' })]); }
+        catch { throw historyError('ALPACA_HISTORY_BROKER_UNAVAILABLE'); }
+        return { ...history, positions, openOrders, snapshotAt: now().toISOString() };
+    }
+
+    router.post('/history/preview', async (req, res) => {
+        if (!requireOperator(req, res)) return undefined;
+        try {
+            const facts = await brokerHistoryFacts();
+            const preview = await historyService.preview(facts);
+            for (const [key, value] of historyPreviews) if (value.expiresAt <= now().getTime()) historyPreviews.delete(key);
+            if (historyPreviews.size >= 20) historyPreviews.delete(historyPreviews.keys().next().value);
+            historyPreviews.set(preview.reviewToken, { after: facts.coverage.after, until: facts.coverage.until, expiresAt: now().getTime() + 5 * 60_000 });
+            return res.json({ status: 'success', data: preview });
+        } catch (err) { return respondError(res, err); }
+    });
+
+    router.post('/history/apply', async (req, res) => {
+        if (!requireOperator(req, res)) return undefined;
+        try {
+            const bounds = historyPreviews.get(req.body?.reviewToken);
+            if (!bounds || bounds.expiresAt <= now().getTime()) throw historyError('ALPACA_HISTORY_STALE_PREVIEW');
+            const facts = await brokerHistoryFacts(bounds);
+            const result = await historyService.apply({ ...facts, reviewToken: req.body.reviewToken,
+                selectedPlanIds: req.body.selectedPlanIds, attributionPlanIds: req.body.attributionPlanIds, confirm: req.body.confirm });
+            return res.json({ status: 'success', data: result });
+        } catch (err) { return respondError(res, err); }
+    });
+
+    router.post('/history/disable-legacy', async (req, res) => {
+        if (!requireOperator(req, res)) return undefined;
+        try {
+            const client = createClient();
+            let positions; let openOrders;
+            try { [positions, openOrders] = await Promise.all([client.getPositions(), client.getOrders({ status: 'open' })]); }
+            catch { throw historyError('ALPACA_HISTORY_BROKER_UNAVAILABLE'); }
+            const result = await historyService.disableLegacy({ positions, openOrders, snapshotAt: now().toISOString(), confirm: req.body?.confirm });
+            return res.json({ status: 'success', data: result });
+        } catch (err) { return respondError(res, err); }
+    });
+
     router.get('/status', async (_req, res) => {
         try {
             const [state, plans] = await Promise.all([store.getMonitorState(), store.listNonterminalPlans()]);
@@ -388,8 +504,9 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
     router.get('/plans', async (req, res) => {
         try {
             const state = typeof req.query?.state === 'string' ? req.query.state : null;
-            const plans = await store.listPlans(state ? { states: [state] } : {});
-            return res.json({ status: 'success', data: plans.map(sanitizePlan) });
+            const evidence = await readEvidence();
+            const plans = state ? evidence.plans.filter((plan) => plan.state === state) : evidence.plans;
+            return res.json({ status: 'success', data: plans.map((plan) => sanitizePlan(plan, evidence)) });
         } catch (err) {
             return respondError(res, err);
         }
@@ -399,8 +516,8 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
         try {
             const plan = /^[1-9]\d*$/.test(req.params.id) ? await store.getPlan(req.params.id) : null;
             if (!plan) return fail(res, 404, 'ALPACA_V2_PLAN_NOT_FOUND', 'no v2 plan exists with this id');
-            const [fills, events] = await Promise.all([store.listFills({ planId: plan.id }), store.listEvents(plan.id)]);
-            return res.json({ status: 'success', data: { plan: sanitizePlan(plan), fills: fills.map(sanitizeFill), events: events.map(sanitizeEvent) } });
+            const [fills, events, observations] = await Promise.all([store.listFills({ planId: plan.id }), store.listEvents(plan.id), store.listObservations({ planId: plan.id })]);
+            return res.json({ status: 'success', data: { plan: sanitizePlan(plan, { fills, observations }), fills: fills.map(sanitizeFill), events: events.map(sanitizeEvent) } });
         } catch (err) {
             return respondError(res, err);
         }
@@ -408,9 +525,9 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
 
     router.get('/journal', async (_req, res) => {
         try {
-            const [plans, events] = await Promise.all([store.listPlans(), store.listEvents()]);
+            const evidence = await readEvidence();
             return res.json({ status: 'success', data: {
-                analytics: computeV2Analytics({ plans, events }), trades: plans.map(sanitizePlan), events: events.map(sanitizeEvent),
+                analytics: computeV2Analytics(evidence), trades: evidence.plans.map((plan) => sanitizePlan(plan, evidence)), events: evidence.events.map(sanitizeEvent),
             } });
         } catch (err) {
             return respondError(res, err);

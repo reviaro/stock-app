@@ -1,4 +1,5 @@
 const db = require('../database/db');
+const { effectiveV1HistoryFills } = require('./alpaca_day_trade_history_audit');
 
 function summarizeSide(fills) {
     const qty = fills.reduce((total, fill) => total + Number(fill.qty), 0);
@@ -13,10 +14,7 @@ function summarizeSide(fills) {
 // from exit (sell) fills on the same plan — a stop/target exit is a separate side, not
 // a second entry, and must never be summed into the same total as the entry fills.
 function computeFilledSummary(fills = []) {
-    const supersededActivityIds = new Set(
-        fills.filter((fill) => fill.correction_of).map((fill) => fill.correction_of),
-    );
-    const effective = fills.filter((fill) => !fill.is_bust && !supersededActivityIds.has(fill.activity_id));
+    const effective = effectiveV1HistoryFills(fills);
 
     return {
         entry: summarizeSide(effective.filter((fill) => fill.side === 'buy')),

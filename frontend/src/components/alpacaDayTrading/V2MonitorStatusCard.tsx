@@ -2,10 +2,10 @@ import { useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { useClearV2KillSwitch, useSetV2Mode, useV2Status } from '@/hooks/useAlpacaDayTradingV2'
+import { useClearV2KillSwitch, useSetV2Mode, useV2DailyRisk, useV2Status } from '@/hooks/useAlpacaDayTradingV2'
 import { v2ErrorMessage } from '@/lib/alpacaV2Errors'
 import type { AlpacaV2Mode } from '@/types/alpacaDayTrading'
-import { timeAgo } from './v2Format'
+import { pct, timeAgo, usd } from './v2Format'
 
 const MODE_LABELS: Record<AlpacaV2Mode, string> = {
   disabled: 'Execution disabled',
@@ -118,6 +118,7 @@ function LatchControl() {
 
 export function V2MonitorStatusCard() {
   const { data, isLoading, isError } = useV2Status()
+  const risk = useV2DailyRisk()
   return (
     <section aria-label="Monitor status">
       <Card>
@@ -138,6 +139,21 @@ export function V2MonitorStatusCard() {
                 <div><dt className="text-muted-foreground">Session date</dt><dd className="font-mono">{data.sessionDate ?? '—'}</dd></div>
                 <div><dt className="text-muted-foreground">Open plans</dt><dd className="font-mono">{data.openPlanCount} ({data.attentionPlanCount} need attention)</dd></div>
               </dl>
+              <section aria-label="Daily entry guard" className="space-y-2 border-t border-border pt-3 text-xs">
+                <h3 className="font-semibold">Daily entry guard</h3>
+                {risk.isLoading && <p className="text-muted-foreground">Checking today’s v2 fill evidence…</p>}
+                {risk.isError && <p role="alert" className="text-destructive">Daily risk is unavailable. New entries require verified risk evidence.</p>}
+                {risk.data && <>
+                  <dl className="grid grid-cols-2 gap-2">
+                    <div><dt className="text-muted-foreground">Today’s gross realized v2 P&amp;L</dt><dd className="font-mono">{risk.data.complete ? usd(risk.data.realizedPnl) : 'Unavailable'}</dd></div>
+                    <div><dt className="text-muted-foreground">Daily realized-loss limit</dt><dd className="font-mono">{Number.isFinite(risk.data.maxDailyLossPct) ? pct(risk.data.maxDailyLossPct) + ' of equity' : 'Unavailable'}</dd></div>
+                    <div><dt className="text-muted-foreground">Minimum reward / risk</dt><dd className="font-mono">{Number.isFinite(risk.data.minRewardRiskRatio) ? risk.data.minRewardRiskRatio.toFixed(2) + ':1' : 'Unavailable'}</dd></div>
+                    <div><dt className="text-muted-foreground">Risk session (ET)</dt><dd className="font-mono">{risk.data.sessionDate ?? 'Unavailable'}</dd></div>
+                  </dl>
+                  <p className={risk.data.complete ? 'text-muted-foreground' : 'text-warning'}>{risk.data.complete ? 'Fill evidence verified for this session.' : 'Fill evidence is incomplete. New entries remain blocked until it is verified.'}</p>
+                  <p className="text-muted-foreground">V2 realized results only, before costs; excludes unrealized and other account activity. Entry reward/risk uses the maximum permitted entry price.</p>
+                </>}
+              </section>
               <ModeControl key={data.mode} mode={data.mode} />
               {(data.killSwitch || data.attentionRequired) && <LatchControl />}
             </>

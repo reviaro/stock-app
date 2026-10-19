@@ -1,5 +1,6 @@
 const store = require('./alpaca_day_trade_store');
 const { computeJournalAnalytics } = require('./trade_journal');
+const { effectiveV1HistoryFills } = require('./alpaca_day_trade_history_audit');
 
 const TERMINAL_PLAN_STATES = ['closed', 'cancelled', 'error'];
 
@@ -44,9 +45,8 @@ function exitReasonForBrokerOrderId(plan, brokerOrderId, orderAudits = []) {
 }
 
 function latestExitFill(fills) {
-    const supersededActivityIds = new Set(fills.filter((f) => f.correction_of).map((f) => f.correction_of));
-    return fills
-        .filter((f) => f.side === 'sell' && !f.is_bust && !supersededActivityIds.has(f.activity_id))
+    return effectiveV1HistoryFills(fills)
+        .filter((f) => f.side === 'sell')
         .sort((a, b) => new Date(a.executed_at) - new Date(b.executed_at))
         .pop() || null;
 }
@@ -61,7 +61,8 @@ async function attemptCloseFromFills(plan, { client }) {
     const fills = await store.listFillsForPlan(plan.id);
     const summary = store.computeFilledSummary(fills);
     assertNoOverfill(plan, summary);
-    if (summary.exit.qty === 0) return null;
+    // Broker flatness cannot replace missing local execution evidence.
+    if (summary.exit.qty === 0 || summary.entry.qty !== summary.exit.qty) return null;
 
     const position = await client.getPosition(plan.symbol);
     const remainingQty = position ? Number(position.qty) : 0;
