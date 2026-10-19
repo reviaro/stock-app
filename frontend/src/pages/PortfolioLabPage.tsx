@@ -223,10 +223,10 @@ export function PortfolioLabPage() {
                       <option value="">Select an experiment</option>
                       {experiments.data?.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                     </select>
-                    {selectedExperimentId == null && <p className="text-xs text-amber-500">Explicitly select the matching allocation experiment. Nothing is selected automatically.</p>}
-                    {!latestVersion && selectedExperimentId != null && <p className="text-xs text-amber-500">Create a rule version in Research Lab before recording evidence.</p>}
+                    {selectedExperimentId == null && <p className="text-xs text-warning">Explicitly select the matching allocation experiment. Nothing is selected automatically.</p>}
+                    {!latestVersion && selectedExperimentId != null && <p className="text-xs text-warning">Create a rule version in Research Lab before recording evidence.</p>}
                     <button type="button" disabled={!selectedModel?.strategy_lab_evidence || !latestVersion || addEvidence.isPending} onClick={() => void recordEvidence()} className={buttonClass}>Record selected result as evidence</button>
-                    {evidenceMessage && <p className="text-xs text-green-500">{evidenceMessage}</p>}
+                    {evidenceMessage && <p className="text-xs text-positive">{evidenceMessage}</p>}
                   </CardContent>
                 </Card>
               </>

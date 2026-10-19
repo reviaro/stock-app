@@ -1,5 +1,5 @@
-const express = require('express');
-const router = express.Router();
+const { createAsyncRouter } = require('../services/http_errors');
+const router = createAsyncRouter();
 const db = require('../database/db');
 const { snapshotWatchlist } = require('../services/snapshotService');
 
@@ -18,7 +18,7 @@ router.get('/', async (req, res) => {
 
         res.json({ status: 'success', data });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 
@@ -29,7 +29,7 @@ router.get('/:symbol', async (req, res) => {
         const history = await db.getStockHistory(req.params.symbol, days);
         res.json({ status: 'success', data: history });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 
@@ -41,7 +41,7 @@ router.post('/snapshot', async (req, res) => {
         const result = await snapshotWatchlist(slot);
         res.json(result);
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 

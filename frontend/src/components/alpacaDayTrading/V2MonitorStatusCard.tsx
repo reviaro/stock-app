@@ -121,7 +121,7 @@ export function V2MonitorStatusCard() {
   return (
     <section aria-label="Monitor status">
       <Card>
-        <CardHeader className="pb-2"><CardTitle><h2>Monitor status</h2></CardTitle></CardHeader>
+        <CardHeader className="pb-2"><CardTitle>Monitor status</CardTitle></CardHeader>
         <CardContent className="space-y-3 px-3 pb-4 text-sm">
           {isLoading && <p className="text-xs text-muted-foreground">Loading monitor status…</p>}
           {isError && <p className="text-xs text-destructive">Unable to load monitor status.</p>}

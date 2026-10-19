@@ -31,6 +31,7 @@ const { initUniverseScheduler } = require('./services/universeCache');
 const { initSnapshotScheduler } = require('./services/snapshotScheduler');
 const { createAuthFromEnv } = require('./services/auth');
 const { authorizeApiRequest } = require('./services/api_capabilities');
+const { apiErrorHandler } = require('./services/http_errors');
 
 const PORT = Number(process.env.PORT || 3002);
 const FRONTEND_DIST = path.join(__dirname, '..', 'frontend', 'dist');
@@ -105,10 +106,14 @@ function createApp({ auth = createAuthFromEnv(), env = process.env } = {}) {
     app.use('/api/strategy-lab', strategyLabRoutes);
     app.use('/api/portfolio-lab', portfolioLabRoutes);
 
+    app.use('/api', (_req, res) => res.status(404).json({ status: 'error', error: 'API endpoint not found' }));
+
     app.get('*', (_req, res) => {
         res.setHeader('Cache-Control', 'no-cache');
         res.sendFile(path.join(FRONTEND_DIST, 'index.html'));
     });
+
+    app.use(apiErrorHandler);
 
     return app;
 }

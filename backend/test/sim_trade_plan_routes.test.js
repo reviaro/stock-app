@@ -6,8 +6,8 @@ const path = require('path');
 const http = require('http');
 const express = require('express');
 
-const TEST_DB = path.join(__dirname, 'test_sim_trade_plans.db');
-process.env.DB_PATH_OVERRIDE = TEST_DB;
+const { createTestDatabase } = require('../test-support/test_database');
+const TEST_DB = createTestDatabase();
 
 const Module = require('module');
 const originalLoad = Module._load;

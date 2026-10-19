@@ -1,8 +1,8 @@
-const express = require('express');
+const { createAsyncRouter } = require('../services/http_errors');
 const portfolioLab = require('../services/portfolio_lab');
 
 function createPortfolioLabRouter({ analyze = portfolioLab.analyze } = {}) {
-    const router = express.Router();
+    const router = createAsyncRouter();
     router.post('/analyze', async (req, res) => {
         try {
             const result = await analyze(req.body || {});

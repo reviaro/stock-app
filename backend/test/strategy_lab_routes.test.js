@@ -5,8 +5,8 @@ const path = require('path');
 const http = require('http');
 const express = require('express');
 
-const TEST_DB = path.join(__dirname, 'test_strategy_lab_routes.db');
-process.env.DB_PATH_OVERRIDE = TEST_DB;
+const { createTestDatabase } = require('../test-support/test_database');
+const TEST_DB = createTestDatabase();
 
 const db = require('../database/db');
 const strategyLabRouter = require('../routes/strategy_lab');

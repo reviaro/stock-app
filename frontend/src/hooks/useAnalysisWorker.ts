@@ -33,13 +33,21 @@ export interface AnalysisWorkerApi {
 export function useAnalysisWorker() {
   const [workerApi, setWorkerApi] = useState<Remote<AnalysisWorkerApi> | null>(null)
   const [isReady, setIsReady] = useState(false)
+  const [failed, setFailed] = useState(false)
 
   useEffect(() => {
     let active = true
-    const worker = new Worker(
+    let worker: Worker
+    try {
+      worker = new Worker(
       new URL('../workers/analysis.worker.ts', import.meta.url),
       { type: 'module' }
-    )
+      )
+    } catch {
+      queueMicrotask(() => { if (active) setFailed(true) })
+      return () => { active = false }
+    }
+    worker.onerror = () => { if (active) { setFailed(true); setWorkerApi(null) } }
     const api = Comlink.wrap<AnalysisWorkerApi>(worker)
 
     queueMicrotask(() => {
@@ -57,5 +65,5 @@ export function useAnalysisWorker() {
     }
   }, [])
 
-  return { workerApi, isReady }
+  return { workerApi, isReady, failed }
 }

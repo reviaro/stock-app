@@ -1,6 +1,6 @@
-import { useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { useState, type RefObject } from 'react'
+import * as Dialog from '@radix-ui/react-dialog'
+import { CardContent, CardHeader } from '@/components/ui/card'
 
 /* ─── Term definitions ─────────────────────────────────────────────── */
 
@@ -262,167 +262,81 @@ const CATEGORY_LABELS: Record<string, string> = {
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
-    canslim: 'bg-violet-500/20 text-violet-400 border-violet-500/30',
-    fundamental: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
-    technical: 'bg-sky-500/20 text-sky-400 border-sky-500/30',
-    market: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
+    canslim: 'bg-violet-500/20 text-highlight border-violet-500/30',
+    fundamental: 'bg-emerald-500/20 text-positive border-emerald-500/30',
+    technical: 'bg-sky-500/20 text-info border-sky-500/30',
+    market: 'bg-amber-500/20 text-warning border-amber-500/30',
 }
 
 const CATEGORIES = ['canslim', 'fundamental', 'technical', 'market'] as const
 
-/* ─── Overlay backdrop animation ───────────────────────────────────── */
-
-const backdropVariants = {
-    hidden: { opacity: 0 },
-    visible: { opacity: 1 },
-}
-
-const panelVariants = {
-    hidden: { opacity: 0, y: 32, scale: 0.96 },
-    visible: { opacity: 1, y: 0, scale: 1, transition: { type: 'spring' as const, stiffness: 300, damping: 28 } },
-    exit: { opacity: 0, y: 32, scale: 0.96, transition: { duration: 0.2 } },
-}
-
-/* ─── Component ────────────────────────────────────────────────────── */
-
 interface GlossaryProps {
     isOpen: boolean
     onClose: () => void
+    returnFocusRef?: RefObject<HTMLButtonElement | null>
 }
 
-export function Glossary({ isOpen, onClose }: GlossaryProps) {
+export function Glossary({ isOpen, onClose, returnFocusRef }: GlossaryProps) {
     const [search, setSearch] = useState('')
     const [activeCategory, setActiveCategory] = useState<string | null>(null)
-
-    const filtered = GLOSSARY.filter((t) => {
-        const matchesSearch =
-            !search.trim() ||
-            t.term.toLowerCase().includes(search.toLowerCase()) ||
-            t.description.toLowerCase().includes(search.toLowerCase())
-        const matchesCategory = !activeCategory || t.category === activeCategory
-        return matchesSearch && matchesCategory
-    })
-
-    // Group filtered terms by category
-    const grouped = CATEGORIES.map((cat) => ({
-        category: cat,
-        terms: filtered.filter((t) => t.category === cat),
-    })).filter((g) => g.terms.length > 0)
+    const filtered = GLOSSARY.filter((term) => (
+        (!search.trim() || `${term.term} ${term.description}`.toLowerCase().includes(search.trim().toLowerCase()))
+        && (!activeCategory || term.category === activeCategory)
+    ))
+    const grouped = CATEGORIES.map((category) => ({
+        category, terms: filtered.filter((term) => term.category === category),
+    })).filter((group) => group.terms.length > 0)
 
     return (
-        <AnimatePresence>
-            {isOpen && (
-                <motion.div
-                    className="fixed inset-0 z-50 flex items-center justify-center p-4"
-                    variants={backdropVariants}
-                    initial="hidden"
-                    animate="visible"
-                    exit="hidden"
+        <Dialog.Root open={isOpen} onOpenChange={(open) => { if (!open) onClose() }}>
+            <Dialog.Portal>
+                <Dialog.Overlay className="fixed inset-0 z-[60] bg-black/60" />
+                <Dialog.Content
+                    className="fixed left-1/2 top-1/2 z-[60] flex max-h-[85dvh] w-[calc(100%-2rem)] max-w-3xl -translate-x-1/2 -translate-y-1/2 flex-col rounded-xl border border-border bg-card text-card-foreground shadow-xl"
+                    onCloseAutoFocus={(event) => {
+                        if (returnFocusRef?.current) {
+                            event.preventDefault()
+                            returnFocusRef.current.focus()
+                        }
+                    }}
                 >
-                    {/* Backdrop */}
-                    <motion.div
-                        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-                        onClick={onClose}
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                    />
-
-                    {/* Panel */}
-                    <motion.div
-                        className="relative w-full max-w-3xl max-h-[85vh] flex flex-col rounded-xl overflow-hidden"
-                        variants={panelVariants}
-                        initial="hidden"
-                        animate="visible"
-                        exit="exit"
-                    >
-                        <Card className="flex-1 min-h-0 flex flex-col border-border shadow-2xl">
-                            <CardHeader className="pb-3 shrink-0">
-                                <div className="flex items-center justify-between">
-                                    <CardTitle className="text-lg flex items-center gap-2">
-                                        <span className="text-xl">📖</span> Glossary
-                                    </CardTitle>
-                                    <button
-                                        type="button"
-                                        onClick={onClose}
-                                        className="text-muted-foreground hover:text-foreground p-1.5 rounded-md hover:bg-accent transition-colors"
-                                        aria-label="Close glossary"
-                                    >
-                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                            <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-                                        </svg>
-                                    </button>
-                                </div>
-
-                                {/* Search + category filters */}
-                                <div className="mt-3 space-y-2">
-                                    <input
-                                        type="text"
-                                        value={search}
-                                        onChange={(e) => setSearch(e.target.value)}
-                                        placeholder="Search terms…"
-                                        className="w-full px-3 py-2 rounded-md bg-secondary text-foreground text-sm border border-border focus:border-primary focus:outline-none transition-colors placeholder:text-muted-foreground"
-                                    />
-                                    <div className="flex gap-1.5 flex-wrap">
-                                        <button
-                                            type="button"
-                                            onClick={() => setActiveCategory(null)}
-                                            className={[
-                                                'text-xs px-2.5 py-1 rounded-full border transition-colors',
-                                                !activeCategory
-                                                    ? 'bg-primary text-primary-foreground border-primary'
-                                                    : 'bg-transparent text-muted-foreground border-border hover:border-primary hover:text-foreground',
-                                            ].join(' ')}
-                                        >
-                                            All
-                                        </button>
-                                        {CATEGORIES.map((cat) => (
-                                            <button
-                                                key={cat}
-                                                type="button"
-                                                onClick={() => setActiveCategory(activeCategory === cat ? null : cat)}
-                                                className={[
-                                                    'text-xs px-2.5 py-1 rounded-full border transition-colors',
-                                                    activeCategory === cat
-                                                        ? CATEGORY_COLORS[cat]
-                                                        : 'bg-transparent text-muted-foreground border-border hover:border-primary hover:text-foreground',
-                                                ].join(' ')}
-                                            >
-                                                {CATEGORY_LABELS[cat]}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                            </CardHeader>
-
-                            <CardContent className="flex-1 overflow-y-auto pb-6">
-                                {grouped.length === 0 && (
-                                    <p className="text-muted-foreground text-sm text-center py-8">No terms match your search.</p>
-                                )}
-
-                                {grouped.map((group) => (
-                                    <div key={group.category} className="mb-5 last:mb-0">
-                                        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
-                                            {CATEGORY_LABELS[group.category]}
-                                        </h3>
-                                        <div className="space-y-2">
-                                            {group.terms.map((t) => (
-                                                <div
-                                                    key={t.term}
-                                                    className="data-hover rounded-lg border border-border bg-secondary/30 px-4 py-3"
-                                                >
-                                                    <h4 className="text-sm font-semibold text-foreground mb-1">{t.term}</h4>
-                                                    <p className="text-xs text-muted-foreground leading-relaxed">{t.description}</p>
-                                                </div>
-                                            ))}
+                    <CardHeader className="shrink-0 pb-3">
+                        <div className="flex items-center justify-between gap-2">
+                            <Dialog.Title asChild><h2 className="text-lg font-semibold">Glossary</h2></Dialog.Title>
+                            <Dialog.Close className="min-h-11 min-w-11 rounded-md border border-border px-3 text-sm">Close</Dialog.Close>
+                        </div>
+                        <Dialog.Description className="text-sm text-muted-foreground">Search investment terms or filter by category.</Dialog.Description>
+                        <label className="block text-sm font-medium">
+                            Search terms
+                            <input autoFocus type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search terms…" className="mt-1 w-full rounded-md border border-border bg-secondary px-3 py-2 text-sm text-foreground" />
+                        </label>
+                        <div className="flex flex-wrap gap-2" aria-label="Glossary categories">
+                            <button type="button" aria-pressed={!activeCategory} onClick={() => setActiveCategory(null)} className={`rounded-full border px-3 py-2 text-xs ${!activeCategory ? 'border-primary bg-primary text-primary-foreground' : 'border-border text-muted-foreground'}`}>All</button>
+                            {CATEGORIES.map((category) => (
+                                <button key={category} type="button" aria-pressed={activeCategory === category} onClick={() => setActiveCategory(activeCategory === category ? null : category)} className={`rounded-full border px-3 py-2 text-xs ${activeCategory === category ? CATEGORY_COLORS[category] : 'border-border text-muted-foreground'}`}>
+                                    {CATEGORY_LABELS[category]}
+                                </button>
+                            ))}
+                        </div>
+                    </CardHeader>
+                    <CardContent className="min-h-0 overflow-y-auto pb-6">
+                        {grouped.length === 0 && <p role="status" className="py-8 text-sm text-muted-foreground">No terms match your search. Try another term or category.</p>}
+                        {grouped.map((group) => (
+                            <section key={group.category} className="mb-5 last:mb-0">
+                                <h3 className="mb-2 text-sm font-semibold text-muted-foreground">{CATEGORY_LABELS[group.category]}</h3>
+                                <dl className="space-y-3">
+                                    {group.terms.map((term) => (
+                                        <div key={term.term} className="rounded-lg border border-border bg-secondary/30 px-4 py-3">
+                                            <dt className="mb-1 text-sm font-semibold">{term.term}</dt>
+                                            <dd className="text-sm leading-relaxed text-muted-foreground">{term.description}</dd>
                                         </div>
-                                    </div>
-                                ))}
-                            </CardContent>
-                        </Card>
-                    </motion.div>
-                </motion.div>
-            )}
-        </AnimatePresence>
+                                    ))}
+                                </dl>
+                            </section>
+                        ))}
+                    </CardContent>
+                </Dialog.Content>
+            </Dialog.Portal>
+        </Dialog.Root>
     )
 }

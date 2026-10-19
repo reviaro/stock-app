@@ -1,5 +1,5 @@
-const express = require('express');
-const router = express.Router();
+const { createAsyncRouter } = require('../services/http_errors');
+const router = createAsyncRouter();
 const pybridge = require('../services/pybridge');
 
 // GET /api/market/indexes - Get major indexes
@@ -8,12 +8,12 @@ router.get('/indexes', async (req, res) => {
         const result = await pybridge.getMarketIndexes();
         
         if (result.status !== 'success') {
-            return res.status(500).json({ status: 'error', error: result.error || 'Failed to fetch indexes' });
+            throw new Error('Market index data is unavailable');
         }
         
         res.json(result);
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 
@@ -22,11 +22,11 @@ router.get('/sectors', async (req, res) => {
     try {
         const result = await pybridge.getSectorPerformance();
         if (result.status !== 'success') {
-            return res.status(500).json({ status: 'error', error: result.error || 'Failed to fetch sector data' });
+            throw new Error('Sector data is unavailable');
         }
         res.json(result);
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 

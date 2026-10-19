@@ -8,7 +8,7 @@ export function V2BrokerSnapshotCard() {
   return (
     <section aria-label="Broker snapshot">
       <Card>
-        <CardHeader className="pb-2"><CardTitle><h2>Broker snapshot</h2></CardTitle></CardHeader>
+        <CardHeader className="pb-2"><CardTitle>Broker snapshot</CardTitle></CardHeader>
         <CardContent className="space-y-3 px-3 pb-4 text-sm">
           {isLoading && <p className="text-xs text-muted-foreground">Loading broker snapshot…</p>}
           {isError && <p className="text-xs text-destructive">The broker snapshot is unavailable.</p>}

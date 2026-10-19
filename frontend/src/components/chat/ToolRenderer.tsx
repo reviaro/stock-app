@@ -97,7 +97,7 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
             : d.ftd_detected === false
               ? 'No Follow-Through Day Detected'
               : 'Data Unavailable'
-          const colorClass = isBullish ? 'text-green-400' : 'text-red-400'
+          const colorClass = isBullish ? 'text-positive' : 'text-negative'
           return (
             <div className="data-hover w-full rounded-md border border-border px-3 py-2 space-y-1">
               <div className="text-[10px] text-muted-foreground font-medium uppercase tracking-wide">

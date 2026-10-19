@@ -1,8 +1,7 @@
-const { test, before, after } = require('node:test');
+const { test, before } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sim-controls-'));
-process.env.DB_PATH_OVERRIDE = path.join(dir, 'test.db');
+const { createTestDatabase } = require('../test-support/test_database');
+createTestDatabase();
 const db = require('../database/db');
 const controls = require('../services/simulator_controls');
 const performance = require('../services/simulator_performance');
@@ -12,7 +11,6 @@ const basePolicy = { max_position_pct: 25, min_cash_pct: 10, max_risk_per_trade_
 const quote = (symbol, price) => ({ symbol, price, source: 'alpaca_iex', price_type: 'latest_trade', currency: 'USD',
     market_state: 'REGULAR', event_time: new Date(Date.now() - 1000).toISOString(), received_at: new Date().toISOString() });
 before(() => db.initDb());
-after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
 function allowed(principal, method, route, body = {}, query = {}) {
     let accepted = false, status;

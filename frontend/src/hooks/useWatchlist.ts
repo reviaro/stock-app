@@ -23,8 +23,9 @@ async function fetchWatchlist(): Promise<WatchlistEntry[]> {
 export async function searchStocks(query: string): Promise<StockSearchResult[]> {
   if (!query.trim()) return []
   const response = await fetch(`/api/watchlist/search/${encodeURIComponent(query.trim())}`)
-  if (!response.ok) return []
+  if (!response.ok) throw new Error(`Unable to search stocks (${response.status}). Please try again.`)
   const json: ApiResponse<StockSearchResult[]> = await response.json()
+  if (json.status === 'error') throw new Error(json.error ?? 'Unable to search stocks. Please try again.')
   return json.data ?? []
 }
 
@@ -36,6 +37,9 @@ export function useWatchlist() {
     queryKey: ['watchlist'],
     queryFn: fetchWatchlist,
     staleTime: 30_000,
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
     retry: 1,
   })
 }
@@ -54,7 +58,7 @@ export function useAddToWatchlist() {
         body: JSON.stringify({ symbol }),
       })
       const json: ApiResponse<WatchlistEntry> = await response.json()
-      if (json.status === 'error') {
+      if (!response.ok || json.status !== 'success') {
         throw new Error(json.error ?? 'Failed to add stock')
       }
       return json.data
@@ -77,7 +81,7 @@ export function useRemoveFromWatchlist() {
         method: 'DELETE',
       })
       const json: ApiResponse<{ deleted: number }> = await response.json()
-      if (json.status === 'error') {
+      if (!response.ok || json.status !== 'success') {
         throw new Error(json.error ?? 'Failed to remove stock')
       }
       return json.data

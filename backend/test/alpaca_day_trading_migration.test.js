@@ -4,8 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const sqlite3 = require('sqlite3');
 
-const TEST_DB = path.join(__dirname, 'test_alpaca_day_trading_migration.db');
-process.env.DB_PATH_OVERRIDE = TEST_DB;
+const { createTestDatabase } = require('../test-support/test_database');
+const TEST_DB = createTestDatabase();
 const db = require('../database/db');
 const { runAlpacaExecutionEpochsMigration } = require('../database/migrations/002_alpaca_execution_epochs');
 
@@ -88,7 +88,7 @@ test('a fresh database already carries the extended schema and the migration is 
 });
 
 test('classifies legacy rows by their immutable Long-Term idempotency-key prefix and leaves everything else unattributed', async () => {
-    const fixtureDb = path.join(__dirname, 'test_alpaca_day_trading_migration_fixture.db');
+    const fixtureDb = path.join(path.dirname(TEST_DB), 'test_alpaca_day_trading_migration_fixture.db');
     await buildPreExistingDatabase(fixtureDb);
 
     const result = await runAlpacaExecutionEpochsMigration({ dbPath: fixtureDb });
@@ -143,7 +143,7 @@ test('classifies legacy rows by their immutable Long-Term idempotency-key prefix
 });
 
 test('running the migration twice on an already-migrated database changes nothing', async () => {
-    const fixtureDb = path.join(__dirname, 'test_alpaca_day_trading_migration_repeat.db');
+    const fixtureDb = path.join(path.dirname(TEST_DB), 'test_alpaca_day_trading_migration_repeat.db');
     await buildPreExistingDatabase(fixtureDb);
 
     await runAlpacaExecutionEpochsMigration({ dbPath: fixtureDb });
@@ -200,7 +200,7 @@ test('persists a bracket entry and its protective child legs with correct parent
 // CREATE TABLE; this one proves the actual upgrade-in-place path against a database that
 // predates the column.
 test('an existing database without block_entries gets the column added, defaulting to 0, on the next initDb', async () => {
-    const fixtureDb = path.join(__dirname, 'test_alpaca_monitor_state_pre_block_entries.db');
+    const fixtureDb = path.join(path.dirname(TEST_DB), 'test_alpaca_monitor_state_pre_block_entries.db');
     if (fs.existsSync(fixtureDb)) fs.unlinkSync(fixtureDb);
     await runSql(fixtureDb, [`
         CREATE TABLE alpaca_monitor_state (

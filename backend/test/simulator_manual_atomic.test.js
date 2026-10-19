@@ -1,14 +1,10 @@
-const { test, before, after, beforeEach } = require('node:test');
+const { test, before, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sim-manual-'));
-process.env.DB_PATH_OVERRIDE = path.join(dir, 'test.db');
+const { createTestDatabase } = require('../test-support/test_database');
+createTestDatabase();
 const db = require('../database/db');
 before(() => db.initDb());
 beforeEach(async () => { await db.deleteAllSimTransactions(1); await db.deleteAllSimTransactions(2); });
-after(() => fs.rmSync(dir, { recursive: true, force: true }));
 const txn = (extra = {}) => ({ account_id: 1, type: 'buy', symbol: 'AAPL', shares: 10, price: 10, txn_date: '2026-09-04', ...extra });
 const fund = (account_id = 1, amount = 100) => db.addSimTransaction({ account_id, type: 'deposit', amount, txn_date: '2024-02-29' });
 const plan = { setup: 'breakout', thesis: 'manual test', stop_price: 9, target_price: 12, shares: 10, planned_entry: 10, planned_risk: 10 };

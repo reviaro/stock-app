@@ -8,10 +8,10 @@ import type { SectorPerformance } from '@/hooks/useSector'
 type Period = '1M' | '3M' | '6M'
 
 function pctColor(n: number) {
-  if (n >= 5) return 'text-green-400'
-  if (n >= 0) return 'text-green-300'
-  if (n >= -5) return 'text-red-300'
-  return 'text-red-400'
+  if (n >= 5) return 'text-positive'
+  if (n >= 0) return 'text-positive'
+  if (n >= -5) return 'text-negative'
+  return 'text-negative'
 }
 
 function getChangeKey(period: Period): keyof SectorPerformance {

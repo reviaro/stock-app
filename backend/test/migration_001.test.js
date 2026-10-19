@@ -3,8 +3,8 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 
-const TEST_DB = path.join(__dirname, 'test_migration.db');
-process.env.DB_PATH_OVERRIDE = TEST_DB;
+const { createTestDatabase } = require('../test-support/test_database');
+const TEST_DB = createTestDatabase();
 const db = require('../database/db');
 const { runMigration001 } = require('../database/migrations/001_portfolio_to_ledger');
 
@@ -21,8 +21,8 @@ beforeEach(async () => {
 
 after(() => {
   cleanupTestDb();
-  for (const file of fs.readdirSync(__dirname).filter((name) => name.startsWith('test_migration.db.backup.'))) {
-    fs.unlinkSync(path.join(__dirname, file));
+  for (const file of fs.readdirSync(path.dirname(TEST_DB)).filter((name) => name.startsWith('test.db.backup.'))) {
+    fs.unlinkSync(path.join(path.dirname(TEST_DB), file));
   }
 });
 

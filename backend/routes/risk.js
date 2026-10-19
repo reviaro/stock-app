@@ -1,10 +1,10 @@
-const express = require('express');
+const { createAsyncRouter } = require('../services/http_errors');
 const db = require('../database/db');
 const pybridge = require('../services/pybridge');
-const { buildSummary } = require('../services/portfolio_ledger');
+const { buildSummary, computeHoldings, isValuationPrice } = require('../services/portfolio_ledger');
 const { computeBreaches } = require('../services/risk_engine');
 
-const router = express.Router();
+const router = createAsyncRouter();
 
 async function buildRiskPayload() {
     const [rules, transactions, stops] = await Promise.all([
@@ -13,7 +13,8 @@ async function buildRiskPayload() {
         db.listPositionStops(),
     ]);
 
-    const symbols = [...new Set(transactions.map((txn) => txn.symbol).filter(Boolean))];
+    const symbols = Object.entries(computeHoldings(transactions))
+        .filter(([, holding]) => holding.shares > 0).map(([symbol]) => symbol);
     const prices = {};
     const infoBySymbol = {};
 
@@ -21,7 +22,7 @@ async function buildRiskPayload() {
         try {
             const info = await pybridge.getStockInfo(symbol);
             infoBySymbol[symbol] = info?.data ?? {};
-            if (typeof info?.data?.price === 'number') prices[symbol] = info.data.price;
+            if (isValuationPrice(info?.data?.price)) prices[symbol] = info.data.price;
         } catch {
             infoBySymbol[symbol] = {};
         }
@@ -35,7 +36,7 @@ async function buildRiskPayload() {
         shares: holding.shares,
         avg_cost: holding.avg_cost,
         currentPrice: prices[symbol] ?? null,
-        currentValue: prices[symbol] != null ? prices[symbol] * holding.shares : null,
+        currentValue: holding.shares === 0 ? 0 : prices[symbol] != null ? prices[symbol] * holding.shares : null,
         sector: infoBySymbol[symbol]?.sector ?? null,
         stop_loss: stopBySymbol[symbol] ?? null,
     }));
@@ -47,6 +48,9 @@ async function buildRiskPayload() {
         cashPct: breachSummary.cashPct,
         positions,
         breaches: breachSummary.breaches,
+        riskAssessment: breachSummary.riskAssessment,
+        valuationComplete: summary.valuationComplete,
+        missingPriceSymbols: summary.missingPriceSymbols,
     };
 }
 
@@ -55,7 +59,7 @@ router.get('/', async (_req, res) => {
         const payload = await buildRiskPayload();
         res.json({ status: 'success', data: payload });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 
@@ -66,6 +70,7 @@ router.put('/', async (req, res) => {
         res.json({ status: 'success', data: payload.rules });
     } catch (err) {
         const code = /invalid value/.test(err.message) ? 400 : 500;
+        if (code >= 500) throw err;
         res.status(code).json({ status: 'error', error: err.message });
     }
 });
@@ -76,6 +81,7 @@ router.put('/stops/:symbol', async (req, res) => {
         res.json({ status: 'success', data: result });
     } catch (err) {
         const code = /invalid stop_loss/.test(err.message) ? 400 : 500;
+        if (code >= 500) throw err;
         res.status(code).json({ status: 'error', error: err.message });
     }
 });
@@ -85,7 +91,7 @@ router.delete('/stops/:symbol', async (req, res) => {
         const result = await db.deletePositionStop(req.params.symbol);
         res.json({ status: 'success', data: result });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 

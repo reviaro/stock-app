@@ -114,7 +114,7 @@ function BuyForm({ accountId, structuredJournal = false }: { accountId: number; 
       {account && estimatedCost != null && (
         <div className="flex justify-between text-xs text-muted-foreground">
           <span>Cash after</span>
-          <span className={`font-mono ${account.cash - estimatedCost < 0 ? 'text-red-400' : ''}`}>
+          <span className={`font-mono ${account.cash - estimatedCost < 0 ? 'text-negative' : ''}`}>
             ${Math.max(0, account.cash - estimatedCost).toLocaleString('en-US', { minimumFractionDigits: 2 })}
           </span>
         </div>
@@ -190,7 +190,7 @@ function PendingOrderGate({ trade }: { trade: ReturnType<typeof useSimTrade> }) 
         </button>
       </div>
       {message && <p className="text-xs text-muted-foreground">{message}</p>}
-      {found != null && <p className="text-xs text-green-400">A fill was found and applied. You can place a new order.</p>}
+      {found != null && <p className="text-xs text-positive">A fill was found and applied. You can place a new order.</p>}
     </div>
   )
 }

@@ -1,7 +1,7 @@
-const express = require('express');
+const { createAsyncRouter } = require('../services/http_errors');
 const pybridge = require('../services/pybridge');
 
-const router = express.Router();
+const router = createAsyncRouter();
 
 router.get('/:symbol', async (req, res) => {
     try {
@@ -11,7 +11,7 @@ router.get('/:symbol', async (req, res) => {
         }
         res.json(result);
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 

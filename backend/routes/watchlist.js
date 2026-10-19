@@ -1,5 +1,5 @@
-const express = require('express');
-const router = express.Router();
+const { createAsyncRouter } = require('../services/http_errors');
+const router = createAsyncRouter();
 const db = require('../database/db');
 const pybridge = require('../services/pybridge');
 
@@ -126,7 +126,7 @@ router.get('/export/csv', async (req, res) => {
         res.setHeader('Content-Disposition', 'attachment; filename="watchlist.csv"');
         res.send(csv);
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 
@@ -152,7 +152,7 @@ router.get('/', async (req, res) => {
 
         res.json({ status: 'success', data: stocks });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 
@@ -189,7 +189,7 @@ router.post('/', async (req, res) => {
         if (err.message && err.message.includes('UNIQUE constraint')) {
             res.status(409).json({ status: 'error', error: 'Stock already in watchlist' });
         } else {
-            res.status(500).json({ status: 'error', error: err.message });
+            throw err;
         }
     }
 });
@@ -206,7 +206,7 @@ router.delete('/:symbol', async (req, res) => {
 
         res.json({ status: 'success', data: result });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 
@@ -219,6 +219,7 @@ router.patch('/:symbol', async (req, res) => {
         res.json({ status: 'success', data: result });
     } catch (err) {
         const code = /invalid bucket/.test(err.message) ? 400 : 500;
+        if (code >= 500) throw err;
         res.status(code).json({ status: 'error', error: err.message });
     }
 });

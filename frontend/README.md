@@ -1,73 +1,48 @@
-# React + TypeScript + Vite
+# Stock Dashboard frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React, TypeScript, Vite, and Tailwind provide the research dashboard, portfolio,
+simulator, paper-trading views, and AI chat. Follow the [root setup guide](../README.md#setup)
+to configure the backend and its Python environments first.
 
-Currently, two official plugins are available:
+## Development
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+Use Node.js 24, or a supported Node.js 20.19+ / 22.12+ release.
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm ci
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Vite serves the app at `http://localhost:5173` and proxies `/api` to the backend
+at `http://localhost:3002`. Sign in with the backend login you configured.
+For a separate backend, set the proxy target when starting Vite:
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+VITE_DEV_BACKEND_TARGET=http://127.0.0.1:3003 npm run dev
 ```
+
+`VITE_DEV_PORT` selects a different frontend port. Both values can also be kept
+in an ignored `.env.local` file. Vite variables are browser-visible configuration;
+keep broker credentials, model API keys, and session secrets on the backend.
+
+## Structure
+
+- `src/pages/`: application workspaces and page composition.
+- `src/components/`: dashboard, chat, simulator, and reusable UI components.
+- `src/hooks/`: API requests and React Query state.
+- `src/types/`: shared frontend API types.
+- `src/lib/`: client utilities and application state.
+- `src/test/setup.ts`: shared Vitest setup; tests live beside their components.
+
+## Checks and build
+
+```bash
+npm test
+npm run lint
+npm run build
+```
+
+Tests use Vitest, jsdom, and Testing Library with mocked API calls; they do not
+need a running backend. The build checks both TypeScript configurations and
+emits `dist/`, which the Express backend can serve. `npm run preview` previews
+the frontend bundle; use the backend for the complete application.

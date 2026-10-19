@@ -1,9 +1,9 @@
-const express = require('express');
+const { createAsyncRouter } = require('../services/http_errors');
 const { getPaperConfiguration, getPaperAccountSummary, getPaperReconciliationSnapshot, submitPaperOrder, reconcilePaperOrderAudits, resolveMissingPaperOrderAudit } = require('../services/alpaca_paper_service');
 const dayTradeStore = require('../services/alpaca_day_trade_store');
 const dayTradeV2Store = require('../services/alpaca_day_trade_v2_store');
 
-const router = express.Router();
+const router = createAsyncRouter();
 
 router.get('/status', async (_req, res) => {
     try {

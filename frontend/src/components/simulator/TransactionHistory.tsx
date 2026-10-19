@@ -41,8 +41,8 @@ export function TransactionHistory({ accountId }: Props) {
                   <td className="py-1 pr-3 text-muted-foreground">{t.txn_date}</td>
                   <td className="py-1 pr-3">
                     <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
-                      t.type === 'buy' ? 'bg-green-900/40 text-green-400' :
-                      t.type === 'sell' ? 'bg-red-900/40 text-red-400' :
+                      t.type === 'buy' ? 'bg-green-900/40 text-positive' :
+                      t.type === 'sell' ? 'bg-red-900/40 text-negative' :
                       'bg-secondary text-muted-foreground'
                     }`}>
                       {t.type}

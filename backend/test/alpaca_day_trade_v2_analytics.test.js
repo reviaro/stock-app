@@ -5,8 +5,8 @@ const http = require('http');
 const path = require('path');
 const express = require('express');
 
-const TEST_DB = path.join(__dirname, 'test_alpaca_day_trade_v2_analytics.db');
-process.env.DB_PATH_OVERRIDE = TEST_DB;
+const { createTestDatabase } = require('../test-support/test_database');
+const TEST_DB = createTestDatabase();
 const db = require('../database/db');
 const store = require('../services/alpaca_day_trade_v2_store');
 const { computeV2Analytics, PRELIMINARY_SAMPLE_SIZE } = require('../services/alpaca_day_trade_v2_analytics');

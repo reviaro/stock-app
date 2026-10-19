@@ -12,9 +12,11 @@ export function StopLossEditor({ symbol, stopLoss }: Props) {
   const clearStop = useDeleteStopLoss()
 
   return (
-    <div className="flex items-center gap-1">
+    <div className="flex flex-wrap items-center gap-1">
       <input
         type="number"
+        aria-label={`Stop loss for ${symbol}`}
+        min="0.01"
         step="0.01"
         value={value}
         onChange={(e) => setValue(e.target.value)}
@@ -23,6 +25,7 @@ export function StopLossEditor({ symbol, stopLoss }: Props) {
       />
       <button
         type="button"
+        disabled={!Number.isFinite(Number(value)) || Number(value) <= 0 || setStop.isPending || clearStop.isPending}
         onClick={() => value && setStop.mutate({ symbol, stop_loss: Number(value) })}
         className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
       >
@@ -37,6 +40,7 @@ export function StopLossEditor({ symbol, stopLoss }: Props) {
           Clear
         </button>
       )}
+      {(setStop.isError || clearStop.isError) && <p role="alert" className="basis-full text-xs text-destructive">Unable to update the stop loss. Please try again.</p>}
     </div>
   )
 }

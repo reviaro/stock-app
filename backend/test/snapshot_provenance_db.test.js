@@ -1,10 +1,9 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
-const path = require('path');
 
-const TEST_DB = path.join(__dirname, `test_snap_prov_${process.pid}.db`);
-process.env.DB_PATH_OVERRIDE = TEST_DB;
+const { createTestDatabase } = require('../test-support/test_database');
+const TEST_DB = createTestDatabase();
 
 const db = require('../database/db');
 

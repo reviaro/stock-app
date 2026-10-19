@@ -1,6 +1,8 @@
 // The UI shows only these fixed phrases, keyed by the backend's stable error code -- never the
 // response's own text -- so nothing broker-shaped can reach the page even if a message leaks.
 const MESSAGES: Record<string, string> = {
+  ALPACA_V2_SUBMISSION_IN_PROGRESS: 'Entry submission is in progress; retry after reconciliation.',
+  ALPACA_V2_CONTROL_STATE_CHANGED: 'Account state changed during this check; review and retry.',
   ALPACA_V2_BROKER_UNAVAILABLE: 'The broker could not be read. Nothing was changed.',
   ALPACA_V2_CONFIRMATION_REQUIRED: 'The typed confirmation did not match.',
   ALPACA_V2_OPERATOR_REQUIRED: 'Sign in as the dashboard operator to use this control.',

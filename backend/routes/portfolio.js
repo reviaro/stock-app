@@ -1,8 +1,8 @@
-const express = require('express');
-const router = express.Router();
+const { createAsyncRouter } = require('../services/http_errors');
+const router = createAsyncRouter();
 const db = require('../database/db');
 const pybridge = require('../services/pybridge');
-const { buildSummary } = require('../services/portfolio_ledger');
+const { buildSummary, computeHoldings, isValuationPrice } = require('../services/portfolio_ledger');
 const { computeBreaches } = require('../services/risk_engine');
 
 // GET /api/portfolio — aggregate holdings from the transactions ledger
@@ -25,14 +25,20 @@ router.get('/', async (req, res) => {
                         totalValue: 0,
                         realizedPnl: 0,
                         unrealizedPnl: 0,
+                        valuationComplete: true,
+                        missingPriceSymbols: [],
                     },
                     holdings: [],
                     recentTransactions: [],
+                    breaches: [],
+                    rules,
+                    riskAssessment: rules ? 'complete' : 'not_configured',
                 },
             });
         }
 
-        const symbols = [...new Set(transactions.map((txn) => txn.symbol).filter(Boolean))];
+        const symbols = Object.entries(computeHoldings(transactions))
+            .filter(([, holding]) => holding.shares > 0).map(([symbol]) => symbol);
         const currentPrices = {};
         const infoBySymbol = {};
 
@@ -40,7 +46,7 @@ router.get('/', async (req, res) => {
             try {
                 const info = await pybridge.getStockInfo(symbol);
                 infoBySymbol[symbol] = info?.data ?? {};
-                if (typeof info?.data?.price === 'number') {
+                if (isValuationPrice(info?.data?.price)) {
                     currentPrices[symbol] = info.data.price;
                 }
             } catch {
@@ -52,7 +58,7 @@ router.get('/', async (req, res) => {
         const ledger = buildSummary(transactions, currentPrices);
         const holdings = Object.entries(ledger.holdings).map(([symbol, holding]) => {
             const currentPrice = currentPrices[symbol] ?? null;
-            const currentValue = currentPrice != null ? currentPrice * holding.shares : null;
+            const currentValue = holding.shares === 0 ? 0 : currentPrice != null ? currentPrice * holding.shares : null;
             const pnl = ledger.unrealized[symbol] ?? null;
             const pnlPct = holding.total_cost > 0 && pnl != null ? (pnl / holding.total_cost) * 100 : null;
             return {
@@ -73,7 +79,7 @@ router.get('/', async (req, res) => {
 
         const risk = rules
             ? computeBreaches({ positions: holdings, cash: ledger.cash, rules })
-            : { cashPct: null, breaches: [] };
+            : { cashPct: ledger.cashPct, breaches: [], riskAssessment: 'not_configured' };
         const holdingsWithBreaches = holdings.map((holding) => ({
             ...holding,
             breaches: risk.breaches.filter((breach) =>
@@ -91,16 +97,19 @@ router.get('/', async (req, res) => {
                     holdingsValue: ledger.holdingsValue,
                     totalValue: ledger.totalValue,
                     realizedPnl: ledger.realized.total,
-                    unrealizedPnl: Object.values(ledger.unrealized).reduce((sum, value) => sum + value, 0),
+                    unrealizedPnl: ledger.unrealizedTotal,
+                    valuationComplete: ledger.valuationComplete,
+                    missingPriceSymbols: ledger.missingPriceSymbols,
                 },
                 holdings: holdingsWithBreaches,
                 recentTransactions: transactions.slice(0, 10),
                 breaches: risk.breaches,
+                riskAssessment: risk.riskAssessment,
                 rules,
             },
         });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 

@@ -20,9 +20,9 @@ const LETTER_LABELS: Record<string, string> = {
 
 /** Score-to-color mapping per research spec */
 function scoreColor(score: number): string {
-  if (score >= 70) return 'text-green-400'
-  if (score >= 40) return 'text-amber-400'
-  return 'text-red-400'
+  if (score >= 70) return 'text-positive'
+  if (score >= 40) return 'text-warning'
+  return 'text-negative'
 }
 
 /** Progress bar color variant */

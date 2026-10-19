@@ -9,7 +9,7 @@ export function V2PositionsCard() {
   return (
     <section aria-label="Current positions">
       <Card>
-        <CardHeader className="pb-2"><CardTitle><h2>Current positions ({positions.length})</h2></CardTitle></CardHeader>
+        <CardHeader className="pb-2"><CardTitle>Current positions ({positions.length})</CardTitle></CardHeader>
         <CardContent className="px-3 pb-4">
           {isLoading && <p className="text-xs text-muted-foreground">Loading positions…</p>}
           {isError && <p className="text-xs text-destructive">Broker positions are unavailable.</p>}

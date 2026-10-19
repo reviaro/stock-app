@@ -97,11 +97,17 @@ function computeUnrealizedPnl(holdings, currentPrices) {
     const result = {};
     Object.entries(holdings).forEach(([symbol, holding]) => {
         const price = currentPrices[symbol];
-        if (typeof price === 'number') {
+        if (holding.shares === 0) {
+            result[symbol] = 0;
+        } else if (isValuationPrice(price)) {
             result[symbol] = price * holding.shares - holding.total_cost;
         }
     });
     return result;
+}
+
+function isValuationPrice(price) {
+    return typeof price === 'number' && Number.isFinite(price) && price > 0;
 }
 
 function buildSummary(transactions, currentPrices = {}) {
@@ -109,12 +115,18 @@ function buildSummary(transactions, currentPrices = {}) {
     const cash = computeCashBalance(transactions);
     const realized = computeRealizedPnl(transactions);
     const unrealized = computeUnrealizedPnl(holdings, currentPrices);
-    const holdingsValue = Object.entries(holdings).reduce((sum, [symbol, holding]) => {
+    const missingPriceSymbols = Object.entries(holdings)
+        .filter(([symbol, holding]) => holding.shares > 0 && !isValuationPrice(currentPrices[symbol]))
+        .map(([symbol]) => symbol).sort();
+    const valuationComplete = missingPriceSymbols.length === 0;
+    const pricedHoldingsValue = Object.entries(holdings).reduce((sum, [symbol, holding]) => {
         const price = currentPrices[symbol];
-        return sum + (typeof price === 'number' ? price * holding.shares : 0);
+        return sum + (isValuationPrice(price) ? price * holding.shares : 0);
     }, 0);
-    const totalValue = cash + holdingsValue;
-    const cashPct = totalValue > 0 ? Math.round((cash / totalValue) * 10000) / 100 : null;
+    // A subtotal of priced positions is not the value of the whole portfolio.
+    const holdingsValue = valuationComplete ? pricedHoldingsValue : null;
+    const totalValue = valuationComplete ? cash + holdingsValue : null;
+    const cashPct = totalValue != null && totalValue > 0 ? Math.round((cash / totalValue) * 10000) / 100 : null;
     const currentYear = new Date().getFullYear();
     const realizedYtd = computeRealizedPnl(transactions, currentYear).total;
     const dividendsYtd = Math.round(transactions.reduce((sum, txn) => {
@@ -130,6 +142,10 @@ function buildSummary(transactions, currentPrices = {}) {
         realized,
         realizedYtd,
         unrealized,
+        unrealizedTotal: valuationComplete ? Object.values(unrealized).reduce((sum, value) => sum + value, 0) : null,
+        valuationComplete,
+        missingPriceSymbols,
+        pricedHoldingsValue,
         positionsValue: holdingsValue,
         holdingsValue,
         dividendsYtd,
@@ -142,5 +158,6 @@ module.exports = {
     computeCashBalance,
     computeRealizedPnl,
     computeUnrealizedPnl,
+    isValuationPrice,
     buildSummary,
 };

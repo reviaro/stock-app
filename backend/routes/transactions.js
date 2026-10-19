@@ -1,8 +1,8 @@
-const express = require('express');
+const { createAsyncRouter } = require('../services/http_errors');
 const db = require('../database/db');
 const { computeHoldings } = require('../services/portfolio_ledger');
 
-const router = express.Router();
+const router = createAsyncRouter();
 
 async function reconcileBucket(symbol) {
     if (!symbol) return;
@@ -24,7 +24,7 @@ router.get('/', async (req, res) => {
         const data = await db.listTransactions(req.query);
         res.json({ status: 'success', data });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 
@@ -38,6 +38,7 @@ router.post('/', async (req, res) => {
         res.json({ status: 'success', data: result });
     } catch (err) {
         const code = /invalid|required/.test(err.message) ? 400 : 500;
+        if (code >= 500) throw err;
         res.status(code).json({ status: 'error', error: err.message });
     }
 });
@@ -49,7 +50,7 @@ router.delete('/:id', async (req, res) => {
         if (txn?.symbol) await reconcileBucket(txn.symbol);
         res.json({ status: 'success', data: result });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 

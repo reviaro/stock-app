@@ -6,7 +6,7 @@
 // authenticated operator session; the scoped automation principal may only submit entries,
 // NO TRADE decisions, and reviews for account 2.
 const crypto = require('node:crypto');
-const express = require('express');
+const { createAsyncRouter } = require('../services/http_errors');
 const defaultStore = require('../services/alpaca_day_trade_v2_store');
 const { createPaperClient } = require('../services/alpaca_paper_service');
 const { createV2Execution, ENTRY_HEARTBEAT_MAX_AGE_MS } = require('../services/alpaca_day_trade_v2_execution');
@@ -38,6 +38,8 @@ const ERRORS = {
     ALPACA_V2_DUPLICATE_SYMBOL_PLAN: [409, 'a v2 plan is already active for this symbol'],
     ALPACA_V2_DUPLICATE_CLIENT_ORDER_ID: [409, 'this client order id was already used'],
     ALPACA_V2_IDEMPOTENCY_CONFLICT: [409, 'this client order id was already used for a different entry'],
+    ALPACA_V2_SUBMISSION_IN_PROGRESS: [409, 'entry submission is in progress; retry after reconciliation'],
+    ALPACA_V2_CONTROL_STATE_CHANGED: [409, 'account state changed during this check; review and retry'],
     ALPACA_V2_ASSET_NOT_TRADABLE: [422, 'the symbol is not tradable'],
     ALPACA_V2_INSUFFICIENT_CASH: [422, 'insufficient uncommitted cash for this entry'],
     ALPACA_V2_CASH_COMMITMENT_UNKNOWN: [422, 'committed cash could not be determined'],
@@ -107,7 +109,7 @@ function sanitizeFill(fill) {
 }
 
 function createV2Router({ store = defaultStore, createClient = createPaperClient, now = () => new Date(), policy = DEFAULT_V2_POLICY } = {}) {
-    const router = express.Router();
+    const router = createAsyncRouter();
     let execution = null;
     function getExecution() {
         if (!execution) execution = createV2Execution({ store, client: createClient(), now, policy });
@@ -212,7 +214,9 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
         if (!confirmed) return fail(res, 400, 'ALPACA_V2_CONFIRMATION_REQUIRED', mode === 'paper_execute' ? 'type paper_execute exactly to confirm' : 'explicit confirmation is required');
         try {
             const occurredAt = now().toISOString();
+            await store.recoverEntrySubmissions({ occurredAt });
             const result = await store.transaction(async (repo) => {
+                await repo.assertNoEntrySubmissions();
                 const previous = await repo.getMonitorState();
                 const state = await repo.updateMonitorState({ mode });
                 await repo.appendEvent({ event_key: `mode:${occurredAt}:${previous.mode}:${mode}`, event_type: 'mode_change', action: 'set_mode', outcome: mode, reason_code: 'OPERATOR_CONFIRMED', detail: { from: previous.mode, to: mode }, occurred_at: occurredAt });
@@ -236,6 +240,10 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
         if (req.body?.confirm !== 'CLEAR') return fail(res, 400, 'ALPACA_V2_CONFIRMATION_REQUIRED', 'type CLEAR exactly to confirm');
         const occurredAt = now().toISOString();
         try {
+            await store.recoverEntrySubmissions({ occurredAt });
+            await store.assertNoEntrySubmissions();
+            const attentionVersion = await store.getAttentionVersion();
+            const checkedState = await store.getMonitorState();
             const plans = await store.listNonterminalPlans();
             if (plans.some((plan) => UNRESOLVED_STATES.includes(plan.state))) {
                 await store.appendEvent({ event_key: `kill_switch_clear:refused:${occurredAt}`, event_type: 'kill_switch', action: 'clear', outcome: 'refused', reason_code: 'PLAN_UNRESOLVED', occurred_at: occurredAt });
@@ -255,6 +263,13 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
                 return fail(res, 409, 'ALPACA_V2_ACCOUNT_NOT_RECONCILED', 'the broker shows exposure no v2 plan accounts for; nothing was cleared');
             }
             await store.transaction(async (repo) => {
+                await repo.assertNoEntrySubmissions();
+                const currentState = await repo.getMonitorState();
+                if (await repo.getAttentionVersion() !== attentionVersion
+                    || ['mode', 'kill_switch', 'attention_required', 'attention_code'].some((field) => currentState[field] !== checkedState[field])
+                    || (await repo.listNonterminalPlans()).some((plan) => UNRESOLVED_STATES.includes(plan.state))) {
+                    throw Object.assign(new Error('account state changed'), { code: 'ALPACA_V2_CONTROL_STATE_CHANGED' });
+                }
                 await repo.updateMonitorState({ kill_switch: 0, attention_required: 0, attention_code: null });
                 await repo.appendEvent({ event_key: `kill_switch_clear:cleared:${occurredAt}`, event_type: 'kill_switch', action: 'clear', outcome: 'cleared', reason_code: 'ACCOUNT_CONFIRMED', occurred_at: occurredAt });
             });
@@ -269,6 +284,8 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
     router.post('/plans/:id/resolve', async (req, res) => {
         if (!requireOperator(req, res)) return undefined;
         try {
+            await store.recoverEntrySubmissions({ occurredAt: now().toISOString() });
+            await store.assertNoEntrySubmissions();
             const plan = /^[1-9]\d*$/.test(req.params.id) ? await store.getPlan(req.params.id) : null;
             if (!plan) return fail(res, 404, 'ALPACA_V2_PLAN_NOT_FOUND', 'no v2 plan exists with this id');
             if (defaultStore.TERMINAL_STATES.includes(plan.state)) return fail(res, 409, 'ALPACA_V2_PLAN_TERMINAL', 'this plan is already closed');
@@ -287,14 +304,24 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
             if (num(position?.qty) || executable || (openOrders || []).some((order) => String(order.symbol).toUpperCase() === plan.symbol)) {
                 return fail(res, 409, 'ALPACA_V2_NOT_FLAT', 'the broker still shows a position or working order for this symbol');
             }
-            const entered = Math.max(plan.filled_entry_qty, num(parent?.filled_qty) || 0);
-            const state = entered > 0 ? 'closed' : 'cancelled';
-            const balanced = entered > 0 && plan.filled_exit_qty === entered && plan.filled_entry_qty === entered;
-            const realizedPnl = balanced ? Math.round((plan.avg_exit_price - plan.avg_entry_price) * entered * 100) / 100 : null;
-            const updated = await store.updatePlan(plan.id, {
-                state, closed_at: now().toISOString(), ...(state === 'closed' ? { exit_reason: 'operator_resolved', realized_pnl: realizedPnl } : {}),
-            }, {
-                events: [{ event_key: `plan:${plan.id}:operator_resolved`, event_type: 'closure', action: 'operator_resolved', outcome: state, reason_code: plan.attention_code || 'OPERATOR_RESOLVED', detail: { symbol: plan.symbol, filled_qty: entered }, occurred_at: now().toISOString() }],
+            const updated = await store.transaction(async (repo) => {
+                await repo.assertNoEntrySubmissions();
+                const current = await repo.getPlan(plan.id);
+                // A reconciliation during broker reads can change fills, linked orders, or
+                // close the plan. Require a fresh operator check before changing that result.
+                if (!current || Object.keys(plan).some((field) => current[field] !== plan[field])) {
+                    throw Object.assign(new Error('account state changed'), { code: 'ALPACA_V2_CONTROL_STATE_CHANGED' });
+                }
+                const entered = Math.max(current.filled_entry_qty, num(parent?.filled_qty) || 0);
+                const state = entered > 0 ? 'closed' : 'cancelled';
+                const balanced = entered > 0 && current.filled_exit_qty === entered && current.filled_entry_qty === entered;
+                const realizedPnl = balanced ? Math.round((current.avg_exit_price - current.avg_entry_price) * entered * 100) / 100 : null;
+                const occurredAt = now().toISOString();
+                return repo.updatePlan(current.id, {
+                    state, closed_at: occurredAt, ...(state === 'closed' ? { exit_reason: 'operator_resolved', realized_pnl: realizedPnl } : {}),
+                }, {
+                    events: [{ event_key: `plan:${current.id}:operator_resolved`, event_type: 'closure', action: 'operator_resolved', outcome: state, reason_code: current.attention_code || 'OPERATOR_RESOLVED', detail: { symbol: current.symbol, filled_qty: entered }, occurred_at: occurredAt }],
+                });
             });
             return res.json({ status: 'success', data: { plan: sanitizePlan(updated) } });
         } catch (err) {

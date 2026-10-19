@@ -47,6 +47,10 @@ function stateFromParent(order) {
 
 async function resolvePlanByClientOrderId({ store, client, plan, now = () => new Date() }) {
     const occurredAt = now().toISOString();
+    const { activePlanIds } = await store.recoverEntrySubmissions({ occurredAt });
+    if (activePlanIds.includes(plan.id)) return 'in_flight';
+    // Recovery may have latched an interrupted sender since this plan was read.
+    plan = await store.getPlan(plan.id);
     // An already-latched plan keeps its original attention code: a still-missing order is the
     // same unresolved incident, not a new one.
     const latched = plan.state === 'attention_required';
@@ -69,11 +73,15 @@ async function resolvePlanByClientOrderId({ store, client, plan, now = () => new
         return 'unresolved';
     }
     // Linking is evidence, not a repair: a latched plan stays latched for the operator.
-    await store.updatePlan(plan.id, { ...linkPatchFromBrokerOrder(order), ...(latched ? {} : { state: nextState }) }, {
-        events: [{
-            event_key: `plan:${plan.id}:linked_by_client_id`, event_type: 'submission', action: 'linked_by_client_id',
-            outcome: latched ? 'attention_required' : nextState, detail: { symbol: plan.symbol, broker_status: order.status }, occurred_at: occurredAt,
-        }],
+    await store.transaction(async (repo) => {
+        const current = await repo.getPlan(plan.id);
+        const mayAdvance = ['pending_submission', 'submission_unknown'].includes(current.state);
+        await repo.updatePlan(plan.id, { ...linkPatchFromBrokerOrder(order), ...(mayAdvance ? { state: nextState } : {}) }, {
+            events: [{
+                event_key: `plan:${plan.id}:linked_by_client_id`, event_type: 'submission', action: 'linked_by_client_id',
+                outcome: mayAdvance ? nextState : current.state, detail: { symbol: plan.symbol, broker_status: order.status }, occurred_at: occurredAt,
+            }],
+        });
     });
     return 'linked';
 }
@@ -87,8 +95,8 @@ function createV2Execution({ store, client, policy = DEFAULT_V2_POLICY, now = ()
     // One in-process queue: only this service submits v2 entries.
     let queue = Promise.resolve();
 
-    async function assertEntryGates() {
-        const state = await store.getMonitorState();
+    async function assertEntryGates(repo = store) {
+        const state = await repo.getMonitorState();
         if (state?.kill_switch) throw executionError('ALPACA_V2_KILL_SWITCH_ACTIVE', 'the kill switch is active');
         if (state?.mode !== 'paper_execute') throw executionError('ALPACA_V2_EXECUTION_DISABLED', 'v2 execution is not in paper_execute mode');
         if (state?.attention_required) throw executionError('ALPACA_V2_ATTENTION_REQUIRED', 'an attention latch blocks new entries');
@@ -107,6 +115,7 @@ function createV2Execution({ store, client, policy = DEFAULT_V2_POLICY, now = ()
             return { outcome: 'replayed', plan: existing };
         }
         const outcome = await resolvePlanByClientOrderId({ store, client, plan: existing, now });
+        if (outcome === 'in_flight') throw executionError('ALPACA_V2_SUBMISSION_IN_PROGRESS', 'entry submission is in progress; retry after reconciliation');
         return { outcome, plan: await store.getPlan(existing.id) };
     }
 
@@ -123,55 +132,106 @@ function createV2Execution({ store, client, policy = DEFAULT_V2_POLICY, now = ()
     }
 
     async function submitEntryUnqueued(intent) {
+        // Commit crash recovery separately: a later gate refusal must not roll it back.
+        await store.recoverEntrySubmissions({ occurredAt: now().toISOString() });
         const clientOrderId = typeof intent?.client_order_id === 'string' ? intent.client_order_id : '';
         const existing = clientOrderId ? await store.getPlanByClientOrderId(clientOrderId) : null;
         if (existing) return replay(existing, intent);
 
         await assertEntryGates();
+        // Capture the version before checking for an active sender: an admission
+        // that begins between these reads must invalidate the later broker facts.
+        const entryVersion = await store.getEntryVersion();
+        await store.assertNoEntrySubmissions();
         const symbol = typeof intent?.symbol === 'string' ? intent.symbol.trim().toUpperCase() : '';
         const facts = await readBrokerFacts(symbol);
-        const openPlans = await store.listNonterminalPlans();
-        const built = buildV2EntryOrder({
-            intent, ...facts, policy, now: now(),
-            context: {
-                hasActivePlanForSymbol: openPlans.some((plan) => plan.symbol === symbol),
-                currentOpenRiskDollars: openPlans.reduce((sum, plan) => sum + Number(plan.planned_risk_dollars || 0), 0),
-            },
+        // Register before the admission can commit, and unregister only after this
+        // callback can no longer POST. A later request can recover a local attempt
+        // whose broker call finished but whose database settlement failed.
+        const sender = store.beginEntryAttempt();
+        try {
+            return await admitAndSubmit(intent, symbol, facts, entryVersion, sender);
+        } finally {
+            store.endEntryAttempt(sender);
+        }
+    }
+
+    async function admitAndSubmit(intent, symbol, facts, entryVersion, sender) {
+        // Admission is the shared ordering point for every server and monitor process.
+        // Gates, current risk, plan and send marker commit together. Operator controls
+        // cannot report success while this marker exists. No broker I/O holds this lock.
+        const { built, plan } = await store.transaction(async (repo) => {
+            await assertEntryGates(repo);
+            await repo.assertNoEntrySubmissions();
+            if (await repo.getEntryVersion() !== entryVersion) {
+                throw executionError('ALPACA_V2_CONTROL_STATE_CHANGED', 'account state changed during this check; review and retry');
+            }
+            const openPlans = await repo.listNonterminalPlans();
+            const built = buildV2EntryOrder({
+                intent, ...facts, policy, now: now(),
+                context: {
+                    hasActivePlanForSymbol: openPlans.some((candidate) => candidate.symbol === symbol),
+                    currentOpenRiskDollars: openPlans.reduce((sum, candidate) => sum + Number(candidate.planned_risk_dollars || 0), 0),
+                },
+            });
+            const { plan } = await repo.createPlan({ ...built.plan, occurred_at: now().toISOString() });
+            await repo.admitEntrySubmission(plan.id, { owner: sender, occurredAt: now().toISOString() });
+            return { built, plan };
         });
 
-        const { plan } = await store.createPlan({ ...built.plan, occurred_at: now().toISOString() });
         let ack;
         try {
             ack = await client.submitOrder(built.order);
         } catch (error) {
             const occurredAt = now().toISOString();
             if (isDefiniteRejection(error)) {
-                const rejected = await store.updatePlan(plan.id, { state: 'rejected' }, {
-                    events: [{
-                        event_key: `plan:${plan.id}:submission_rejected`, event_type: 'submission', action: 'submission_rejected', outcome: 'rejected',
-                        reason_code: 'BROKER_REJECTED', detail: { symbol: plan.symbol, broker_status: String(error.status) }, occurred_at: occurredAt,
-                    }],
+                const rejected = await store.transaction(async (repo) => {
+                    const current = await repo.getPlan(plan.id);
+                    const updated = await repo.updatePlan(plan.id, current.state === 'pending_submission' ? { state: 'rejected' } : {}, {
+                        events: [{
+                            event_key: `plan:${plan.id}:submission_rejected`, event_type: 'submission', action: 'submission_rejected', outcome: 'rejected',
+                            reason_code: 'BROKER_REJECTED', detail: { symbol: plan.symbol, broker_status: String(error.status) }, occurred_at: occurredAt,
+                        }],
+                    });
+                    await repo.settleEntrySubmission(plan.id, occurredAt);
+                    return updated;
                 });
                 return { outcome: 'rejected', plan: rejected };
             }
-            await store.updatePlan(plan.id, { state: 'submission_unknown' });
-            await store.latchAttention({ planId: plan.id, code: 'SUBMISSION_UNKNOWN', eventKey: `plan:${plan.id}:attention:SUBMISSION_UNKNOWN`, detail: { symbol: plan.symbol }, occurredAt });
-            return { outcome: 'submission_unknown', plan: await store.getPlan(plan.id) };
+            return recordUnknown(plan, occurredAt);
         }
 
         if (!ack?.id) {
             // An "ok" response without an order id is not an acknowledgement we can trust.
-            await store.updatePlan(plan.id, { state: 'submission_unknown' });
-            await store.latchAttention({ planId: plan.id, code: 'SUBMISSION_UNKNOWN', eventKey: `plan:${plan.id}:attention:SUBMISSION_UNKNOWN`, detail: { symbol: plan.symbol }, occurredAt: now().toISOString() });
-            return { outcome: 'submission_unknown', plan: await store.getPlan(plan.id) };
+            return recordUnknown(plan, now().toISOString());
         }
-        const acknowledged = await store.updatePlan(plan.id, { ...linkPatchFromBrokerOrder(ack), state: stateFromParent(ack) || 'working' }, {
-            events: [{
-                event_key: `plan:${plan.id}:submission_acknowledged`, event_type: 'submission', action: 'submission_acknowledged', outcome: 'acknowledged',
-                detail: { symbol: plan.symbol, broker_status: ack.status, planned_qty: plan.planned_qty, entry_price: plan.planned_entry_price }, occurred_at: now().toISOString(),
-            }],
+        const acknowledged = await store.transaction(async (repo) => {
+            const current = await repo.getPlan(plan.id);
+            const updated = await repo.updatePlan(plan.id, {
+                ...linkPatchFromBrokerOrder(ack),
+                ...(current.state === 'pending_submission' ? { state: stateFromParent(ack) || 'working' } : {}),
+            }, {
+                events: [{
+                    event_key: `plan:${plan.id}:submission_acknowledged`, event_type: 'submission', action: 'submission_acknowledged', outcome: 'acknowledged',
+                    detail: { symbol: plan.symbol, broker_status: ack.status, planned_qty: plan.planned_qty, entry_price: plan.planned_entry_price }, occurred_at: now().toISOString(),
+                }],
+            });
+            await repo.settleEntrySubmission(plan.id, now().toISOString());
+            return updated;
         });
         return { outcome: 'acknowledged', plan: acknowledged };
+    }
+
+    async function recordUnknown(plan, occurredAt) {
+        const updated = await store.transaction(async (repo) => {
+            const current = await repo.getPlan(plan.id);
+            if (current.state !== 'attention_required') {
+                await repo.latchAttention({ planId: plan.id, code: 'SUBMISSION_UNKNOWN', eventKey: `plan:${plan.id}:attention:SUBMISSION_UNKNOWN`, detail: { symbol: plan.symbol }, occurredAt });
+            }
+            await repo.settleEntrySubmission(plan.id, occurredAt);
+            return repo.getPlan(plan.id);
+        });
+        return { outcome: 'submission_unknown', plan: updated };
     }
 
     function submitEntry(intent) {

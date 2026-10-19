@@ -1,7 +1,7 @@
-const express = require('express');
+const { createAsyncRouter } = require('../services/http_errors');
 const db = require('../database/db');
 
-const router = express.Router();
+const router = createAsyncRouter();
 
 function emptyNote(symbol) {
     return {
@@ -28,7 +28,7 @@ router.get('/:symbol', async (req, res) => {
         const note = await db.getMemo(symbol);
         res.json({ status: 'success', data: note || emptyNote(symbol) });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 
@@ -39,6 +39,7 @@ router.put('/:symbol', async (req, res) => {
         res.json({ status: 'success', data: note || result });
     } catch (err) {
         const code = /conviction|non-negative/.test(err.message) ? 400 : 500;
+        if (code >= 500) throw err;
         res.status(code).json({ status: 'error', error: err.message });
     }
 });

@@ -1,9 +1,9 @@
-const express = require('express');
+const { createAsyncRouter } = require('../services/http_errors');
 const db = require('../database/db');
 const pybridge = require('../services/pybridge');
 const { scoreCandidate } = require('../services/value_screener');
 
-const router = express.Router();
+const router = createAsyncRouter();
 
 async function safe(fn, fallback = null) {
     try { return await fn(); } catch { return fallback; }
@@ -49,7 +49,7 @@ function createValueHandler({ db: database = db, pybridge: bridge = pybridge } =
         rows.sort((a, b) => b.score - a.score || b.confidence - a.confidence || a.symbol.localeCompare(b.symbol));
         res.json({ status: 'success', data: rows });
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
     };
 }

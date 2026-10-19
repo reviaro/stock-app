@@ -44,7 +44,7 @@ export function V2ActivePlansCard() {
   return (
     <section aria-label="Active plans">
       <Card>
-        <CardHeader className="pb-2"><CardTitle><h2>Active plans ({active.length})</h2></CardTitle></CardHeader>
+        <CardHeader className="pb-2"><CardTitle>Active plans ({active.length})</CardTitle></CardHeader>
         <CardContent className="space-y-2 px-3 pb-4 text-xs">
           {isLoading && <p className="text-muted-foreground">Loading plans…</p>}
           {isError && <p className="text-destructive">Unable to load plans.</p>}

@@ -43,7 +43,7 @@ export function V2DecisionJournalCard() {
     <section aria-label="Decision journal">
       <Card>
         <CardHeader className="flex flex-row items-center justify-between pb-2">
-          <CardTitle><h2>Decision journal</h2></CardTitle>
+          <CardTitle>Decision journal</CardTitle>
           <select aria-label="Filter journal events" value={filter} onChange={(event) => setFilter(event.target.value as Filter)}
             className="rounded-md border border-border bg-background px-2 py-1 text-xs">
             {(Object.keys(FILTERS) as Filter[]).map((key) => <option key={key} value={key}>{FILTERS[key]}</option>)}

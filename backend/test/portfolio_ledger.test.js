@@ -105,3 +105,39 @@ test('buildSummary composes everything', () => {
   assert.strictEqual(summary.totalValue, 10200);
   assert.strictEqual(summary.positionsValue, 1200);
 });
+
+test('missing or invalid prices leave whole-portfolio totals unavailable while preserving ledger facts', () => {
+  const txns = [
+    { type: 'deposit', amount: 1000, txn_date: '2026-01-01' },
+    { type: 'buy', symbol: 'TEST', shares: 5, price: 100, amount: 500, txn_date: '2026-01-02' },
+  ];
+  for (const price of [undefined, null, NaN, Infinity, -1, 0, '100']) {
+    const summary = buildSummary(txns, { TEST: price });
+    assert.strictEqual(summary.cash, 500);
+    assert.strictEqual(summary.holdings.TEST.shares, 5);
+    assert.strictEqual(summary.totalValue, null);
+    assert.strictEqual(summary.holdingsValue, null);
+    assert.strictEqual(summary.cashPct, null);
+    assert.strictEqual(summary.unrealizedTotal, null);
+    assert.strictEqual(summary.valuationComplete, false);
+    assert.deepStrictEqual(summary.missingPriceSymbols, ['TEST']);
+  }
+  const restored = buildSummary(txns, { TEST: 100 });
+  assert.strictEqual(restored.totalValue, 1000);
+  assert.strictEqual(restored.cashPct, 50);
+  assert.strictEqual(restored.valuationComplete, true);
+});
+
+test('a fully sold holding retained for dividends does not require a quote', () => {
+  const txns = [
+    { type: 'deposit', amount: 1000, txn_date: '2026-01-01' },
+    { type: 'buy', symbol: 'TEST', shares: 5, price: 100, amount: 500, txn_date: '2026-01-02' },
+    { type: 'dividend', symbol: 'TEST', amount: 10, txn_date: '2026-01-03' },
+    { type: 'sell', symbol: 'TEST', shares: 5, price: 110, amount: 550, txn_date: '2026-01-04' },
+  ];
+  const summary = buildSummary(txns, {});
+  assert.strictEqual(summary.valuationComplete, true);
+  assert.strictEqual(summary.totalValue, 1060);
+  assert.strictEqual(summary.cashPct, 100);
+  assert.strictEqual(summary.unrealizedTotal, 0);
+});

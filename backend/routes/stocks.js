@@ -1,5 +1,5 @@
-const express = require('express');
-const router = express.Router();
+const { createAsyncRouter } = require('../services/http_errors');
+const router = createAsyncRouter();
 const pybridge = require('../services/pybridge');
 
 // GET /api/stock/:symbol - Get stock data
@@ -14,7 +14,7 @@ router.get('/:symbol', async (req, res) => {
         
         res.json(result);
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 
@@ -32,7 +32,7 @@ router.get('/:symbol/history', async (req, res) => {
         
         res.json(result);
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 
@@ -48,7 +48,7 @@ router.get('/:symbol/analysis', async (req, res) => {
         
         res.json(result);
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 
@@ -64,7 +64,7 @@ router.get('/:symbol/technical', async (req, res) => {
         
         res.json(result);
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 
@@ -78,7 +78,7 @@ router.get('/:symbol/earnings', async (req, res) => {
         }
         res.json(result);
     } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
+        throw err;
     }
 });
 

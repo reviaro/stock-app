@@ -28,7 +28,7 @@ export function RiskMonitorPanel({ accountId }: Props) {
     <Card>
       <CardHeader className="pb-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <CardTitle><h2>Position Risk Monitor</h2></CardTitle>
+          <CardTitle>Position Risk Monitor</CardTitle>
           <span className="rounded-md border border-border px-2 py-1 text-[11px] font-medium text-muted-foreground">Read-only</span>
         </div>
       </CardHeader>
