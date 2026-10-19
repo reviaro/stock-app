@@ -292,12 +292,13 @@ function recomputeClosedTradeFromHistory(planLike, exit = {}, transactions) {
 }
 
 function summarize(rows) {
-    const trades = rows.filter((row) => row.status === 'closed' && Number.isFinite(Number(row.realized_pnl)));
+    const trades = rows.filter((row) => row.status === 'closed' && row.realized_pnl != null
+        && row.realized_pnl !== '' && Number.isFinite(Number(row.realized_pnl)));
     const wins = trades.filter((row) => Number(row.realized_pnl) > 0);
     const grossProfit = wins.reduce((sum, row) => sum + Number(row.realized_pnl), 0);
     const grossLoss = Math.abs(trades.filter((row) => Number(row.realized_pnl) < 0).reduce((sum, row) => sum + Number(row.realized_pnl), 0));
     const totalPnl = trades.reduce((sum, row) => sum + Number(row.realized_pnl), 0);
-    const rTrades = trades.filter((row) => Number.isFinite(Number(row.realized_r)));
+    const rTrades = trades.filter((row) => row.realized_r != null && row.realized_r !== '' && Number.isFinite(Number(row.realized_r)));
     return {
         trade_count: trades.length,
         win_rate_pct: trades.length ? round((wins.length / trades.length) * 100) : null,

@@ -4,6 +4,7 @@ import { AlpacaPaperPage } from './AlpacaPaperPage'
 
 const { v2, setMode, clearKill, resolvePlan } = vi.hoisted(() => ({
   v2: {
+    risk: { complete: true, sessionDate: '2026-09-23', realizedPnl: 0, fillCount: 0, reasonCodes: [] as string[], maxDailyLossPct: 0.02, minRewardRiskRatio: 1, scope: 'v2_realized' },
     status: {
       mode: 'shadow', killSwitch: false, attentionRequired: false, attentionCode: null as string | null,
       lastReconciledAt: '2026-09-23T14:59:00.000Z', lastWebsocketAt: null, sessionDate: '2026-09-23',
@@ -24,6 +25,7 @@ vi.mock('@/hooks/useAlpacaPaper', () => ({
 
 vi.mock('@/hooks/useAlpacaDayTradingV2', () => ({
   useV2Status: () => ({ data: v2.status, isLoading: false, isError: false }),
+  useV2DailyRisk: () => ({ data: v2.risk, isLoading: false, isError: false }),
   useV2Snapshot: () => ({
     data: {
       account: { cash: 48995, equity: 100012, status: 'ACTIVE' },
@@ -66,6 +68,8 @@ vi.mock('@/hooks/useAlpacaDayTradingV2', () => ({
   useSetV2Mode: () => setMode,
   useClearV2KillSwitch: () => clearKill,
   useResolveV2Plan: () => resolvePlan,
+  useV2Experiments: () => ({ data: { experiments: [] }, isLoading: false, isError: false }),
+  useCreateV2Experiment: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, isError: false, isSuccess: false }),
 }))
 
 vi.mock('@/hooks/useAlpacaDayTrading', () => ({
@@ -79,6 +83,7 @@ vi.mock('@/hooks/useAlpacaDayTrading', () => ({
 }))
 
 beforeEach(() => {
+  v2.risk = { ...v2.risk, complete: true, realizedPnl: 0, reasonCodes: [] }
   v2.status = { ...v2.status, mode: 'shadow', killSwitch: false, attentionRequired: false, attentionCode: null }
   for (const m of [setMode, clearKill, resolvePlan]) {
     m.mutate.mockReset(); m.isPending = false; m.isError = false; m.isSuccess = false; m.error = null
@@ -86,6 +91,17 @@ beforeEach(() => {
 })
 
 describe('AlpacaPaperPage (v2 strategy lab)', () => {
+  it('shows daily entry limits and never treats incomplete realized evidence as a zero loss', () => {
+    v2.risk = { ...v2.risk, complete: false, realizedPnl: 999, reasonCodes: ['INCOMPLETE_CLOSED_PLAN'] }
+    render(<AlpacaPaperPage />)
+    const risk = screen.getByRole('region', { name: 'Daily entry guard' })
+    expect(risk).toHaveTextContent('2.0% of equity')
+    expect(risk).toHaveTextContent('1.00:1')
+    expect(risk).toHaveTextContent('Unavailable')
+    expect(risk).toHaveTextContent('New entries remain blocked')
+    expect(risk).not.toHaveTextContent('$999')
+    expect(risk).not.toHaveTextContent('$0.00')
+  })
   it('keeps the existing page and title, and labels it as the v2 paper strategy lab with monitor state', () => {
     render(<AlpacaPaperPage />)
     expect(screen.getByRole('heading', { level: 1, name: 'Alpaca Day Trading' })).toBeInTheDocument()

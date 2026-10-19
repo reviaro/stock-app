@@ -7,6 +7,7 @@
 const { reconcileRestFills } = require('./alpaca_day_trade_v2_reconciliation');
 const { resolvePlanByClientOrderId, linkPatchFromBrokerOrder, isDefiniteRejection } = require('./alpaca_day_trade_v2_execution');
 const { buildTimeExitOrder, timeExitClientOrderId } = require('./alpaca_day_trade_v2_policy');
+const { observeActivePlans } = require('./alpaca_day_trade_v2_research');
 
 const NON_EXECUTABLE = ['filled', 'canceled', 'expired', 'rejected'];
 // Evidence that a flat, fully non-executable bracket's fills should have arrived by now.
@@ -243,6 +244,7 @@ function createV2Monitor({
             }
             const { exposure } = await checkAccountExposure();
             await store.updateMonitorState({ last_reconciled_at: now().toISOString(), session_date: easternDate(now()) });
+            await observeActivePlans({ store, client, now }).catch(() => {});
             return { skipped: false, exposure };
         } catch (error) {
             if (!(error instanceof BrokerUnreadable)) throw error;

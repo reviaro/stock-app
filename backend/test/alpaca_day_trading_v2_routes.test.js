@@ -113,6 +113,7 @@ async function seedClosedPlan() {
         exit_deadline: '2026-09-23T19:30:00.000Z',
     });
     await store.recordFill({ execution_id: 'exec-uuid-1', plan_id: plan.id, order_id: 'parent-uuid-1', order_client_id: 'dt2-20260923-nvda-orb', symbol: 'NVDA', side: 'buy', qty: 10, price: 100.4, role: 'entry', executed_at: '2026-09-23T14:31:00.000Z', source: 'rest' });
+    await store.recordFill({ execution_id: 'exec-uuid-2', plan_id: plan.id, order_id: 'target-uuid-1', symbol: 'NVDA', side: 'sell', qty: 10, price: 104, role: 'bracket_exit', executed_at: '2026-09-23T18:00:00.000Z', source: 'rest' });
     return store.updatePlan(plan.id, {
         state: 'closed', parent_order_id: 'parent-uuid-1', stop_order_id: 'stop-uuid-1', target_order_id: 'target-uuid-1',
         filled_entry_qty: 10, avg_entry_price: 100.4, filled_exit_qty: 10, avg_exit_price: 104, exit_reason: 'take_profit', realized_pnl: 36, realized_r: 1.44,

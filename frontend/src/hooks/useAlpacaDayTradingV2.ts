@@ -5,6 +5,13 @@ import type {
   AlpacaV2Plan,
   AlpacaV2Snapshot,
   AlpacaV2Status,
+  AlpacaV2ExperimentDefinition,
+  AlpacaV2Experiments,
+  AlpacaV2Experiment,
+  AlpacaHistoryPreview,
+  AlpacaHistoryApplyInput,
+  AlpacaHistoryApplyResult,
+  AlpacaV2DailyRisk,
 } from '@/types/alpacaDayTrading'
 
 import { AlpacaV2Error } from '@/lib/alpacaV2Errors'
@@ -42,6 +49,45 @@ export function useV2Plans() {
 
 export function useV2Journal() {
   return useQuery<AlpacaV2Journal>({ queryKey: ['alpaca-dt-v2', 'journal'], queryFn: () => v2Fetch('/journal'), staleTime: 30_000, retry: false })
+}
+
+export function useV2DailyRisk() {
+  return useQuery<AlpacaV2DailyRisk>({ queryKey: ['alpaca-dt-v2', 'risk'], queryFn: () => v2Fetch('/risk'), staleTime: 15_000, refetchInterval: 30_000, retry: false })
+}
+
+export function useV2Experiments() {
+  return useQuery<AlpacaV2Experiments>({ queryKey: ['alpaca-dt-v2', 'experiments'], queryFn: () => v2Fetch('/experiments'), staleTime: 30_000, retry: false })
+}
+
+export function useCreateV2Experiment() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (definition: AlpacaV2ExperimentDefinition) => post<AlpacaV2Experiment>('/experiments', definition),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['alpaca-dt-v2', 'experiments'] }),
+  })
+}
+
+export function usePreviewAlpacaHistory() {
+  return useMutation({ mutationFn: () => post<AlpacaHistoryPreview>('/history/preview', {}) })
+}
+
+export function useDisableLegacyAlpacaMonitor() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => post<{ disabled: true; alreadyDisabled: boolean; mode: 'disabled' }>('/history/disable-legacy', { confirm: 'DISABLE_LEGACY' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['alpaca-dt-v2'] }),
+  })
+}
+
+export function useApplyAlpacaHistory() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: AlpacaHistoryApplyInput) => post<AlpacaHistoryApplyResult>('/history/apply', input),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['alpaca-dt-v2'] })
+      void qc.invalidateQueries({ queryKey: ['alpaca-day-trading'] })
+    },
+  })
 }
 
 // Operator controls ride the authenticated session cookie only: no token ever lives in the browser.

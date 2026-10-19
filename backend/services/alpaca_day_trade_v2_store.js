@@ -5,6 +5,8 @@
 // identifiers live in plan/fill columns so the monitor can resolve broker truth, but they are
 // never written into the journal and never returned by reader routes.
 const db = require('../database/db');
+const { ENTRY_EVIDENCE_KEYS, LEGACY_METADATA } = require('./alpaca_day_trade_v2_evidence');
+const { validateExperiment } = require('./alpaca_day_trade_v2_research');
 const { createProcessIdentity, beginEntryAttempt, endEntryAttempt, isEntrySenderActive } = require('./alpaca_day_trade_v2_process_owner');
 const processIdentity = createProcessIdentity();
 
@@ -22,6 +24,7 @@ const MONITOR_UPDATE_FIELDS = new Set(['mode', 'kill_switch', 'attention_require
 // Journal detail is an allowlist of user-meaningful primitives. Anything else -- account ids,
 // broker/client order ids, raw bodies, URLs, credentials, exception text -- is dropped by key.
 const DETAIL_KEYS = new Set([
+    ...ENTRY_EVIDENCE_KEYS,
     'symbol', 'qty', 'price', 'side', 'stop', 'target', 'entry_price', 'exit_price', 'exit_deadline',
     'planned_qty', 'filled_qty', 'remaining_qty', 'position_qty', 'avg_entry_price', 'avg_exit_price',
     'realized_pnl', 'realized_r', 'from', 'to', 'mode', 'state', 'role', 'source', 'setup', 'catalyst',
@@ -56,7 +59,14 @@ function sanitizeDetail(detail) {
         const value = detail[key];
         if (value === null || typeof value === 'boolean') clean[key] = value;
         else if (typeof value === 'number') { if (Number.isFinite(value)) clean[key] = value; }
-        else if (typeof value === 'string') clean[key] = redactString(value);
+        else if (typeof value === 'string') {
+            // Stable strategy labels may legitimately exceed the credential-shaped
+            // string length; retain validated labels while still removing endpoints
+            // and order identifiers. Free text retains the stricter scrubber.
+            if (['setup_id', 'strategy_version', 'catalyst_class'].includes(key) && /^[A-Za-z][A-Za-z0-9._-]{0,63}$/.test(value)) {
+                clean[key] = REDACTIONS.slice(0, -1).reduce((text, pattern) => text.replace(pattern, '[redacted]'), value);
+            } else clean[key] = redactString(value);
+        }
     }
     return clean;
 }
@@ -141,11 +151,14 @@ async function insertPlan(c, input) {
     try {
         ({ lastID } = await c.run(
             `INSERT INTO alpaca_dt_v2_plans (client_order_id, symbol, setup, catalyst, thesis, invalidation, planned_qty,
-                planned_entry_price, planned_stop, planned_target, planned_risk_dollars, exit_deadline, state, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_submission', ?, ?)`,
+                planned_entry_price, planned_stop, planned_target, planned_risk_dollars, exit_deadline, state, created_at, updated_at,
+                setup_id, strategy_version, catalyst_class, entry_evidence_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_submission', ?, ?, ?, ?, ?, ?)`,
             [input.client_order_id, input.symbol, input.setup, input.catalyst, input.thesis, input.invalidation, input.planned_qty,
                 input.planned_entry_price, input.planned_stop, input.planned_target, input.planned_risk_dollars, input.exit_deadline,
-                occurredAt, occurredAt],
+                occurredAt, occurredAt, input.setup_id || LEGACY_METADATA.setup_id,
+                input.strategy_version || LEGACY_METADATA.strategy_version, input.catalyst_class || LEGACY_METADATA.catalyst_class,
+                JSON.stringify(sanitizeDetail(input.entry_evidence || {}))],
         ));
     } catch (error) {
         if (/UNIQUE constraint failed: alpaca_dt_v2_plans\.client_order_id/.test(error.message)) {
@@ -162,6 +175,7 @@ async function insertPlan(c, input) {
         outcome: 'pending', detail: {
             symbol: plan.symbol, planned_qty: plan.planned_qty, entry_price: plan.planned_entry_price, stop: plan.planned_stop,
             target: plan.planned_target, exit_deadline: plan.exit_deadline, setup: plan.setup, catalyst: plan.catalyst,
+            ...sanitizeDetail(input.entry_evidence || {}),
         },
         occurred_at: occurredAt,
     });
@@ -321,6 +335,31 @@ async function attachFillRow(c, fillId, { planId, role }) {
     return c.get('SELECT * FROM alpaca_dt_v2_fills WHERE id = ?', [Number(fillId)]);
 }
 
+async function recordObservation(c, sample) {
+    const plan = await getPlan(c, sample.plan_id);
+    if (!plan || TERMINAL_STATES.includes(plan.state) || !(plan.filled_entry_qty > plan.filled_exit_qty)
+        || !(plan.avg_entry_price > 0)) return { inserted: false };
+    const quoteTime = Date.parse(sample.quote_at); const observedTime = Date.parse(sample.observed_at);
+    if (!Number.isFinite(quoteTime) || !Number.isFinite(observedTime) || quoteTime > observedTime
+        || observedTime - quoteTime > 10_000 || quoteTime < Date.parse(plan.opened_at)
+        || !Number.isFinite(sample.bid) || !Number.isFinite(sample.ask) || sample.bid <= 0 || sample.ask < sample.bid
+        || !['iex', 'sip'].includes(sample.feed)) throw storeError('ALPACA_V2_OBSERVATION_INVALID', 'invalid observation');
+    const result = await c.run(`INSERT OR IGNORE INTO alpaca_dt_v2_observations
+        (plan_id,observed_at,quote_at,bid,ask,feed,entry_qty,exit_qty,entry_price) VALUES (?,?,?,?,?,?,?,?,?)`,
+    [plan.id, sample.observed_at, sample.quote_at, sample.bid, sample.ask, sample.feed,
+        plan.filled_entry_qty, plan.filled_exit_qty, plan.avg_entry_price]);
+    return { inserted: result.changes === 1 };
+}
+
+async function createExperiment(c, definition, now = new Date()) {
+    const row = validateExperiment(definition, now);
+    row.name = redactString(row.name);
+    const result = await c.run(`INSERT INTO alpaca_dt_v2_experiments
+        (name,setup_id,strategy_version,kind,parameters_json,created_at,ends_at,min_trades,cost_bps) VALUES (?,?,?,?,?,?,?,?,?)`,
+    [row.name, row.setup_id, row.strategy_version, row.kind, row.parameters_json, row.created_at, row.ends_at, row.min_trades, row.cost_bps]);
+    return c.get('SELECT * FROM alpaca_dt_v2_experiments WHERE id = ?', [result.lastID]);
+}
+
 const ops = {
     getPlan,
     getPlanByClientOrderId,
@@ -335,6 +374,17 @@ const ops = {
         : c.all('SELECT * FROM alpaca_dt_v2_events WHERE plan_id = ? ORDER BY occurred_at ASC, id ASC', [Number(planId)])),
     recordFill: recordFillRow,
     attachFill: attachFillRow,
+    recordObservation,
+    listObservations: (c, { planId } = {}) => planId == null
+        ? c.all('SELECT * FROM alpaca_dt_v2_observations ORDER BY quote_at,id')
+        : c.all('SELECT * FROM alpaca_dt_v2_observations WHERE plan_id = ? ORDER BY quote_at,id', [Number(planId)]),
+    createExperiment,
+    listExperiments: (c) => c.all('SELECT * FROM alpaca_dt_v2_experiments ORDER BY id DESC'),
+    getHistoryStart: async (c) => {
+        const row = await c.get(`SELECT MIN(strftime('%s',created_at)) AS earliest FROM
+            (SELECT created_at FROM alpaca_day_trade_plans UNION ALL SELECT created_at FROM alpaca_dt_v2_plans)`);
+        return row?.earliest == null ? null : new Date(Number(row.earliest) * 1000 - 86_400_000).toISOString();
+    },
     listFills: (c, { planId, unattached = false } = {}) => {
         if (unattached) return c.all('SELECT * FROM alpaca_dt_v2_fills WHERE plan_id IS NULL ORDER BY executed_at ASC, id ASC');
         if (planId != null) return c.all('SELECT * FROM alpaca_dt_v2_fills WHERE plan_id = ? ORDER BY executed_at ASC, id ASC', [Number(planId)]);
@@ -352,7 +402,7 @@ const ops = {
     latchAttention: latchAttentionRow,
 };
 
-const READ_OPS = new Set(['getPlan', 'getPlanByClientOrderId', 'listPlans', 'listNonterminalPlans', 'getEventByKey', 'listEvents', 'listFills', 'getMonitorState', 'getAttentionVersion', 'getEntryVersion', 'listEntrySubmissions', 'assertNoEntrySubmissions']);
+const READ_OPS = new Set(['getPlan', 'getPlanByClientOrderId', 'listPlans', 'listNonterminalPlans', 'getEventByKey', 'listEvents', 'listFills', 'listObservations', 'listExperiments', 'getHistoryStart', 'getMonitorState', 'getAttentionVersion', 'getEntryVersion', 'listEntrySubmissions', 'assertNoEntrySubmissions']);
 
 function bind(c) {
     return Object.fromEntries(Object.entries(ops).map(([name, fn]) => [name, (...args) => fn(c, ...args)]));
