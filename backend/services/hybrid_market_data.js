@@ -1,4 +1,5 @@
 const pybridge = require('./pybridge');
+const http = require('./http_runtime');
 
 const ALPACA_DATA_BASE_URL = 'https://data.alpaca.markets';
 const ALPACA_PAPER_BASE_URL = 'https://paper-api.alpaca.markets';
@@ -10,7 +11,7 @@ function alpacaCredentials(env) {
     };
 }
 
-function createAlpacaMarketDataSource({ env = process.env, fetchImpl = global.fetch } = {}) {
+function createAlpacaMarketDataSource({ env = process.env, fetchImpl = http.fetch } = {}) {
     if (typeof fetchImpl !== 'function') throw new Error('fetch is unavailable');
     const credentials = alpacaCredentials(env);
     if (!credentials.key || !credentials.secret) throw new Error('Alpaca market-data credentials are not configured');

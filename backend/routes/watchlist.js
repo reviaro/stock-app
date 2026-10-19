@@ -2,6 +2,7 @@ const { createAsyncRouter } = require('../services/http_errors');
 const router = createAsyncRouter();
 const db = require('../database/db');
 const pybridge = require('../services/pybridge');
+const http = require('../services/http_runtime');
 
 // Search stocks - predefined list + yfinance lookup
 router.get('/search/:query', async (req, res) => {
@@ -49,7 +50,7 @@ router.get('/search/:query', async (req, res) => {
 
     // 2. Try Yahoo Finance for real-time search
     try {
-        const yfRes = await fetch(`https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=10&newsCount=0`);
+        const yfRes = await http.fetch(`https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=10&newsCount=0`);
         if (yfRes.ok) {
             const yfData = await yfRes.json();
             if (yfData.quotes && Array.isArray(yfData.quotes)) {
