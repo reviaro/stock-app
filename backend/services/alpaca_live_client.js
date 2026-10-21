@@ -6,13 +6,13 @@ const DATA_URL = 'https://data.alpaca.markets';
 const fail = (code, message, status = 409) => Object.assign(new Error(message), { code, status });
 
 function configuration(env = process.env) {
-    if (env.SAMPLE_DATA === '1') return { configured:false,accountBound:false,tradingEnabled:false,environment:'live',assetScope:'US stocks and ETFs',execution:'operator_confirmation' };
+    if (env.SAMPLE_DATA === '1') return { configured:false,accountBound:false,tradingEnabled:false,environment:'live',assetScope:'US stocks and ETFs',executionModes:['confirm','automatic'] };
     if (env.ALPACA_LIVE_TRADING_BASE_URL && env.ALPACA_LIVE_TRADING_BASE_URL !== LIVE_URL) {
         throw fail('LIVE_ENDPOINT_INVALID', 'The live integration requires the fixed Alpaca live endpoint.');
     }
     return { configured: Boolean(env.ALPACA_LIVE_API_KEY && env.ALPACA_LIVE_SECRET_KEY),
         accountBound: Boolean(env.ALPACA_LIVE_ACCOUNT_ID), tradingEnabled: env.ALPACA_LIVE_TRADING_ENABLED === 'true',
-        environment: 'live', assetScope: 'US stocks and ETFs', execution: 'operator_confirmation' };
+        environment: 'live', assetScope: 'US stocks and ETFs', executionModes: ['confirm','automatic'] };
 }
 
 function createLiveClient({ env = process.env, fetchImpl = http.fetch } = {}) {

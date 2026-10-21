@@ -365,6 +365,9 @@ the server environment. Live requests use `https://api.alpaca.markets` and never
 fall back to the paper keys. Bind the expected live account ID, review the
 capital ceiling and target weights, then deliberately enable the server gate
 and unpause the UI policy. Automatic mode requires its own activation phrase.
+Allocation uses the smaller of the ceiling and current account equity after
+excluding protected external holdings, so weights track funded capital through
+market gains, losses and deposits without borrowing.
 Pausing prevents new orders; use the order controls to cancel existing app orders.
 
 Importing account 1's simulator allocation creates an editable weights draft.

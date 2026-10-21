@@ -122,6 +122,12 @@ test('closed market, stale or crossed quotes and existing broker orders block ex
     f.state.clockOpen=true;f.state.badQuote=true;assert.ok((await f.service.preview()).blockers.some(s=>s.includes('fresh')));
     f.state.badQuote=false;f.state.open=[{id:'unrelated'}];assert.ok((await f.service.preview()).blockers.some(s=>s.includes('open broker orders')));
 });
+test('target allocation follows funded capital below the ceiling and excludes external holdings',async()=>{
+    const f=await fixture();f.account.equity='9000';f.account.cash='8000';
+    let p=await f.service.preview();assert.equal(p.allocationCapital,9000);assert.equal(p.rows[0].targetValue,1800);assert.deepEqual(p.blockers,[]);
+    f.state.positions=[{symbol:'MSFT',qty:'10',side:'long',current_price:'100',unrealized_pl:'0'}];
+    p=await f.service.preview();assert.equal(p.unmanagedValue,1000);assert.equal(p.allocationCapital,8000);assert.equal(p.rows[0].targetValue,1600);assert.deepEqual(p.blockers,[]);
+});
 test('confirmation, policy revision, cash, price, server gate and account identity are revalidated',async()=>{
     const f=await fixture();const p=await f.service.preview();await assert.rejects(f.service.execute(p.id,{confirmation:'BUY'}),{code:'LIVE_CONFIRMATION_REQUIRED'});
     f.state.price=110;await assert.rejects(f.service.execute(p.id,confirms(p)),{code:'LIVE_PRICE_CHANGED'});f.state.price=100;

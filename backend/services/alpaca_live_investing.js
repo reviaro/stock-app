@@ -104,6 +104,9 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
         const s=await snapshot(); const p=s.state.policy;
         const blockers=[...s.issues];
         if (!p.budget || !p.targets.length) blockers.push('Save a capital budget and target allocation.');
+        const unmanagedValue=s.positions.filter(h=>!s.owned[h.symbol]).reduce((n,h)=>n+h.value,0);
+        const allocationCapital=Math.min(p.budget,Math.max(0,s.equity-unmanagedValue));
+        if (!(allocationCapital>0)) blockers.push('No funded capital is available within the ceiling after protecting unrelated holdings.');
         const symbols=[...new Set([...p.targets.map(t=>t.symbol),...Object.keys(s.owned).filter(k=>s.owned[k]>1e-7)])].sort();
         const rows=[]; let managedValue=0;
         for (const ticker of symbols) {
@@ -125,7 +128,7 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
             if (held && Math.abs(held.qty-owned)>1e-7) { blockers.push(ticker+': existing holdings are not fully owned by this app.'); continue; }
             const target=p.targets.find(t=>t.symbol===ticker)?.weightPct||0;
             const currentValue=owned*q.bidPrice; managedValue+=currentValue;
-            const targetValue=p.budget*target/100;
+            const targetValue=allocationCapital*target/100;
             const delta=targetValue-currentValue;
             const direction=delta>=0?'buy':'sell';
             const limitPrice=direction==='buy'?ceilToTick(q.askPrice*1.001):floorToTick(q.bidPrice*0.999);
@@ -134,24 +137,22 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
             const rawQty=Math.min(Math.abs(delta)/limitPrice,p.maxOrderValue/limitPrice,direction==='sell'?Math.min(owned,held?.qty||0):Infinity);
             const qty=Math.floor((rawQty+1e-10)*factor)/factor;
             const notional=round(qty*limitPrice);
-            const driftPct=p.budget?Math.abs(delta)/p.budget*100:0;
+            const driftPct=allocationCapital?Math.abs(delta)/allocationCapital*100:0;
             rows.push({symbol:ticker,side:direction,qty,limitPrice,notional,currentQty:owned,currentValue:round(currentValue),targetWeightPct:target,
                 targetValue:round(targetValue),driftPct:round(driftPct),actionable:qty>0 && notional>=p.minTradeValue && driftPct>=p.driftPct,
                 quoteAt:q.sourceTimestamp,feed:q.feed,fractional});
         }
-        const unmanagedValue=s.positions.filter(h=>!s.owned[h.symbol]).reduce((n,h)=>n+h.value,0);
-        if (p.budget>s.equity-unmanagedValue+0.01) blockers.push('The budget exceeds capital available after protecting unrelated holdings.');
-        const spendable=Math.max(0,Math.min(s.cash,s.cashBuyingPower,p.budget*(1-p.reservePct/100)-managedValue));
+        const spendable=Math.max(0,Math.min(s.cash,s.cashBuyingPower,allocationCapital*(1-p.reservePct/100)-managedValue));
         const candidates=rows.filter(r=>r.actionable && (!symbol || r.symbol===symbol) && (!side || r.side===side))
             .sort((a,b)=>(a.side==='sell'?0:1)-(b.side==='sell'?0:1)||b.notional-a.notional||a.symbol.localeCompare(b.symbol));
         const next=candidates[0]||null;
         if (next?.side==='buy' && rows.some(r=>r.actionable && r.side==='sell')) blockers.push('Complete and reconcile the sell adjustments before requesting a buy.');
         if (next?.side==='buy' && next.qty*next.limitPrice>spendable+1e-8) blockers.push('This buy would exceed cash-only funding or the required reserve. Sell and reconcile first.');
-        if (next?.side==='buy' && (next.currentValue+next.qty*next.limitPrice)>p.budget*p.maxPositionPct/100+0.01) blockers.push('This buy would exceed the maximum position weight.');
+        if (next?.side==='buy' && (next.currentValue+next.qty*next.limitPrice)>allocationCapital*p.maxPositionPct/100+0.01) blockers.push('This buy would exceed the maximum position weight.');
         if (symbol && !next) blockers.push('This decision is outside the approved target drift or minimum trade.');
         const plan={id:crypto.randomUUID(),accountKey:s.accountKey,policyVersion:s.state.version,stateSequence:s.state.sequence,createdAt:now().toISOString(),
             expiresAt:new Date(now().getTime()+60000).toISOString(),decisionKey,rows,nextOrder:next,blockers:[...new Set(blockers)],
-            managedValue:round(managedValue),spendableCash:round(spendable),unmanagedValue:round(unmanagedValue),
+            managedValue:round(managedValue),spendableCash:round(spendable),unmanagedValue:round(unmanagedValue),allocationCapital:round(allocationCapital),
             brokerQuantities:s.positions.map(h=>[h.symbol,h.qty]).sort((a,b)=>a[0].localeCompare(b[0]))};
         await store.savePlan(plan);
         return publicPlan(plan);
@@ -184,9 +185,9 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
             managed+=position.qty*mark.askPrice;
         }
         const unmanaged=fresh.positions.reduce((n,h)=>n+(!fresh.owned[h.symbol]?h.value:0),0);
-        if (p.budget>fresh.equity-unmanaged+0.01) throw fail('LIVE_BUDGET_UNFUNDED','The approved capital budget is no longer funded.');
-        if (order.side==='buy' && order.qty*order.limitPrice>Math.max(0,Math.min(fresh.cash,fresh.cashBuyingPower,p.budget*(1-p.reservePct/100)-managed))+1e-8) throw fail('LIVE_CASH_CHANGED','Cash funding or the reserve changed.');
-        if (order.side==='buy' && ((fresh.owned[order.symbol]||0)*q.askPrice+order.qty*order.limitPrice)>p.budget*p.maxPositionPct/100+0.01) throw fail('LIVE_POSITION_LIMIT','The current position would exceed the approved weight.');
+        const allocationCapital=Math.min(p.budget,Math.max(0,fresh.equity-unmanaged));
+        if (order.side==='buy' && order.qty*order.limitPrice>Math.max(0,Math.min(fresh.cash,fresh.cashBuyingPower,allocationCapital*(1-p.reservePct/100)-managed))+1e-8) throw fail('LIVE_CASH_CHANGED','Cash funding or the reserve changed.');
+        if (order.side==='buy' && ((fresh.owned[order.symbol]||0)*q.askPrice+order.qty*order.limitPrice)>allocationCapital*p.maxPositionPct/100+0.01) throw fail('LIVE_POSITION_LIMIT','The current position would exceed the approved weight.');
         if (order.side==='sell' && (order.qty>(fresh.owned[order.symbol]||0)+1e-8 || order.qty>(fresh.positions.find(h=>h.symbol===order.symbol)?.qty||0))) throw fail('LIVE_OWNERSHIP_CHANGED','The sell exceeds app-owned or verified broker shares.');
         if ((await fresh.client.getClock())?.is_open!==true) throw fail('LIVE_MARKET_CLOSED','The regular session closed before submission.');
         const reserved=await store.reserveOrder(plan,order,{enabled:()=>configuration(env).tradingEnabled

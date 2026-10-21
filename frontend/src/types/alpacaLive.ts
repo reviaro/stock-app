@@ -25,7 +25,7 @@ export interface LivePlanRow {
 export interface LivePlan {
   id: string; policyVersion: number; createdAt: string; expiresAt: string; decisionKey: string | null
   nextOrder: LivePlanRow | null; rows: LivePlanRow[]; blockers: string[]
-  managedValue: number; spendableCash: number; unmanagedValue: number
+  managedValue: number; spendableCash: number; unmanagedValue: number; allocationCapital: number
 }
 export interface SimulatorAllocationDraft {
   sourceAccountId: number; targets: LiveTarget[]; sourceCashPct: number
