@@ -108,7 +108,7 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
         const allocationCapital=Math.min(p.budget,Math.max(0,s.equity-unmanagedValue));
         if (!(allocationCapital>0)) blockers.push('No funded capital is available within the ceiling after protecting unrelated holdings.');
         const symbols=[...new Set([...p.targets.map(t=>t.symbol),...Object.keys(s.owned).filter(k=>s.owned[k]>1e-7)])].sort();
-        const rows=[]; let managedValue=0;
+        const rows=[]; const capitalMarks=new Map(); let managedValue=0;
         for (const ticker of symbols) {
             let asset;
             try { asset=await s.client.getAsset(ticker); }
@@ -127,14 +127,18 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
             const held=s.positions.find(h=>h.symbol===ticker); const owned=s.owned[ticker]||0;
             if (held && Math.abs(held.qty-owned)>1e-7) { blockers.push(ticker+': existing holdings are not fully owned by this app.'); continue; }
             const target=p.targets.find(t=>t.symbol===ticker)?.weightPct||0;
-            const currentValue=owned*q.bidPrice; managedValue+=currentValue;
+            const currentValue=owned*q.bidPrice;
+            // Use the same conservative ask mark as execution for capital limits.
+            const capitalValue=owned*q.askPrice;
+            capitalMarks.set(ticker,capitalValue); managedValue+=capitalValue;
             const targetValue=allocationCapital*target/100;
             const delta=targetValue-currentValue;
             const direction=delta>=0?'buy':'sell';
             const limitPrice=direction==='buy'?ceilToTick(q.askPrice*1.001):floorToTick(q.bidPrice*0.999);
             const fractional=p.fractional && asset.fractionable===true;
             const factor=fractional?1e6:1;
-            const rawQty=Math.min(Math.abs(delta)/limitPrice,p.maxOrderValue/limitPrice,direction==='sell'?Math.min(owned,held?.qty||0):Infinity);
+            const positionHeadroom=Math.max(0,allocationCapital*p.maxPositionPct/100-capitalValue);
+            const rawQty=Math.min(Math.abs(delta)/limitPrice,p.maxOrderValue/limitPrice,direction==='sell'?Math.min(owned,held?.qty||0):positionHeadroom/limitPrice);
             const qty=Math.floor((rawQty+1e-10)*factor)/factor;
             const notional=round(qty*limitPrice);
             const driftPct=allocationCapital?Math.abs(delta)/allocationCapital*100:0;
@@ -148,7 +152,7 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
         const next=candidates[0]||null;
         if (next?.side==='buy' && rows.some(r=>r.actionable && r.side==='sell')) blockers.push('Complete and reconcile the sell adjustments before requesting a buy.');
         if (next?.side==='buy' && next.qty*next.limitPrice>spendable+1e-8) blockers.push('This buy would exceed cash-only funding or the required reserve. Sell and reconcile first.');
-        if (next?.side==='buy' && (next.currentValue+next.qty*next.limitPrice)>allocationCapital*p.maxPositionPct/100+0.01) blockers.push('This buy would exceed the maximum position weight.');
+        if (next?.side==='buy' && (capitalMarks.get(next.symbol)+next.qty*next.limitPrice)>allocationCapital*p.maxPositionPct/100+0.01) blockers.push('This buy would exceed the maximum position weight.');
         if (symbol && !next) blockers.push('This decision is outside the approved target drift or minimum trade.');
         const plan={id:crypto.randomUUID(),accountKey:s.accountKey,policyVersion:s.state.version,stateSequence:s.state.sequence,createdAt:now().toISOString(),
             expiresAt:new Date(now().getTime()+60000).toISOString(),decisionKey,rows,nextOrder:next,blockers:[...new Set(blockers)],

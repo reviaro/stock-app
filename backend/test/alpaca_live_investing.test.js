@@ -80,6 +80,22 @@ test('reviewed DAY limit order is durable, retry-safe and contains no caller-sup
 test('concurrent confirmations reserve at most one broker submission',async()=>{
     const f=await fixture();const p=await f.service.preview();await Promise.allSettled([f.service.execute(p.id,confirms(p)),f.service.execute(p.id,confirms(p))]);assert.equal(f.state.submitted.length,1);
 });
+test('a target at the position ceiling can be topped up with unchanged bid/ask evidence',async()=>{
+    const f=await fixture();
+    f.account.cash='7900';f.account.non_marginable_buying_power='7900';
+    f.state.positions=[{symbol:'AAPL',qty:'21',side:'long',current_price:'100',unrealized_pl:'0'}];
+    await f.store.savePolicy({...f.policy,paused:true},1,'');
+    await f.service.adopt({symbol:'AAPL',qty:21,reason:'Synthetic reviewed position for a limit-bound top-up.',confirmation:'MANAGE AAPL 21 LIVE'});
+    const state=await f.store.settings();
+    await f.store.savePolicy({...f.policy,targets:[{symbol:'AAPL',weightPct:25}]},state.version,'ENABLE LIVE INVESTING');
+    const p=await f.service.preview();
+    assert.deepEqual(p.blockers,[]);
+    assert.equal(p.managedValue,2100.42);
+    assert.ok(p.nextOrder.qty>0);
+    assert.ok(21*100.02+p.nextOrder.qty*p.nextOrder.limitPrice<=2500);
+    await f.service.execute(p.id,confirms(p));
+    assert.equal(f.state.submitted.length,1);
+});
 test('two different previews cannot both trade a stale snapshot even if the first order fills immediately',async()=>{
     const f=await fixture();const first=await f.service.preview();const second=await f.service.preview();
     const submit=f.client.submit;
