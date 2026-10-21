@@ -131,7 +131,7 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
             const limitPrice=direction==='buy'?ceilToTick(q.askPrice*1.001):floorToTick(q.bidPrice*0.999);
             const fractional=p.fractional && asset.fractionable===true;
             const factor=fractional?1e6:1;
-            const rawQty=Math.min(Math.abs(delta)/limitPrice,p.maxOrderValue/limitPrice,direction==='sell'?owned:Infinity);
+            const rawQty=Math.min(Math.abs(delta)/limitPrice,p.maxOrderValue/limitPrice,direction==='sell'?Math.min(owned,held?.qty||0):Infinity);
             const qty=Math.floor((rawQty+1e-10)*factor)/factor;
             const notional=round(qty*limitPrice);
             const driftPct=p.budget?Math.abs(delta)/p.budget*100:0;
@@ -187,7 +187,7 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
         if (p.budget>fresh.equity-unmanaged+0.01) throw fail('LIVE_BUDGET_UNFUNDED','The approved capital budget is no longer funded.');
         if (order.side==='buy' && order.qty*order.limitPrice>Math.max(0,Math.min(fresh.cash,fresh.cashBuyingPower,p.budget*(1-p.reservePct/100)-managed))+1e-8) throw fail('LIVE_CASH_CHANGED','Cash funding or the reserve changed.');
         if (order.side==='buy' && ((fresh.owned[order.symbol]||0)*q.askPrice+order.qty*order.limitPrice)>p.budget*p.maxPositionPct/100+0.01) throw fail('LIVE_POSITION_LIMIT','The current position would exceed the approved weight.');
-        if (order.side==='sell' && order.qty>(fresh.owned[order.symbol]||0)+1e-8) throw fail('LIVE_OWNERSHIP_CHANGED','The sell exceeds app-owned shares.');
+        if (order.side==='sell' && (order.qty>(fresh.owned[order.symbol]||0)+1e-8 || order.qty>(fresh.positions.find(h=>h.symbol===order.symbol)?.qty||0))) throw fail('LIVE_OWNERSHIP_CHANGED','The sell exceeds app-owned or verified broker shares.');
         if ((await fresh.client.getClock())?.is_open!==true) throw fail('LIVE_MARKET_CLOSED','The regular session closed before submission.');
         const reserved=await store.reserveOrder(plan,order,{enabled:()=>configuration(env).tradingEnabled
             && now().getTime()-Date.parse(q.sourceTimestamp)<=10000 && now().getTime()>=Date.parse(q.sourceTimestamp),automatic});

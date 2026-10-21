@@ -187,6 +187,15 @@ test('confirmed-order mode is re-read inside the submission transaction',async()
     await f.store.savePolicy({...f.policy,executionMode:'confirm'},1,'ENABLE LIVE INVESTING');
     await assert.rejects(f.service.execute(p.id,{automatic:true}),{code:'LIVE_STATE_CHANGED'});assert.equal(f.state.submitted.length,0);
 });
+test('fractional sell sizing never rounds above the actual nine-decimal broker quantity',async()=>{
+    const f=await fixture();const qty=1.999999999;
+    f.state.positions=[{symbol:'AAPL',qty:String(qty),side:'long',current_price:'100',unrealized_pl:'0'}];
+    await f.store.savePolicy({...f.policy,paused:true},1,'');
+    await f.service.adopt({symbol:'AAPL',qty,reason:'Synthetic fractional position ownership review.',confirmation:`MANAGE AAPL ${qty} LIVE`});
+    const state=await f.store.settings();await f.store.savePolicy({...f.policy,targets:[{symbol:'MSFT',weightPct:20}]},state.version,'ENABLE LIVE INVESTING');
+    const p=await f.service.preview();assert.ok(p.nextOrder.qty<=qty);assert.equal(p.nextOrder.qty,1.999999);
+    await f.service.execute(p.id,confirms(p));assert.ok(Number(f.state.submitted[0].qty)<=qty);
+});
 test('simulator import is an editable weights draft with no automatic mutual-fund mapping or live transaction',async()=>{
     const f=await fixture();
     const sourceDb={getSimAccount:async()=>({id:1}),listSimTransactions:async()=>[
