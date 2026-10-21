@@ -3,11 +3,19 @@ import { useQuery } from '@tanstack/react-query'
 export interface QualityMetric {
   value: number | null
   grade: string | null
+  periods?: string[]
+  observations?: number
+  method?: string
+  stale?: boolean
   unit: string
 }
 
 export interface QualityData {
   symbol: string
+  applicable?: boolean
+  coveragePct?: number
+  source?: string
+  notes?: string[]
   composite: number | null
   metrics: Record<string, QualityMetric>
 }

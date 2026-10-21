@@ -7,26 +7,17 @@ import type { CANSLIMCriterion } from '@/types'
 
 const CANSLIM_LETTERS = ['C', 'A', 'N', 'S', 'L', 'I', 'M'] as const
 
-/** Map each letter to its full criterion name for display */
-const LETTER_LABELS: Record<string, string> = {
-  C: 'Current Earnings',
-  A: 'Annual Earnings',
-  N: 'New Factors',
-  S: 'Supply & Demand',
-  L: 'Leader/Laggard',
-  I: 'Institutional',
-  M: 'Market Direction',
-}
-
 /** Score-to-color mapping per research spec */
-function scoreColor(score: number): string {
+function scoreColor(score: number | null): string {
+  if (score == null) return 'text-muted-foreground'
   if (score >= 70) return 'text-positive'
   if (score >= 40) return 'text-warning'
   return 'text-negative'
 }
 
 /** Progress bar color variant */
-function progressColor(score: number): string {
+function progressColor(score: number | null): string {
+  if (score == null) return ''
   if (score >= 70) return '[&>div]:bg-green-500'
   if (score >= 40) return '[&>div]:bg-amber-500'
   return '[&>div]:bg-red-500'
@@ -46,15 +37,16 @@ function CriterionRow({ letter, criterion }: { letter: string; criterion: CANSLI
       <span className={`font-bold text-lg w-6 ${scoreColor(criterion.score)}`}>{letter}</span>
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between mb-0.5">
-          <span className="text-xs text-muted-foreground truncate">{LETTER_LABELS[letter] ?? criterion.name}</span>
+          <span className="text-xs text-muted-foreground truncate">{criterion.name}</span>
           <div className="flex items-center gap-2">
-            <span className={`text-sm font-semibold ${scoreColor(criterion.score)}`}>{criterion.score}</span>
-            <Badge variant={criterion.status === 'Pass' ? 'default' : 'destructive'} className="text-[10px] px-1.5 py-0">
+            <span className={`text-sm font-semibold ${scoreColor(criterion.score)}`}>{criterion.score ?? '—'}</span>
+            <Badge variant={criterion.status === 'Pass' ? 'default' : criterion.status === 'Unknown' ? 'outline' : 'destructive'} className="text-[10px] px-1.5 py-0">
               {criterion.status}
             </Badge>
           </div>
         </div>
-        <Progress value={criterion.score} className={`h-1.5 ${progressColor(criterion.score)}`} />
+        {criterion.method && <p className="text-xs text-muted-foreground mt-1">{criterion.method}</p>}
+        <Progress value={criterion.score ?? 0} className={`h-1.5 ${progressColor(criterion.score)}`} />
       </div>
     </div>
   )
@@ -75,7 +67,7 @@ export function CANSLIMScorecard({ symbol }: { symbol?: string }) {
           </CardTitle>
           {data && (
             <div className="flex items-center gap-2">
-              <span className={`text-2xl font-bold ${scoreColor(data.overall.score)}`}>{data.overall.score}</span>
+              <span className={`text-2xl font-bold ${scoreColor(data.overall.score)}`}>{data.overall.score ?? '—'}</span>
               <Badge variant={ratingVariant(data.overall.rating)}>{data.overall.rating}</Badge>
             </div>
           )}
@@ -96,12 +88,13 @@ export function CANSLIMScorecard({ symbol }: { symbol?: string }) {
 
         {data && (
           <div className="space-y-0.5">
-            {CANSLIM_LETTERS.map((letter) => (
+            {data.applicable === false && <p className="text-sm text-muted-foreground">Company earnings criteria do not apply to funds. Review fund costs, benchmark and holdings.</p>}
+            {CANSLIM_LETTERS.filter(letter => data.criteria[letter]).map((letter) => (
               <CriterionRow key={letter} letter={letter} criterion={data.criteria[letter as keyof typeof data.criteria]} />
             ))}
             <div className="flex items-center justify-between pt-2 mt-2 border-t border-border">
               <span className="text-xs text-muted-foreground">
-                {data.overall.passCount} Pass / {data.overall.failCount} Fail
+                {data.overall.passCount} Pass / {data.overall.failCount} Fail / {data.overall.unknownCount ?? 0} Unknown
               </span>
               <span className="text-[10px] text-muted-foreground">
                 {new Date(data.generatedAt).toLocaleString()}

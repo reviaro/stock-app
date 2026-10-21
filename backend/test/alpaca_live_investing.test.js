@@ -42,6 +42,14 @@ async function fixture(mode='confirm') {
     const policy={...baseStore.DEFAULT_POLICY,budget:10000,maxOrderValue:500,paused:false,executionMode:mode,targets:[{symbol:'AAPL',weightPct:20}]};
     await store.savePolicy(policy,0,mode==='automatic'?'ENABLE AUTOMATIC LIVE INVESTING':'ENABLE LIVE INVESTING');
     const service=createLiveInvesting({store,env,clientFactory:()=>client});
+    const decision=service.decision,analysisByKey=new Map();
+    service.decision=async input=>{
+        if(!analysisByKey.has(input.decisionKey)){
+            const packet=await require('../services/research_store').savePacket({symbol:input.symbol,generatedAt:new Date().toISOString(),accountScope:'research_only',eligibleForDecision:true,data:{info:{price:100}}});
+            analysisByKey.set(input.decisionKey,{claims:[{path:'data.info.price',value:100}],packetId:packet.id,contentHash:packet.contentHash,strategyVersion:'synthetic-v1',analyzedAt:new Date().toISOString(),model:'synthetic-model',assumptions:['Synthetic allocation remains approved'],alternatives:['Keep cash and wait'],invalidation:'The approved investment thesis becomes invalid.'});
+        }
+        return decision({...input,analysis:Object.hasOwn(input,'analysis')?input.analysis:analysisByKey.get(input.decisionKey)});
+    };
     return {store,env,account,state,client,policy,service};
 }
 const confirms=p=>({confirmation:p.nextOrder.side.toUpperCase()+' '+p.nextOrder.symbol+' LIVE'});

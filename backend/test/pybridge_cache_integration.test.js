@@ -81,5 +81,7 @@ test('pybridge loads screener inputs for all symbols in one cached Python batch'
 
 test('Python screener batch action accepts an empty universe', async () => {
     const result = await callPython({ action: 'screener_batch', symbols: [] });
-    assert.deepEqual(result, { status: 'success', data: {} });
+    assert.equal(result.status,'success');
+    assert.deepEqual(result.data,{});
+    assert.equal(result.meta.source,'yfinance');
 });

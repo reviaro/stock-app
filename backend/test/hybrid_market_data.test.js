@@ -23,6 +23,7 @@ test('hybrid quote prefers timestamped Alpaca market data and does not call yfin
         timestamp: '2026-08-11T15:01:02.123Z',
         market_state: 'REGULAR',
         data_source: 'alpaca_iex',
+        symbol:'MSFT',instrument_type:null,currency:null,is_demo:false,stale:false,retrieved_at:null,
     });
     assert.strictEqual(yfinanceCalls, 0);
 });
@@ -43,6 +44,7 @@ test('hybrid quote falls back to genuine yfinance data when Alpaca is unavailabl
         timestamp: '2026-08-11T15:00:00Z',
         market_state: 'REGULAR',
         data_source: 'yfinance',
+        symbol:'MSFT',instrument_type:null,currency:null,is_demo:false,stale:false,retrieved_at:null,
     });
 });
 
@@ -70,7 +72,9 @@ test('Alpaca market-data source performs GET-only requests and returns provider 
         timestamp: '2026-08-11T15:01:02.123Z',
         marketState: 'REGULAR',
         source: 'alpaca_iex',
+        symbol:'MSFT',currency:'USD',quoteType:'EQUITY',retrievedAt:quote.retrievedAt,
     });
+    assert.ok(Number.isFinite(Date.parse(quote.retrievedAt)));
     assert.deepStrictEqual(requests.map((request) => request.url), [
         'https://data.alpaca.markets/v2/stocks/MSFT/trades/latest?feed=iex',
         'https://paper-api.alpaca.markets/v2/clock',

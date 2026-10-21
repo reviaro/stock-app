@@ -23,7 +23,7 @@ function createAsyncTtlCache({ ttlMs = 60_000, now = () => Date.now() } = {}) {
         else values.delete(key);
     }
 
-    return { get, clear };
+    return { get, clear, peek:key=>{const row=values.get(key);return row&&row.expiresAt>now()?row.value:undefined;} };
 }
 
 function createBatchingStockInfoLoader({
@@ -70,7 +70,7 @@ function createBatchingStockInfoLoader({
                 }
                 if (result.status === 'success') {
                     cache.set(symbol, {
-                        value: result,
+                        value: { ...result, meta:{...result.meta,retrievedAt:result.meta?.retrievedAt || new Date(now()).toISOString()} },
                         expiresAt: now() + ttlMs,
                         staleUntil: now() + staleTtlMs,
                     });

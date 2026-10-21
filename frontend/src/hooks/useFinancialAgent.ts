@@ -1,6 +1,6 @@
 import { useChat } from '@ai-sdk/react'
 import { DefaultChatTransport } from 'ai'
-import { useRef } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import type { ModeInputs, ModeName } from '@/types/aiMode'
 
 /**
@@ -10,13 +10,14 @@ import type { ModeInputs, ModeName } from '@/types/aiMode'
  * Using DefaultChatTransport allows explicit API URL configuration independent
  * of the default '/api/chat' that useChat falls back to.
  */
-const financialAgentTransport = new DefaultChatTransport({
+const createTransport = (onModel: (label: string) => void) => new DefaultChatTransport({
+  fetch: async (input, init) => { const response = await fetch(input, init); const model = response.headers.get('X-AI-Model'); if (model) onModel(model); return response },
   api: '/api/ai/chat',
   prepareSendMessagesRequest({ messages, body }) {
     const mode = (body as { mode?: ModeName })?.mode ?? 'free'
     const inputs = (body as { inputs?: ModeInputs })?.inputs ?? {}
     if (mode === 'free') {
-      return { api: '/api/ai/chat', body: { messages } }
+      return { api: '/api/ai/chat', body: { messages, allowPaperTrading: (body as { allowPaperTrading?: boolean })?.allowPaperTrading === true } }
     }
     return { api: `/api/ai/mode/${mode}`, body: { messages, inputs } }
   },
@@ -35,14 +36,16 @@ const financialAgentTransport = new DefaultChatTransport({
  *  - Transport is configured separately from the hook options.
  */
 export function useFinancialAgent() {
+  const [modelLabel, setModelLabel] = useState('')
+  const transport = useMemo(() => createTransport(setModelLabel), [])
   const modeRef = useRef<{ mode: ModeName; inputs: ModeInputs }>({ mode: 'free', inputs: {} })
   const { messages, setMessages, sendMessage, status, error, stop } = useChat({
-    transport: financialAgentTransport,
+    transport,
   })
 
   const isLoading = status === 'submitted' || status === 'streaming'
 
-  function send(text: string, modeOverride?: { mode: ModeName; inputs: ModeInputs }) {
+  function send(text: string, modeOverride?: { mode: ModeName; inputs: ModeInputs; allowPaperTrading?: boolean }) {
     const active = modeOverride ?? modeRef.current
     sendMessage({ text }, { body: active })
   }
@@ -56,5 +59,6 @@ export function useFinancialAgent() {
     error,
     stop,
     modeRef,
+    modelLabel,
   }
 }

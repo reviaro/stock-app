@@ -1,3 +1,4 @@
+import { ResearchEvaluationPanel } from '@/components/ResearchEvaluationPanel'
 import { useEffect, useMemo, useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
@@ -208,6 +209,7 @@ export function StrategyLabPage() {
           </div>
         </div>
       </div>
+      <ResearchEvaluationPanel />
     </main>
   )
 }

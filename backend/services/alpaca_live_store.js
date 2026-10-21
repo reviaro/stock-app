@@ -129,7 +129,7 @@ async function saveDecision(input) {
         return (await all(c,'SELECT * FROM alpaca_live_decisions WHERE decision_key=?',[input.decisionKey]))[0];
     });
 }
-const decisions = () => connection(c=>all(c,'SELECT * FROM alpaca_live_decisions ORDER BY created_at DESC LIMIT 100'));
+const decisions = () => connection(async c=>(await all(c,'SELECT d.*,r.analysis_json FROM alpaca_live_decisions d LEFT JOIN research_decision_evidence r ON r.decision_key=d.decision_key ORDER BY d.created_at DESC LIMIT 100')).map(({analysis_json,...row})=>({...row,analysis:analysis_json?JSON.parse(analysis_json):null})));
 const ownership = () => connection(c=>all(c,'SELECT * FROM alpaca_live_ownership ORDER BY id'));
 async function adopt({accountKey,symbol,brokerQty,expectedOwned,policyVersion,reason}) {
     return transaction(async c=>{

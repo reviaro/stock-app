@@ -161,8 +161,8 @@ node server.js         # http://localhost:3002
 | Key | Purpose |
 |-----|---------|
 | `AI_PROVIDER` | `gemini` (default), `openai`, `anthropic`, or `lmstudio`; applies to chat, modes, memo drafts, and pressure tests |
-| `AI_MODEL` | Model ID; required for OpenAI/Anthropic. Empty preserves the existing Gemini primary and backup models |
-| `AI_LOCAL_FALLBACK` | `true` or `false`; defaults to enabled for Gemini and disabled for OpenAI/Anthropic. Never switches between cloud providers |
+| `AI_MODEL` | Model ID; required for OpenAI/Anthropic. Empty uses stable `gemini-2.5-flash`; an explicit model is never silently substituted |
+| `AI_LOCAL_FALLBACK` | `true` or `false`; cloud-to-local fallback is opt-in; keyless local installations retain local selection. Never switches between cloud providers |
 | `GOOGLE_GENERATIVE_AI_API_KEY` | API key for Gemini |
 | `OPENAI_API_KEY` | API key for OpenAI |
 | `ANTHROPIC_API_KEY` | API key for Anthropic Claude |
@@ -228,13 +228,14 @@ Choose an API model that supports tool calling. OpenAI uses the
 Claude uses the [Anthropic adapter](https://ai-sdk.dev/providers/ai-sdk-providers/anthropic).
 These integrations use API keys, not Codex or Claude Code CLI logins.
 
-With no new settings, the existing Gemini primary/backup selection and local
-fallback remain. `AI_MODEL` overrides the primary; Gemini still tries
-`gemini-2.5-flash` as its backup unless that is already the primary.
-OpenAI and Anthropic do not fall back to another cloud. To enable LM Studio
-after either provider fails, set `AI_LOCAL_FALLBACK=true`; set it to `false`
-to disable local fallback, including for Gemini. Fallback stops once response
-content or tool input begins, so a partially executed conversation is not replayed.
+Gemini uses a stable default. Set `AI_MODEL` to a model enabled in the server's
+provider account to pin a selection; a pinned model has no implicit backup model.
+Cloud-to-local fallback requires `AI_LOCAL_FALLBACK=true`. Existing installations
+without a cloud key can still select the local model. No fallback switches cloud
+providers. Streaming fallback stops once response content or tool input begins.
+Actual provider/model identity is returned in `X-AI-Model` and retained with the
+private research audit. Paper buy/sell tools are unavailable in chat until the
+operator enables **Allow paper trades in this conversation**.
 
 All providers receive the same permitted dashboard tools and simulator checks.
 The selected provider receives the conversation and any tool/context data used
@@ -396,7 +397,18 @@ and policy from the overview before submitting a decision:
   "decisionKey": "unique-allocation-review-id",
   "symbol": "AAPL",
   "side": "buy",
-  "reason": "Analysis supporting this adjustment within the approved allocation."
+  "reason": "Analysis supporting this adjustment within the approved allocation.",
+  "analysis": {
+    "packetId": "<id from GET /api/research/AAPL>",
+    "contentHash": "<hash returned with that packet>",
+    "strategyVersion": "reviewed-strategy-v1",
+    "analyzedAt": "<current ISO timestamp after fetching the packet>",
+    "model": "<agent provider and model>",
+    "claims": [{"path": "data.info.price", "value": "<numeric price from that packet>"}],
+    "assumptions": ["Explicit assumption used in the investment thesis"],
+    "alternatives": ["Keep the existing allocation and wait"],
+    "invalidation": "The measurable condition that invalidates the thesis."
+  }
 }
 ```
 
@@ -428,3 +440,58 @@ The app keeps its existing patched HTTP transport and does not retry order POSTs
 ## License
 
 Licensed under the MIT License. See [LICENSE](LICENSE).
+
+## Research evidence and evaluation
+
+Normal operation returns unavailable data on provider failure. Synthetic prices,
+scorecards and charts are restricted to the isolated sample environment. Missing
+financial values are not zero; scorecards show metric coverage and unknown criteria.
+Company financial ratios are calculated over matching fiscal periods. Funds use
+separate costs, benchmark and dated-holdings research rather than corporate grades.
+
+`GET /api/research/:symbol` returns the shared UI/agent evidence packet, source
+provenance, missing-data blockers, immutable ID and content hash. It distinguishes
+provider event dates from retrieval time. `?refresh=1` collects a new packet.
+Research prices never replace execution quotes. CAN SLIM price, volume and ownership
+proxies are labeled explicitly; custom-universe relative strength is not an official
+IBD rating. The universe refresh replaces a coherent cohort atomically and retains
+the previous cohort if coverage fails.
+
+Optional `SEC_USER_AGENT` identifies the application and a contact email to the
+[SEC APIs](https://www.sec.gov/search-filings/edgar-application-programming-interfaces).
+Keep the actual contact value in the server environment. Standard US-GAAP USD facts
+retain fiscal dates, accession numbers and filing cutoffs; unsupported facts remain
+missing. SEC is preferred for statement calculations when coverage is sufficient;
+Yahoo fallback remains explicitly labeled. Broad screener requests return dated research inputs while primary statement caches warm with bounded concurrency; per-symbol research waits for its source result. Optional dedicated
+`ALPACA_RESEARCH_API_KEY` / `ALPACA_RESEARCH_SECRET_KEY` enable
+[Alpaca news](https://docs.alpaca.markets/us/reference/news-3). Neither source is
+required to start the app, and configuration/availability is visible in research.
+
+An operator can record an issuer disclosure with
+`POST /api/research/fund-disclosures` using `symbol`, `benchmark`,
+`expenseRatioPct`, `asOf`, `issuerUrl`, `holdings: [{symbol, weightPct}]` and the exact
+attestation `I VERIFIED THIS ISSUER DISCLOSURE`. Verification is operator-attested,
+not independently authenticated by the server. Disclosures expire after 90 days;
+undisclosed holdings remain unknown in look-through exposure analysis.
+
+Agent live requests require an eligible saved research packet and analysis within
+30 minutes. Claims must match typed fields in that packet. Assumptions, alternatives,
+invalidation, strategy version and agent-reported model identity are retained
+privately and linked to reconciled order/fill outcomes. Confirmation rechecks the
+research evidence. This supplements the independent broker execution guards;
+it does not establish that the investment thesis is correct.
+
+The Strategy Research Lab includes prospective agent evaluations. Freeze the model,
+strategy version, benchmark, collection window, outcome horizon, cost assumption
+and minimum sample before collecting distinct-symbol buy/hold/avoid decisions.
+The server records immutable, dividend/split-adjusted histories for matched next-close
+and maturity comparisons; it does not accept caller-supplied returns. Outcomes are
+research observations, not executed portfolio returns or verified live readiness.
+No evaluation automatically promotes a strategy. The existing simulator evidence
+and risk gates remain separate. DCF scenarios require an explicit enterprise or equity
+cash-flow basis; equity cash flow cannot subtract net debt again. Memo drafts omit
+numeric valuation targets when no verified scenario is provided.
+
+Research packets, disclosures, agent analysis, model/tool audit traces and evaluation
+records stay in the private application database. Never add database copies,
+credentials, personal strategy plans or internal review artifacts to Git.

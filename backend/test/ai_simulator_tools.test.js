@@ -24,7 +24,7 @@ const { tools, chatTools } = require('../services/ai_service');
 
 test('chat exposes only approved tools with SDK-compatible input validation', () => {
     assert.deepEqual(Object.keys(chatTools).sort(), [
-        'getStockInfo', 'getTechnicalIndicators', 'getMarketDirection', 'getNews',
+        'getResearchEvidence','getPortfolioContext','calculateValuation','analyzeExposure','getCanslimAnalysis','getStockInfo', 'getTechnicalIndicators', 'getMarketDirection', 'getNews',
         'getMemo', 'getQualityMetrics', 'getRiskRules', 'checkPortfolioRisk',
         'simulator_get_account', 'simulator_get_holdings', 'simulator_buy',
         'simulator_sell', 'simulator_tax_preview', 'simulator_get_transactions',

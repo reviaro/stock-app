@@ -1,5 +1,6 @@
 const pybridge = require('./pybridge');
 const http = require('./http_runtime');
+const {numberOrNull}=require('./research_data');
 
 const ALPACA_DATA_BASE_URL = 'https://data.alpaca.markets';
 const ALPACA_PAPER_BASE_URL = 'https://paper-api.alpaca.markets';
@@ -55,6 +56,7 @@ function createAlpacaMarketDataSource({ env = process.env, fetchImpl = http.fetc
         ]);
         return {
             price: latest?.trade?.p,
+            symbol: normalizedSymbol, currency:'USD', quoteType:'EQUITY', retrievedAt:new Date().toISOString(),
             timestamp: latest?.trade?.t || null,
             marketState: clock?.is_open === true ? 'REGULAR' : 'CLOSED',
             source: `alpaca_${feed}`,
@@ -76,34 +78,35 @@ function validTimestamp(value) {
     return Number.isFinite(Date.parse(value));
 }
 
-function normalizeQuote(quote, source) {
-    const price = Number(quote?.price);
+function normalizeQuote(quote, source, symbol) {
+    if (quote?.symbol && quote.symbol !== symbol) return null;
+    if(quote?.isDemo || quote?.is_demo || quote?.meta?.isDemo)return null;
+    const price = numberOrNull(quote?.price);
     if (!Number.isFinite(price) || price <= 0 || !validTimestamp(quote?.timestamp)) return null;
     return {
         price,
         timestamp: quote.timestamp,
         market_state: quote.marketState || null,
         data_source: quote.source || source,
-        ...(quote.quoteType === 'MUTUALFUND' ? {
-            instrument_type: quote.quoteType,
-            symbol: quote.symbol,
-            currency: quote.currency,
-            is_demo: quote.is_demo === true || quote.isDemo === true,
-            stale: quote.stale === true || quote.meta?.stale === true,
-        } : {}),
+        instrument_type: quote.quoteType || null,
+        symbol: quote.symbol || symbol,
+        currency: quote.currency || null,
+        is_demo: quote.is_demo === true || quote.isDemo === true,
+        stale: quote.stale === true || quote.meta?.stale === true,
+        retrieved_at: quote.retrievedAt || quote.meta?.retrievedAt || null,
     };
 }
 
 async function getHybridQuote(symbol, { alpacaSource, yfinanceSource }) {
     try {
-        const alpacaQuote = normalizeQuote(await alpacaSource(symbol), 'alpaca');
+        const alpacaQuote = normalizeQuote(await alpacaSource(symbol), 'alpaca', symbol);
         if (alpacaQuote) return alpacaQuote;
     } catch { /* fall through to research-data compatibility source */ }
 
     try {
         const yfinanceQuote = await yfinanceSource(symbol);
-        if (yfinanceQuote?.isDemo === true) return normalizeUnavailable();
-        return normalizeQuote(yfinanceQuote, 'yfinance') || normalizeUnavailable();
+        if (yfinanceQuote?.isDemo === true || yfinanceQuote?.is_demo === true || yfinanceQuote?.meta?.isDemo === true) return normalizeUnavailable();
+        return normalizeQuote(yfinanceQuote, 'yfinance', symbol) || normalizeUnavailable();
     } catch {
         return normalizeUnavailable();
     }
@@ -123,7 +126,7 @@ async function getDefaultHybridQuote(symbol) {
         alpacaSource,
         yfinanceSource: async (ticker) => {
             const info = await pybridge.getStockInfo(ticker);
-            return { ...info?.data, ...(info?.meta?.stale ? { stale: true } : {}) };
+            return { ...info?.data, meta:info?.meta, ...(info?.meta?.stale ? { stale: true } : {}) };
         },
     });
 }

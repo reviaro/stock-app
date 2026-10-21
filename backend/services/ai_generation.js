@@ -3,10 +3,18 @@ const { generateText, streamText, pipeUIMessageStreamToResponse } = require('ai'
 const UNAVAILABLE = 'AI provider unavailable. Check the configured model, API key, and provider quota.';
 
 async function generateWithModels(models, options) {
-  for (const { model, providerOptions } of models) {
+  const {onAudit, ...request} = options;
+  for (const { model, providerOptions, label } of models) {
+    let generated=false;
     try {
-      return await generateText({ ...options, model, providerOptions });
+      await onAudit?.({model:label||model.modelId,event:'request',detail:{system:request.system,prompt:request.prompt,messages:request.messages}});
+      const result=await generateText({ ...request, model, providerOptions });
+      generated=true;
+      await onAudit?.({model:label||model.modelId,event:'result',detail:{text:result.text,steps:result.steps,usage:result.usage}});
+      result.modelLabel=label||model.modelId;
+      return result;
     } catch {
+      if(generated || request.tools)throw new Error(UNAVAILABLE);
       // Provider errors may contain request data; don't expose them to the client.
     }
   }
@@ -14,14 +22,20 @@ async function generateWithModels(models, options) {
 }
 
 async function streamWithModels(res, models, options) {
-  for (const { model, providerOptions } of models) {
+  const {onAudit, ...request} = options;
+  for (const { model, providerOptions, label } of models) {
     const controller = new AbortController();
     const abort = () => controller.abort();
     res.once('close', abort);
     let reader;
     let committed = false;
     try {
-      const result = streamText({ ...options, model, providerOptions, abortSignal: controller.signal,
+      await onAudit?.({model:label||model.modelId,event:'request',detail:{system:request.system,messages:request.messages}});
+      const result = streamText({ ...request, model, providerOptions, abortSignal: controller.signal,
+        onStepFinish:async step=>{
+          await onAudit?.({model:label||model.modelId,event:'step',detail:{text:step.text,toolCalls:step.toolCalls,toolResults:step.toolResults,finishReason:step.finishReason}});
+          await request.onStepFinish?.(step);
+        },
         onError: () => {},
       });
       reader = result.toUIMessageStream({ onError: () => UNAVAILABLE }).getReader();
@@ -37,6 +51,7 @@ async function streamWithModels(res, models, options) {
       }
       // Never replay a conversation after text or tool input starts: a tool can
       // change simulator state, and a retry could execute the intention twice.
+      if(!res.headersSent)res.setHeader('X-AI-Model',label||model.modelId);
       committed = true;
       await pipeUIMessageStreamToResponse({ response: res, stream: new ReadableStream({
         async pull(controller) {

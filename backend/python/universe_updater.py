@@ -4,8 +4,11 @@ import pandas as pd
 import os
 import time
 import math
+import hashlib
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
 from yf_wrapper import _normalize_bars
 from database_path import get_database_path
 
@@ -50,54 +53,39 @@ def calculate_weighted_performance(closes):
     return score if math.isfinite(score) else None
 
 def update_universe_cache():
-    DB_PATH = get_database_path()
-    
-    _log(f"[universe_updater] Starting cache update for {len(SP500_TOP100)} tickers...")
-    
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        count = 0
-        for ticker in SP500_TOP100:
-            try:
-                # Use yfinance to get 1y history
-                # auto_adjust=True for dividend/split adjusted prices
-                stock = yf.Ticker(ticker)
-                hist = stock.history(period='1y', interval='1d', auto_adjust=True, timeout=10)
-                hist = _normalize_bars(hist)
-                
-                if len(hist) < 252:
-                    # Try to get slightly more data if 1y is just short of 252 days due to holidays
-                    hist = stock.history(period='2y', interval='1d', auto_adjust=True, timeout=10)
-                    hist = _normalize_bars(hist)
-                
-                if len(hist) < 252:
-                    _log(f"[universe_updater] Skipping {ticker}: Insufficient data ({len(hist)} days)")
-                    continue
-                
-                closes = hist['Close'].tolist()
-                weighted_score = calculate_weighted_performance(closes)
-                
-                if weighted_score is not None and math.isfinite(weighted_score):
-                    cursor.execute(
-                        "INSERT OR REPLACE INTO universe_cache (symbol, weighted_score, updated_at) VALUES (?, ?, datetime('now'))",
-                        (ticker, weighted_score)
-                    )
-                    count += 1
-                
-                # Respect rate limits
-                time.sleep(0.1)
-                
-            except Exception as e:
-                _log(f"[universe_updater] Failed to update {ticker}: {str(e)}")
-        
+    """Collect a coherent cohort before replacing the prior cache atomically."""
+    now = datetime.now(timezone.utc)
+    version = 'custom-large-cap-' + hashlib.sha256(','.join(sorted(SP500_TOP100)).encode()).hexdigest()[:12]
+    if not SP500_TOP100:
+        return {'count':0,'requested':0,'asOf':now.isoformat(),'universe':version}
+    def load(ticker):
+        try:
+            history = _normalize_bars(yf.Ticker(ticker).history(period='2y', interval='1d', auto_adjust=True, timeout=10))
+            if history is None or len(history) < 252:
+                return None
+            event = history.index[-1].to_pydatetime()
+            if event.tzinfo is None:
+                event = event.replace(tzinfo=timezone.utc)
+            if (now-event).total_seconds() > 96*3600 or (event-now).total_seconds() > 60:
+                return None
+            score = calculate_weighted_performance(history['Close'].tolist())
+            return (ticker, score, now.isoformat(), event.date().isoformat(), version) if score is not None else None
+        except Exception:
+            return None
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        rows = [row for row in pool.map(load, SP500_TOP100) if row]
+    if rows:
+        cohort_date=Counter(row[3] for row in rows).most_common(1)[0][0]
+        rows=[row for row in rows if row[3]==cohort_date]
+    if len(rows) < max(min(10,len(SP500_TOP100)), math.ceil(len(SP500_TOP100)*.8)):
+        raise RuntimeError('Insufficient coherent universe coverage; previous cache retained')
+    with sqlite3.connect(get_database_path()) as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute('DELETE FROM universe_cache')
+        conn.executemany('INSERT INTO universe_cache(symbol,weighted_score,updated_at,price_date,universe_version) VALUES(?,?,?,?,?)', rows)
         conn.commit()
-        conn.close()
-        _log(f"[universe_updater] Updated {count}/{len(SP500_TOP100)} tickers")
-        
-    except Exception as e:
-        _log(f"[universe_updater] Database error: {str(e)}")
+    _log(f'[universe_updater] Refreshed {len(rows)}/{len(SP500_TOP100)} custom large-cap symbols')
+    return {'count': len(rows), 'requested': len(SP500_TOP100), 'asOf': now.isoformat(), 'universe': version}
 
 if __name__ == "__main__":
     update_universe_cache()

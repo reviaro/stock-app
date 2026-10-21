@@ -1,5 +1,6 @@
 import type { UIMessagePart, UIDataTypes, UITools } from 'ai'
 import { getToolName } from 'ai'
+import { ResearchEvidencePanel, type ResearchPacket } from '@/components/ResearchEvidencePanel'
 import { CANSLIMScorecard } from '@/components/CANSLIMScorecard'
 import { StockChart } from '@/components/StockChart'
 
@@ -64,6 +65,11 @@ export function ToolRenderer({ toolPart }: ToolRendererProps) {
     const symbol = input?.symbol && typeof input.symbol === 'string' ? input.symbol : undefined;
 
     switch (toolName) {
+      case 'getResearchEvidence': {
+        const packet = output as ResearchPacket | undefined
+        if (packet?.id && packet.contentHash && packet.data && Array.isArray(packet.data.news) && packet.provenance && Array.isArray(packet.blockers)) return <ResearchEvidencePanel symbol={packet.symbol} snapshot={packet} />
+        return <p className="text-xs text-muted-foreground">Research evidence is unavailable.</p>
+      }
       case 'getCanslimAnalysis':
         // CANSLIMScorecard renders the AI's requested symbol, or falls back to selectedTicker
         return (

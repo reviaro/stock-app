@@ -12,7 +12,7 @@ let generationFailure = false;
 const assistant = new MockLanguageModelV3({
   doGenerate: async () => {
     if (generationFailure) throw new Error('PRIVATE_PROVIDER_DETAIL');
-    return { content: [{ type: 'text', text: '{"thesis":"Sample memo"}' }], finishReason: { unified: 'stop', raw: 'stop' }, usage, warnings: [] };
+    return { content: [{ type: 'text', text: '{"thesis":"Sample memo","fair_value_low":9999,"buy_below":8888}' }], finishReason: { unified: 'stop', raw: 'stop' }, usage, warnings: [] };
   },
   doStream: async () => ({ stream: new ReadableStream({ start(c) {
     for (const chunk of [{ type: 'text-start', id: 'txt' }, { type: 'text-delta', id: 'txt', delta: 'Sample answer' }, { type: 'text-end', id: 'txt' }, { type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage }]) c.enqueue(chunk);
@@ -35,7 +35,8 @@ Module._load = function(request, parent, isMain) {
     clearChatHistory: async () => {},
   };
   if (request.includes('pybridge')) return Object.fromEntries(['getStockInfo', 'getQualityMetrics', 'getTechnicalIndicators', 'getNews'].map(k => [k, async () => ({})]));
-  if (request === '../services/ai_context') return { fetchStockContext: async () => ({ symbol: 'MSFT' }) };
+  if (request.endsWith('research_store')) return { audit:async()=>{} };
+  if (request === '../services/ai_context') return { fetchStockContext: async () => ({ symbol: 'MSFT', memo:{thesis:'Sample'} }) };
   return originalLoad.apply(this, arguments);
 };
 const router = require('../routes/ai');
@@ -107,4 +108,10 @@ test('missing configuration rejects every generation endpoint before reading con
     const clear = await fetch(origin + '/api/ai/history', { method: 'DELETE' });
     assert.equal(clear.status, 200);
   } finally { badConfiguration = false; }
+});
+
+test('memo drafts discard unsupported numeric targets from model output',async()=>{
+  const response=await fetch(origin+'/api/ai/memo-draft',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({symbol:'TEST'})});
+  assert.equal(response.status,200);const body=await response.json();
+  assert.equal(body.data.fair_value_low,null);assert.equal(body.data.buy_below,null);
 });

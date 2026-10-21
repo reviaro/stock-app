@@ -31,7 +31,8 @@ const SUGGESTED_PROMPTS = [
  * - `status` ('ready' | 'submitted' | 'streaming' | 'error') instead of `isLoading`.
  */
 export function ChatPanel() {
-  const { messages, setMessages, sendMessage, isLoading, stop, error } = useFinancialAgent()
+  const { messages, setMessages, sendMessage, isLoading, stop, error, modelLabel } = useFinancialAgent()
+  const [allowPaperTrading, setAllowPaperTrading] = useState(false)
   const [inputValue, setInputValue] = useState('')
   const [mode, setMode] = useState<ModeName>('free')
   const [modeInputs, setModeInputs] = useState<ModeInputs>({})
@@ -51,7 +52,7 @@ export function ChatPanel() {
   function handleSend() {
     const text = inputValue.trim()
     if (!text || isLoading) return
-    sendMessage(text, { mode, inputs: modeInputs })
+    sendMessage(text, { mode, inputs: modeInputs, allowPaperTrading })
     setInputValue('')
   }
 
@@ -135,7 +136,7 @@ export function ChatPanel() {
               variant="ghost"
               size="sm"
               className="h-8 px-2 text-muted-foreground hover:text-destructive"
-              onClick={() => setMessages([])}
+              onClick={() => { setMessages([]); setAllowPaperTrading(false) }}
               title="Clear conversation"
               aria-label="Clear conversation"
             >
@@ -146,6 +147,10 @@ export function ChatPanel() {
       </CardHeader>
 
       <CardContent className="flex flex-col flex-1 overflow-hidden p-3 gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+          <label className="flex items-center gap-2"><input type="checkbox" checked={allowPaperTrading} disabled={isLoading} onChange={e => setAllowPaperTrading(e.target.checked)} />Allow paper trades in this conversation</label>
+          {modelLabel && <span>Model: {modelLabel}</span>}
+        </div>
         <ModeInputsPanel mode={mode} inputs={modeInputs} onChange={setModeInputs} onRun={runMode} disabled={isLoading} />
         {/* Message list */}
         <div
