@@ -714,6 +714,9 @@ function initDb() {
                     return;
                 }
 
+                try { await require('../services/alpaca_live_store').init(); }
+                catch (liveMigrationError) { reject(liveMigrationError); return; }
+
                 // Verify the schema this build actually needs before declaring success:
                 // serialized db.run fire-and-forget callbacks can swallow failures and
                 // let initDb resolve over a partially migrated database. The setup

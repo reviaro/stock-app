@@ -52,6 +52,7 @@ function createAuth({
     apiToken = '',
     simulatorTokens = [],
     alpacaDayTradingToken = '',
+    alpacaLiveInvestingToken = '',
     secureCookie = false,
     allowLoopback = true,
     sessionTtlSeconds = SESSION_TTL_SECONDS,
@@ -74,8 +75,11 @@ function createAuth({
     if (alpacaDayTradingToken && (typeof alpacaDayTradingToken !== 'string' || alpacaDayTradingToken.length < 32)) {
         throw new Error('Alpaca Day Trading credential requires a token of at least 32 characters');
     }
+    if (alpacaLiveInvestingToken && (typeof alpacaLiveInvestingToken !== 'string' || alpacaLiveInvestingToken.length < 32)) {
+        throw new Error('Live investing credential requires a token of at least 32 characters');
+    }
     const tokens = simulatorTokens.map((entry) => entry.token);
-    const allScopedTokens = [...tokens, ...(alpacaDayTradingToken ? [alpacaDayTradingToken] : [])];
+    const allScopedTokens = [...tokens, ...(alpacaDayTradingToken ? [alpacaDayTradingToken] : []), ...(alpacaLiveInvestingToken ? [alpacaLiveInvestingToken] : [])];
     if (new Set(allScopedTokens).size !== allScopedTokens.length || allScopedTokens.includes(apiToken)) {
         throw new Error('Scoped credentials must be unique and distinct from the general API token');
     }
@@ -195,6 +199,10 @@ function createAuth({
                 req.auth = { type: 'bearer', role: 'alpaca-day-trading-agent', username: 'alpaca-day-trading-agent' };
                 return next();
             }
+            if (alpacaLiveInvestingToken && safeEqualText(token, alpacaLiveInvestingToken)) {
+                req.auth = { type: 'bearer', role: 'alpaca-long-term-agent', username: 'live-investing-agent' };
+                return next();
+            }
             if (bearerIsValid(req)) {
                 req.auth = { type: 'bearer', role: 'reader', username };
                 return next();
@@ -281,6 +289,7 @@ function createAuthFromEnv(env = process.env) {
         apiToken: env.STOCK_DASHBOARD_API_TOKEN || '',
         simulatorTokens: JSON.parse(env.STOCK_DASHBOARD_SIMULATOR_TOKENS || '[]'),
         alpacaDayTradingToken: env.ALPACA_DAY_TRADING_ENTRY_TOKEN || '',
+        alpacaLiveInvestingToken: env.STOCK_DASHBOARD_LIVE_INVESTING_TOKEN || '',
         secureCookie: env.STOCK_DASHBOARD_SECURE_COOKIE === '1',
         allowLoopback: env.STOCK_DASHBOARD_ALLOW_LOOPBACK !== '0',
         publicOrigin: env.STOCK_DASHBOARD_PUBLIC_ORIGIN || '',

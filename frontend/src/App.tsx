@@ -8,10 +8,11 @@ const Dashboard = lazy(() => import('@/components/Dashboard').then((module) => (
 const SimulatorPage = lazy(() => import('@/pages/SimulatorPage').then((module) => ({ default: module.SimulatorPage })))
 const OpportunitiesPage = lazy(() => import('@/pages/OpportunitiesPage').then((module) => ({ default: module.OpportunitiesPage })))
 const AlpacaPaperPage = lazy(() => import('@/pages/AlpacaPaperPage').then((module) => ({ default: module.AlpacaPaperPage })))
+const AlpacaLivePage = lazy(() => import('@/pages/AlpacaLivePage').then((module) => ({ default: module.AlpacaLivePage })))
 const StrategyLabPage = lazy(() => import('@/pages/StrategyLabPage').then((module) => ({ default: module.StrategyLabPage })))
 const PortfolioLabPage = lazy(() => import('@/pages/PortfolioLabPage').then((module) => ({ default: module.PortfolioLabPage })))
 
-type Tab = 'dashboard' | 'opportunities' | 'simulator' | 'research-lab' | 'portfolio-lab' | 'alpaca-paper'
+type Tab = 'dashboard' | 'opportunities' | 'simulator' | 'research-lab' | 'portfolio-lab' | 'alpaca-paper' | 'alpaca-live'
 type AuthState =
   | { status: 'loading' }
   | { status: 'guest'; error?: string }
@@ -24,6 +25,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'research-lab', label: 'Research Lab' },
   { id: 'portfolio-lab', label: 'Portfolio Lab' },
   { id: 'alpaca-paper', label: 'Alpaca Paper' },
+  { id: 'alpaca-live', label: 'Long-Term Live' },
 ]
 
 function LoginPage({ onAuthenticated, initialError }: {
@@ -205,7 +207,7 @@ function App() {
                     ? <StrategyLabPage />
                     : activeTab === 'portfolio-lab'
                       ? <PortfolioLabPage />
-                      : <AlpacaPaperPage /> }
+                      : activeTab === 'alpaca-live' ? <AlpacaLivePage /> : <AlpacaPaperPage /> }
           </Suspense>
         </motion.div>
       </AnimatePresence>

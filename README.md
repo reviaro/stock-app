@@ -43,13 +43,15 @@ flowchart LR
     AI --> Tools["Quotes, technicals, news, quality, risk and simulator tools"]
     Tools --> API
     API --> Paper["Alpaca paper API"]
+    API --> Live["Separate, gated Alpaca live investing API"]
 ```
 
 ## Safety design, with evidence
 
 | Boundary | Implementation | Enforcing tests |
 |---|---|---|
-| Broker configuration rejects the live Alpaca endpoint. | [Paper client](backend/services/alpaca_paper_service.js) | [Non-paper endpoint rejection](backend/test/alpaca_paper_service.test.js) |
+| The paper broker client rejects the live Alpaca endpoint. | [Paper client](backend/services/alpaca_paper_service.js) | [Non-paper endpoint rejection](backend/test/alpaca_paper_service.test.js) |
+| Live investing uses separate credentials, account binding, reviewed allocation limits, durable order intents and operator-controlled execution mode. | [Live service](backend/services/alpaca_live_investing.js), [capabilities](backend/services/api_capabilities.js) | [Order safety](backend/test/alpaca_live_investing.test.js), [HTTP authorization](backend/test/alpaca_live_routes.test.js) |
 | Manual paper-order entry is disabled by default. | [Order route](backend/routes/alpaca_paper.js) | [No broker request while disabled](backend/test/alpaca_paper_order_submission.test.js) |
 | The v2 entry gate checks the kill switch, reconciliation, and monitor health; raw orders cannot bypass v2 account ownership. | [Entry gate](backend/services/alpaca_day_trade_v2_execution.js), [raw order gate](backend/routes/alpaca_paper.js) | [Entry refusals](backend/test/alpaca_day_trade_v2_execution.test.js), [account-wide route gate](backend/test/alpaca_day_trading_v2_routes.test.js) |
 | Simulator API tokens are scoped to one sleeve and its allowed operations. | [Capabilities](backend/services/api_capabilities.js) | [Cross-sleeve and operation denials](backend/test/simulator_capabilities.test.js) |
@@ -105,14 +107,18 @@ for the commands, including the separate Portfolio Lab Python checks.
   Day Trading), each with its own cash, holdings, trade history, FIFO tax
   preview (short/long-term split by your bracket), performance review, and CSV
   export. The AI agent can trade in either sleeve via `account_id`.
+- **Long-Term Live** — a separate Alpaca stocks/ETF workspace with an editable
+  simulator-allocation import, protected external holdings, cash and position
+  limits, individual order confirmation or scoped strategy-agent execution,
+  broker fill reconciliation, and explicit ownership review.
 
 ## Safety and scope
 
 This project is educational and research software, not financial advice. It
-does not guarantee returns. The broker integration supports Alpaca paper
-trading only: the backend rejects the live trading endpoint, and paper-order
-submission remains disabled unless its independent enablement controls are
-explicitly configured.
+does not guarantee returns. Paper and live broker integrations use separate
+credentials and fixed endpoints. Both start with order submission disabled.
+Live investing additionally starts paused and unfunded; its account binding,
+allocation limits and execution mode must be reviewed before activation.
 
 Use only your own locally supplied credentials. Never commit API keys, session
 secrets, runtime databases, portfolio exports, logs, or other personal
@@ -179,6 +185,10 @@ node server.js         # http://localhost:3002
 | `PORTFOLIO_LAB_TIMEOUT_MS` | Maximum Portfolio Lab worker runtime; defaults to 180 seconds |
 | `PORTFOLIO_LAB_MAX_OUTPUT_BYTES` | Combined Portfolio Lab worker output limit; defaults to 10 MiB |
 | `ALPACA_API_KEY` / `ALPACA_API_SECRET` | Optional Alpaca **paper** credentials; never commit real values |
+| `ALPACA_LIVE_API_KEY` / `ALPACA_LIVE_SECRET_KEY` | Optional separate Alpaca **live** credentials; server-side only |
+| `ALPACA_LIVE_ACCOUNT_ID` | Expected live account ID; every broker operation checks this identity |
+| `ALPACA_LIVE_TRADING_ENABLED` | Explicit server submission gate; defaults to false |
+| `STOCK_DASHBOARD_LIVE_INVESTING_TOKEN` | Optional distinct 32+ character credential for a scoped long-term strategy agent |
 | `ALPACA_TRADING_BASE_URL` | Must remain `https://paper-api.alpaca.markets`; live endpoint is rejected |
 | `ALPACA_PAPER_ORDER_ENTRY_ENABLED` | Paper-order master switch; disabled unless explicitly set to `true` |
 | `ALPACA_PAPER_ORDER_ENTRY_TOKEN` | Independent token required by the paper-order and reconciliation routes |
@@ -346,6 +356,61 @@ market-data requests. Install the Python environments above before running them.
 To run one backend file, use `npm test -- test/portfolio_ledger.test.js` from
 `backend/`. The launcher allows two minutes per test file and twenty minutes for
 the suite. CI runs the backend, frontend, and Portfolio Lab checks on pull requests.
+
+## Long-Term Live investing
+
+The **Long-Term Live** tab can be configured before adding broker credentials.
+Use the blank settings in `backend/.env.example`; real values belong only in
+the server environment. Live requests use `https://api.alpaca.markets` and never
+fall back to the paper keys. Bind the expected live account ID, review the
+capital ceiling and target weights, then deliberately enable the server gate
+and unpause the UI policy. Automatic mode requires its own activation phrase.
+Pausing prevents new orders; use the order controls to cancel existing app orders.
+
+Importing account 1's simulator allocation creates an editable weights draft.
+Review every symbol: mutual funds are not automatically mapped to ETFs.
+Simulator DRIP transactions, hypothetical fills and tax estimates never become
+live transactions. Live cash income remains at Alpaca; allocation reviews can
+redeploy available cash within the approved capital ceiling. The app does not
+modify Alpaca's dividend-election settings or initiate cash transfers.
+
+Existing holdings are protected until an operator explicitly reviews ownership
+while trading is paused and all orders are settled. Quantity discrepancies,
+including external trades or corporate actions, block further trading until
+reviewed. An uncertain submission remains reserved until broker reconciliation
+finds its unique client order ID; it is never retried with a fresh order ID.
+
+A strategy agent uses a separate bearer credential supplied through
+`STOCK_DASHBOARD_LIVE_INVESTING_TOKEN`. It can read research, simulator account 1,
+and `GET /api/alpaca-live/overview`; it cannot change policy, adopt holdings,
+cancel orders, or access day-trading submissions. Read the current `version`
+and policy from the overview before submitting a decision:
+
+```json
+{
+  "account_id": 1,
+  "policyVersion": 1,
+  "decisionKey": "unique-allocation-review-id",
+  "symbol": "AAPL",
+  "side": "buy",
+  "reason": "Analysis supporting this adjustment within the approved allocation."
+}
+```
+
+Send that JSON to `POST /api/alpaca-live/decisions`. Use the actual current
+policy version and a unique key for each distinct decision. Shares and limit
+prices are calculated by the server from approved allocation drift, fresh
+Alpaca IEX bid/ask evidence and cash limits; agents cannot supply them. In
+confirmation mode, review the decision in the UI and confirm a fresh preview.
+In automatic mode, an eligible decision may submit one DAY limit order
+immediately. This mode responds to agent requests and does not run a timer.
+Read the overview to reconcile and wait for a terminal order state before the
+next decision. Accepted and partially filled orders are not completed trades.
+
+Implementation references: [Alpaca orders](https://docs.alpaca.markets/us/docs/orders-at-alpaca),
+[fractional trading](https://docs.alpaca.markets/docs/fractional-trading), and
+the [official JavaScript SDK sources](https://github.com/alpacahq/alpaca-trade-api-js).
+The app keeps its existing patched HTTP transport and does not retry order POSTs.
 
 ## Notes
 
