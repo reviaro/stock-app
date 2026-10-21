@@ -17,6 +17,13 @@ function authorizeApiRequest(req, res, next) {
     if (principal?.role === 'operator' || principal?.type === 'session') return next();
     if (!principal) return deny('authenticated capability is required');
     const read = READ_METHODS.has(req.method);
+    if (principal.role === 'alpaca-long-term-agent') {
+        if (read && (RESEARCH_PATH.test(req.path) || req.path === '/alpaca-live/overview')) return next();
+        if (read && SIM_READ.test(req.path) && accountId(req.query?.account_id) === 1) return next();
+        if (req.method === 'POST' && req.path === '/alpaca-live/decisions' && req.body?.account_id === 1) return next();
+        return deny('this credential can only read research and long-term data or request guarded live-investing decisions');
+    }
+    if (req.path === '/alpaca-live' || req.path.startsWith('/alpaca-live/')) return deny('live investing requires operator login or its dedicated credential');
     if (principal.role === 'alpaca-day-trading-agent') {
         // v2 strategy lab only (v1 is retired), and only for the account-2 sleeve.
         const scopedMutation = req.method === 'POST' && (

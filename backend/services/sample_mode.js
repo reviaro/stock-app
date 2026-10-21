@@ -68,7 +68,7 @@ function validateSampleEnvironment(env = process.env) {
         throw new Error('Sample mode requires a local 127.0.0.1 listener without a proxy');
     }
     if (Object.keys(env).some((key) => key.startsWith('ALPACA_') && env[key])
-        || env.STOCK_DASHBOARD_API_TOKEN || env.STOCK_DASHBOARD_SIMULATOR_TOKENS
+        || env.STOCK_DASHBOARD_API_TOKEN || env.STOCK_DASHBOARD_SIMULATOR_TOKENS || env.STOCK_DASHBOARD_LIVE_INVESTING_TOKEN
         || env.ENABLE_LEDGER_MIGRATION === '1') {
         throw new Error('Sample mode refuses broker credentials, automation tokens and legacy migration');
     }
