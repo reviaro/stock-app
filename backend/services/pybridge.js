@@ -15,8 +15,9 @@ function createPythonCaller({
     scriptPath = SCRIPT_PATH,
     timeoutMs = Number(process.env.PYTHON_TIMEOUT_MS) || 45_000,
     maxOutputBytes = Number(process.env.PYTHON_MAX_OUTPUT_BYTES) || 5 * 1024 * 1024,
+    maxConcurrent = 4, maxQueue = 32, queueTimeoutMs = 10_000,
 } = {}) {
-    return function callPython(request) {
+    function runRequest(request) {
         return new Promise((resolve, reject) => {
             const python = spawnImpl(pythonPath, [scriptPath], {
                 stdio: ['pipe', 'pipe', 'pipe'],
@@ -26,12 +27,13 @@ function createPythonCaller({
             let outputBytes = 0;
             let settled = false;
 
+            const requestTimeoutMs = request.action==='update_universe' ? Math.max(timeoutMs,300_000) : timeoutMs;
             const timer = setTimeout(() => {
                 if (settled) return;
                 settled = true;
                 python.kill('SIGKILL');
-                reject(new Error(`Python request timed out after ${timeoutMs}ms`));
-            }, timeoutMs);
+                reject(new Error(`Python request timed out after ${requestTimeoutMs}ms`));
+            }, requestTimeoutMs);
 
             function settle(callback, value) {
                 if (settled) return;
@@ -72,10 +74,27 @@ function createPythonCaller({
             python.stdin.write(JSON.stringify(request));
             python.stdin.end();
         });
+    }
+    let active=0;const queue=[];
+    function pump(){
+        while(active<maxConcurrent&&queue.length){
+            const entry=queue.shift();clearTimeout(entry.timer);active++;
+            runRequest(entry.request).then(entry.resolve,entry.reject).finally(()=>{active--;pump();});
+        }
+    }
+    return function callPython(request){
+        if(queue.length>=maxQueue)return Promise.reject(new Error('Research request queue is full'));
+        return new Promise((resolve,reject)=>{
+            const entry={request,resolve,reject};
+            entry.timer=setTimeout(()=>{const index=queue.indexOf(entry);if(index>=0)queue.splice(index,1);reject(new Error('Research request queue timed out'));},queueTimeoutMs);
+            queue.push(entry);pump();
+        });
     };
 }
 
 const callPython = createPythonCaller();
+const {createSecSource}=require('./sec_fundamentals');
+const {createNewsSource}=require('./research_news');
 
 function createPybridge({
     callPython: runPython = callPython,
@@ -83,6 +102,7 @@ function createPybridge({
     staleQuoteTtlMs = Number(process.env.MARKET_QUOTE_STALE_TTL_MS || 15 * 60_000),
     batchDelayMs = Number(process.env.MARKET_QUOTE_BATCH_DELAY_MS || 15),
     marketTtlMs = Number(process.env.MARKET_SUMMARY_CACHE_TTL_MS || 60_000),
+    secSource = createSecSource(), newsSource = createNewsSource(),
 } = {}) {
     const stockInfoLoader = createBatchingStockInfoLoader({
         ttlMs: quoteTtlMs,
@@ -93,13 +113,39 @@ function createPybridge({
             if (result?.status !== 'success' || !result.data) {
                 throw new Error(result?.error || 'Batch market data request failed');
             }
-            return result.data;
+            return Object.fromEntries(Object.entries(result.data).map(([symbol,value])=>[symbol,{...value,meta:{source:result.meta?.source||'yfinance',retrievedAt:result.meta?.retrievedAt||new Date().toISOString(),...value.meta}}]));
         },
     });
     const marketCache = createAsyncTtlCache({ ttlMs: marketTtlMs });
     const sectorCache = createAsyncTtlCache({ ttlMs: Math.max(marketTtlMs, 5 * 60_000) });
     const screenerCache = createAsyncTtlCache({ ttlMs: 5 * 60_000 });
+    const researchCache = createAsyncTtlCache({ ttlMs: 5 * 60_000 });
+    async function filings(symbol) { try { return await secSource.get(symbol); } catch { return {status:'error',meta:{source:'sec_edgar',unavailable:true}}; } }
+    async function quality(symbol) {
+        const primary=await filings(symbol);
+        if(primary?.status==='success') {
+            const info=await stockInfoLoader.get(symbol);
+            const result=info?.status==='success'?await runPython({action:'quality_records',symbol,statements:primary.data,info:info.data}):null;
+            if(result?.data?.coveragePct>=60)return result;
+        }
+        const result=await runPython({action:'quality',symbol});
+        return {...result,meta:{...result?.meta,source:'yfinance',primarySourceStatus:primary?.configurationRequired?'configuration_required':primary?.status==='success'?'insufficient_coverage':'unavailable'}};
+    }
 
+    const warming=new Set(),warmQueue=[];let warmActive=0;
+    function warmQuality(symbol){
+        if(warming.has(symbol))return;
+        warming.add(symbol);warmQueue.push(symbol);pumpWarm();
+    }
+    function pumpWarm(){
+        while(warmActive<2&&warmQueue.length){
+            const symbol=warmQueue.shift();warmActive++;
+            researchCache.get('quality:'+symbol,()=>quality(symbol)).catch(()=>{}).finally(()=>{
+                warming.delete(symbol);warmActive--;pumpWarm();
+                if(!warmActive&&!warmQueue.length)setImmediate(()=>screenerCache.clear()).unref();
+            });
+        }
+    }
     return {
         getStockInfo(symbol) {
             return stockInfoLoader.get(symbol);
@@ -108,10 +154,14 @@ function createPybridge({
             return runPython({ action: 'history', symbol, period, interval });
         },
         getCANSlimAnalysis(symbol) {
-            return runPython({ action: 'canslim', symbol });
+            return researchCache.get('canslim:'+symbol,async()=>{
+                const primary=await filings(symbol);
+                const result=await runPython({action:'canslim',symbol,...(primary?.status==='success'?{statements:primary.data}:{})});
+                return {...result,meta:{...result?.meta,fundamentalSource:primary?.status==='success'?'sec_edgar':'yfinance'}};
+            });
         },
         getTechnicalIndicators(symbol) {
-            return runPython({ action: 'technical', symbol });
+            return researchCache.get('technical:'+symbol,()=>runPython({ action: 'technical', symbol }));
         },
         getMarketIndexes() {
             return marketCache.get('indexes', () => runPython({ action: 'indexes' }));
@@ -123,7 +173,11 @@ function createPybridge({
             return marketCache.get('direction', () => runPython({ action: 'market_direction' }));
         },
         getNews(symbol) {
-            return runPython({ action: 'news', symbol });
+            return researchCache.get('news:'+symbol,async()=>{
+                try { const primary=await newsSource.get(symbol);if(primary)return primary; } catch { /* Preserve a labeled research fallback. */ }
+                const result=await runPython({action:'news',symbol});
+                return {...result,meta:{...result?.meta,source:'yfinance',primarySourceStatus:newsSource.configured()?'unavailable':'not_configured'}};
+            });
         },
         getEarningsDate(symbol) {
             return runPython({ action: 'earnings', symbol });
@@ -132,8 +186,10 @@ function createPybridge({
             return sectorCache.get('sectors', () => runPython({ action: 'sectors' }));
         },
         getQualityMetrics(symbol) {
-            return runPython({ action: 'quality', symbol });
+            return researchCache.get('quality:'+symbol,()=>quality(symbol));
         },
+        getFilings(symbol) {return filings(symbol);},
+        getFundResearch(symbol) {return researchCache.get('fund:'+symbol,()=>runPython({action:'fund',symbol}));},
         getScreenerInputs(symbols) {
             const normalized = [...new Set((symbols || [])
                 .map((symbol) => String(symbol).trim().toUpperCase())
@@ -144,6 +200,18 @@ function createPybridge({
                 if (result?.status !== 'success' || !result.data) {
                     throw new Error(result?.error || 'Batch screener data request failed');
                 }
+                for(const row of Object.values(result.data))for(const key of ['stock','quality','technical'])if(row[key])row[key]={...row[key],meta:{source:result.meta?.source||'yfinance',retrievedAt:result.meta?.retrievedAt||new Date().toISOString(),...row[key].meta}};
+                if(secSource.configured()) {
+                    for(const symbol of normalized){
+                        const cached=researchCache.peek('quality:'+symbol);
+                        if(cached)result.data[symbol].quality=cached;
+                        else{
+                            warmQuality(symbol);
+                            const row=result.data[symbol].quality;
+                            if(row)result.data[symbol].quality={...row,meta:{...row.meta,primarySourceStatus:'loading'}};
+                        }
+                    }
+                }
                 return result.data;
             });
         },
@@ -152,6 +220,7 @@ function createPybridge({
             marketCache.clear();
             sectorCache.clear();
             screenerCache.clear();
+            researchCache.clear();
         },
     };
 }

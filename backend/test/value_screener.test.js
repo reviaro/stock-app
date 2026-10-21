@@ -56,3 +56,17 @@ test('value screener route requests one batch for the entire watchlist', async (
     assert.equal(payload.status, 'success');
     assert.equal(payload.data.length, 2);
 });
+
+test('missing, blank and negative P/E never produce a full-confidence candidate', () => {
+    for (const missing of [null,undefined,'',true,-5,0]) {
+        const result=scoreCandidate({stock:{price:100,forwardPE:missing,peRatio:missing,debtToEquity:null},quality:{composite:90},technical:{current:{rsi:50}}});
+        assert.notEqual(result.action,'Candidate');
+        assert.ok(result.confidence<=50);
+        assert.ok(result.red_flags.includes('leverage data unavailable'));
+    }
+});
+test('ETFs are not ranked with corporate valuation and leverage thresholds', () => {
+    const result=scoreCandidate({stock:{quoteType:'ETF',forwardPE:10,debtToEquity:0,price:100},quality:{composite:90}});
+    assert.equal(result.action,'Research');
+    assert.equal(result.confidence,0);
+});

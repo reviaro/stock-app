@@ -99,6 +99,7 @@ function createApp({ auth = createAuthFromEnv(), env = process.env } = {}) {
     app.use('/api/transactions', transactionsRoutes);
     app.use('/api/simulator', simulatorRoutes);
     app.use('/api/research-notes', researchNotesRoutes);
+    app.use('/api/research', require('./routes/research').createResearchRouter());
     app.use('/api/screener', screenerRoutes);
     app.use('/api/alpaca-paper', alpacaPaperRoutes);
     app.use('/api/alpaca-live', createLiveRouter());

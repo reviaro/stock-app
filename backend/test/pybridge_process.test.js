@@ -59,3 +59,21 @@ test('python caller settles only once when a spawn error is followed by close', 
 
     await assert.rejects(result, /spawn failed/i);
 });
+
+test('python research concurrency is bounded and queued work starts only after a process exits',async()=>{
+    const children=[];
+    const call=createPythonCaller({maxConcurrent:1,maxQueue:2,spawnImpl:()=>{const c=fakeChild();children.push(c);return c;}});
+    const first=call({action:'info'}),second=call({action:'news'});
+    assert.equal(children.length,1);
+    children[0].stdout.emit('data',Buffer.from('{"status":"success"}'));children[0].emit('close',0);
+    await first;await new Promise(r=>setImmediate(r));assert.equal(children.length,2);
+    children[1].stdout.emit('data',Buffer.from('{"status":"success"}'));children[1].emit('close',0);
+    assert.equal((await second).status,'success');
+});
+test('queued research times out without spawning or killing an unrelated process',async()=>{
+    const child=fakeChild();let spawned=0;
+    const call=createPythonCaller({maxConcurrent:1,queueTimeoutMs:5,spawnImpl:()=>{spawned++;return child;}});
+    const first=call({action:'info'});const second=call({action:'news'});
+    await assert.rejects(second,/queue timed out/);assert.equal(spawned,1);assert.equal(child.killedWith,null);
+    child.stdout.emit('data',Buffer.from('{"status":"success"}'));child.emit('close',0);await first;
+});

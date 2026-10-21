@@ -64,9 +64,17 @@ function initDb() {
                 CREATE TABLE IF NOT EXISTS universe_cache (
                     symbol TEXT PRIMARY KEY,
                     weighted_score REAL NOT NULL,
+                    price_date TEXT,
+                    universe_version TEXT,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             `);
+
+            db.all('PRAGMA table_info(universe_cache)', (err, columns) => {
+                if (err) return;
+                const names=new Set(columns.map(c=>c.name));
+                for(const name of ['price_date','universe_version']) if(!names.has(name))db.run('ALTER TABLE universe_cache ADD COLUMN '+name+' TEXT');
+            });
 
             db.run(`
                 CREATE TABLE IF NOT EXISTS stock_snapshots (
@@ -648,6 +656,7 @@ function initDb() {
 
             for (const sql of require('../services/simulator_controls').schema) db.run(sql);
             for (const sql of require('../services/strategy_evaluation').schema) db.run(sql);
+            for (const sql of require('../services/research_store').schema) db.run(sql);
             db.run(`
                 CREATE INDEX IF NOT EXISTS idx_chat_history_session
                 ON chat_history(session_id, created_at DESC)
@@ -721,7 +730,7 @@ function initDb() {
                 // serialized db.run fire-and-forget callbacks can swallow failures and
                 // let initDb resolve over a partially migrated database. The setup
                 // connection was closed above, so verify on a fresh connection.
-                const REQUIRED_TABLES = ['watchlist', 'simulator_sleeves', 'sim_transactions', 'sim_reinvestment_settings', 'sim_dividends', 'sim_trade_plans',
+                const REQUIRED_TABLES = ['research_packets', 'research_ai_audit', 'research_decision_evidence', 'research_evaluations', 'research_shadow_decisions', 'watchlist', 'simulator_sleeves', 'sim_transactions', 'sim_reinvestment_settings', 'sim_dividends', 'sim_trade_plans',
                     'alpaca_dt_v2_plans', 'alpaca_dt_v2_fills', 'alpaca_dt_v2_events', 'alpaca_dt_v2_monitor_state',
                     'alpaca_dt_v2_observations', 'alpaca_dt_v2_experiments'];
                 const verifyDb = getDb();

@@ -124,8 +124,10 @@ export interface StockSearchResult {
  */
 export interface CANSLIMCriterion {
   name: string
-  score: number
-  status: 'Pass' | 'Fail'
+  score: number | null
+  status: 'Pass' | 'Fail' | 'Unknown'
+  method?: string
+  periods?: string[]
   value?: number
   pricePosition?: number
   volumeRatio?: number
@@ -137,11 +139,15 @@ export interface CANSLIMCriterion {
 export interface CANSLIMAnalysis {
   symbol: string
   generatedAt: string
+  applicable?: boolean
+  notes?: string[]
   overall: {
-    score: number
-    rating: 'Excellent' | 'Good' | 'Average' | 'Poor'
+    score: number | null
+    rating: 'Excellent' | 'Good' | 'Average' | 'Poor' | 'Insufficient evidence' | 'Not applicable'
     passCount: number
     failCount: number
+    unknownCount?: number
+    coveragePct?: number
   }
   criteria: {
     C: CANSLIMCriterion

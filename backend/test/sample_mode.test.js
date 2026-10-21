@@ -152,7 +152,7 @@ sqlite3.connect = guarded_connect
 yf_wrapper.get_rs_rating_from_cache('AAPL')
 universe_updater.SP500_TOP100 = []
 universe_updater.update_universe_cache()
-assert len(calls) == 2
+assert len(calls) == 1
 del os.environ['DB_PATH_OVERRIDE']
 assert os.path.abspath(get_database_path()) == os.path.abspath('database/stocks.db')
 os.environ['DB_PATH_OVERRIDE'] = ''

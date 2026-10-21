@@ -35,9 +35,8 @@ function getAIModels(env = process.env, { fetch = http.fetch } = {}) {
     // Existing local-only installations may have no Google key.
     if (env.GOOGLE_GENERATIVE_AI_API_KEY?.trim() || localFallback === 'false') {
       const google = createGoogleGenerativeAI({ apiKey: key('GOOGLE_GENERATIVE_AI_API_KEY'), fetch });
-      // Preserve the existing Gemini selection for installations with no new settings.
-      add(google(modelId || 'gemini-2.5-flash-preview-04-17'));
-      if (models[0].model.modelId !== 'gemini-2.5-flash') add(google('gemini-2.5-flash'));
+      // Stable default for existing accounts; an explicitly pinned model is never silently substituted.
+      add(google(modelId || 'gemini-2.5-flash'));
     }
   } else if (provider === 'openai' || provider === 'anthropic') {
     if (!modelId) throw new AIConfigurationError(`Set AI_MODEL to a model available in your ${provider} API account.`);
@@ -50,7 +49,7 @@ function getAIModels(env = process.env, { fetch = http.fetch } = {}) {
   }
   // Existing Gemini installs retain the local fallback. Other clouds must opt in;
   // a failed request never silently switches to a different cloud provider.
-  if (provider === 'lmstudio' || localFallback === 'true' || (provider === 'gemini' && localFallback !== 'false')) {
+  if (provider === 'lmstudio' || localFallback === 'true' || (provider === 'gemini' && !env.GOOGLE_GENERATIVE_AI_API_KEY?.trim() && localFallback !== 'false')) {
     const local = createOpenAI({ baseURL: env.LMSTUDIO_BASE_URL || 'http://localhost:1234/v1', apiKey: 'lm-studio', fetch });
     const model = local.chat((provider === 'lmstudio' && modelId) || env.LMSTUDIO_MODEL || 'qwen2.5-7b-instruct');
     models.push({ model, label: `lmstudio:${model.modelId}` });

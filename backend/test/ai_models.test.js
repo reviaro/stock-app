@@ -6,10 +6,10 @@ const { getAIModels } = require('../services/ai_models');
 
 const keys = { GOOGLE_GENERATIVE_AI_API_KEY: 'test-google', OPENAI_API_KEY: 'test-openai', ANTHROPIC_API_KEY: 'test-anthropic' };
 
-test('existing Gemini configuration keeps its model order and local fallback', () => {
+test('Gemini uses a stable pinned model and requires explicit cloud-to-local fallback', () => {
   const models = getAIModels(keys);
-  assert.deepEqual(models.map(m => m.model.modelId), ['gemini-2.5-flash-preview-04-17', 'gemini-2.5-flash', 'qwen2.5-7b-instruct']);
-  assert.equal(models[2].model.provider, 'openai.chat');
+  assert.deepEqual(models.map(m => m.model.modelId), ['gemini-2.5-flash']);
+  assert.equal(getAIModels({...keys,AI_LOCAL_FALLBACK:'true'})[1].model.provider, 'openai.chat');
   assert.equal(getAIModels({ ...keys, AI_MODEL: 'gemini-2.5-flash', AI_LOCAL_FALLBACK: 'false' }).length, 1);
   assert.deepEqual(getAIModels({ LMSTUDIO_MODEL: 'existing-local' }).map(m => m.model.modelId), ['existing-local']);
 });

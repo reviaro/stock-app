@@ -3,7 +3,7 @@
 // Session authentication is the operator boundary. Automation never inherits it
 // from loopback proximity or from the legacy general-purpose bearer token.
 const READ_METHODS = new Set(['GET', 'HEAD']);
-const RESEARCH_PATH = /^\/(?:stock|market|canslim|quality|screener|history|watchlist)(?:\/|$)/;
+const RESEARCH_PATH = /^\/(?:stock|market|canslim|quality|screener|history|watchlist|research)(?:\/|$)/;
 const SIM_READ = /^\/simulator\/(?:accounts|account|holdings|transactions|review|risk-monitor|journal|tax-preview|trade-plans|orders\/[^/]+|risk-policy|performance|runs(?:\/[^/]+)?)(?:\/)?$/;
 
 function accountId(value) {
@@ -20,6 +20,7 @@ function authorizeApiRequest(req, res, next) {
     if (principal.role === 'alpaca-long-term-agent') {
         if (read && (RESEARCH_PATH.test(req.path) || req.path === '/alpaca-live/overview')) return next();
         if (read && SIM_READ.test(req.path) && accountId(req.query?.account_id) === 1) return next();
+        if (req.method==='POST' && /^\/research\/evaluations\/[^/]+\/decisions$/.test(req.path) && req.body?.account_id===1) return next();
         if (req.method === 'POST' && req.path === '/alpaca-live/decisions' && req.body?.account_id === 1) return next();
         return deny('this credential can only read research and long-term data or request guarded live-investing decisions');
     }

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { StrategyLabPage } from './StrategyLabPage'
 
 vi.mock('@/hooks/useStrategyLab', () => ({
@@ -21,7 +22,8 @@ vi.mock('@/hooks/useStrategyLab', () => ({
 
 describe('StrategyLabPage', () => {
   it('shows versioned hypotheses, deterministic evidence gates, and no live execution controls', () => {
-    render(<StrategyLabPage />)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ok:true,json:async()=>({status:'success',data:[]})}))
+    render(<QueryClientProvider client={new QueryClient({defaultOptions:{queries:{retry:false}}})}><StrategyLabPage /></QueryClientProvider>)
     expect(screen.getByRole('heading', { name: 'Strategy Research Lab' })).toBeInTheDocument()
     expect(screen.getByText(/manual evidence is a research record/i)).toBeInTheDocument()
     expect(screen.getAllByText('Quality at a fair price')).toHaveLength(2)

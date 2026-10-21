@@ -15,7 +15,7 @@ export interface LiveOverview {
   cash?: number; equity?: number; cashBuyingPower?: number; accountLabel?: string; marketOpen?: boolean; checkedAt?: string
   positions: { symbol: string; qty: number; price: number; value: number; managedQty: number; unrealizedPnl: number }[]
   orders: LiveOrder[]
-  decisions: { decision_key: string; symbol: string; side: string; reason: string; created_at: string }[]
+  decisions: { decision_key: string; symbol: string; side: string; reason: string; created_at: string; analysis?: { strategyVersion: string; model: string; analyzedAt: string; invalidation: string } | null }[]
 }
 export interface LivePlanRow {
   symbol: string; side: 'buy' | 'sell'; qty: number; limitPrice: number; notional: number

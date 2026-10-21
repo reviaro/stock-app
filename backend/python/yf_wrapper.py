@@ -8,6 +8,8 @@ import json
 import sys
 import argparse
 import math
+import os
+from research_metrics import quality as calculate_quality, number as research_number, periods, quarterly_growth, annual_growth
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
@@ -58,134 +60,73 @@ def _composite_score(grades, weights):
         return None
     return round(total_score / total_weight, 1)
 
-def get_quality_metrics(symbol):
-    """Compute Buffett-style quality metrics from yfinance financials."""
+def _unavailable(symbol, message='Research provider unavailable'):
+    return {'status': 'error', 'error': message, 'symbol': symbol.upper(),
+            'meta': {'source': 'yfinance', 'retrievedAt': datetime.now(timezone.utc).isoformat(), 'unavailable': True}}
+
+
+def _sample_only(data):
+    if os.environ.get('SAMPLE_DATA') != '1':
+        return None
+    if data and isinstance(data.get('data'), dict):
+        data['data']['isDemo'] = True
+        data['data']['is_demo'] = True
+    if data:
+        data['meta'] = {'source': 'sample', 'isDemo': True, 'stale': False}
+    return data
+
+
+def _statement_frames(records):
+    frame = pd.DataFrame.from_dict(records, orient='index')
+    if not frame.empty:
+        frame.columns = pd.to_datetime(frame.columns)
+        frame = frame.reindex(sorted(frame.columns, reverse=True), axis=1)
+    return frame, frame, frame
+
+
+def get_quality_from_records(symbol, records, info):
+    from types import SimpleNamespace
+    fin, bs, cf = _statement_frames(records.get('annual', {}))
+    result = calculate_quality(SimpleNamespace(info=info, financials=fin, balance_sheet=bs, cashflow=cf), symbol)
+    result.update(source='sec_edgar', filingEvidence=records.get('evidence', []), filingCutoff=records.get('asOf'))
+    return {'status': 'success', 'data': result, 'meta': {'source': 'sec_edgar', 'retrievedAt': datetime.now(timezone.utc).isoformat()}}
+
+
+def get_fund_research(symbol):
     try:
-        t = yf.Ticker(symbol)
+        ticker = yf.Ticker(symbol)
+        info = ticker.info or {}
+        if info.get('quoteType') not in ('ETF', 'MUTUALFUND'):
+            return {'status': 'success', 'data': {'symbol': symbol, 'applicable': False}}
+        holdings = []
+        expense = research_number(info.get('annualReportExpenseRatio'))
+        try:
+            funds = ticker.funds_data
+            top = funds.top_holdings
+            for holding_symbol, row in top.iterrows():
+                weight = research_number(row.get('Holding Percent'))
+                if weight is not None and 0 <= weight <= 1:
+                    holdings.append({'symbol': str(holding_symbol), 'weightPct': weight * 100})
+            if expense is None:
+                expense = research_number(funds.fund_operations.loc['Annual Report Expense Ratio', symbol])
+        except Exception:
+            pass
+        return {'status': 'success', 'data': {'symbol': symbol, 'applicable': True, 'instrumentType': info['quoteType'],
+                'expenseRatioPct': expense * 100 if expense is not None else None,
+                'benchmark': None, 'holdings': holdings, 'holdingsAsOf': None, 'issuerVerified': False,
+                'fundFamily': info.get('fundFamily'), 'totalAssets': research_number(info.get('totalAssets')),
+                'limitations': ['Provider top holdings only; publication date and issuer verification unavailable.', 'Use an issuer disclosure before treating look-through exposures as complete.']}}
+    except Exception:
+        return _unavailable(symbol, 'Fund research unavailable')
 
-        # Financials: annual (last ~4-5 yrs) and quarterly
-        fin = t.financials  # income statement (cols=years, rows=metrics)
-        bs = t.balance_sheet
-        cf = t.cashflow
-        info = t.info or {}
 
-        def _safe_row(df, row_name):
-            try:
-                return df.loc[row_name].dropna().tolist() if row_name in df.index else []
-            except Exception:
-                return []
+def get_quality_metrics(symbol):
+    try:
+        return {'status': 'success', 'data': calculate_quality(yf.Ticker(symbol), symbol),
+                'meta': {'source': 'yfinance', 'retrievedAt': datetime.now(timezone.utc).isoformat()}}
+    except Exception:
+        return _unavailable(symbol, 'Financial statements unavailable')
 
-        # --- 1. ROIC 5yr avg = NOPAT / Invested Capital; approximated as ROIC from info if available
-        roic_pct = info.get('returnOnEquity')  # fallback; ROE is not ROIC but yfinance lacks ROIC directly
-        # Prefer computed: (Operating Income × (1 - tax_rate)) / (Total Equity + Total Debt)
-        op_income = _safe_row(fin, 'Operating Income') or _safe_row(fin, 'Ebit')
-        equity = _safe_row(bs, 'Total Stockholder Equity') or _safe_row(bs, 'Stockholders Equity')
-        total_debt = _safe_row(bs, 'Total Debt') or _safe_row(bs, 'Long Term Debt')
-        if op_income and equity:
-            tax_rate = 0.21
-            try:
-                avg_oi = sum(op_income[:5]) / min(5, len(op_income))
-                avg_eq = sum(equity[:5]) / min(5, len(equity))
-                avg_debt = sum(total_debt[:5]) / min(5, len(total_debt)) if total_debt else 0
-                invested = avg_eq + avg_debt
-                if invested > 0:
-                    roic_pct = (avg_oi * (1 - tax_rate)) / invested * 100
-            except Exception:
-                pass
-        else:
-            roic_pct = (roic_pct * 100) if roic_pct is not None else None
-
-        # --- 2. FCF margin = free_cash_flow / revenue (5yr avg)
-        revenue = _safe_row(fin, 'Total Revenue')
-        fcf = _safe_row(cf, 'Free Cash Flow')
-        fcf_margin_pct = None
-        if revenue and fcf and len(revenue) >= 1 and len(fcf) >= 1:
-            n = min(5, len(revenue), len(fcf))
-            total_rev = sum(revenue[:n])
-            total_fcf = sum(fcf[:n])
-            if total_rev > 0:
-                fcf_margin_pct = (total_fcf / total_rev) * 100
-
-        # --- 3. Debt/Equity
-        debt_equity = None
-        if total_debt and equity and equity[0] > 0:
-            debt_equity = total_debt[0] / equity[0]
-        elif info.get('debtToEquity') is not None:
-            debt_equity = info['debtToEquity'] / 100.0  # yfinance returns it as percentage
-
-        # --- 4. Interest coverage = EBIT / Interest Expense
-        interest_expense = _safe_row(fin, 'Interest Expense')
-        interest_coverage = None
-        if op_income and interest_expense and interest_expense[0]:
-            ie = abs(interest_expense[0])
-            if ie > 0:
-                interest_coverage = op_income[0] / ie
-
-        # --- 5. Earnings consistency: positive-EPS years of last 10. yfinance often limits to 4-5 years.
-        net_income = _safe_row(fin, 'Net Income')
-        pos_years = sum(1 for x in net_income if x and x > 0)
-        total_years = len(net_income) or 1
-        # Scale to out-of-10
-        earnings_consistency_ratio = (pos_years / total_years) * 10
-
-        # --- 6. Gross margin stability (std/mean of last 5 years)
-        gross_profit = _safe_row(fin, 'Gross Profit')
-        gm_stability = None
-        if gross_profit and revenue:
-            n = min(5, len(gross_profit), len(revenue))
-            margins = [gp/r for gp, r in zip(gross_profit[:n], revenue[:n]) if r > 0]
-            if len(margins) >= 2:
-                mean = sum(margins) / len(margins)
-                variance = sum((m - mean) ** 2 for m in margins) / len(margins)
-                std = variance ** 0.5
-                if mean > 0:
-                    gm_stability = std / mean  # coefficient of variation
-
-        # --- 7. Revenue CAGR 5yr
-        rev_cagr_pct = None
-        if revenue and len(revenue) >= 2:
-            # yfinance income statement: index 0 is most recent; compute from oldest to newest
-            oldest = revenue[-1]
-            newest = revenue[0]
-            years = len(revenue) - 1
-            if oldest > 0 and years > 0:
-                rev_cagr_pct = ((newest / oldest) ** (1 / years) - 1) * 100
-
-        grades = {
-            'roic': _grade_numeric(roic_pct, [15, 10, 5], higher_is_better=True),
-            'fcf_margin': _grade_numeric(fcf_margin_pct, [20, 10, 5], higher_is_better=True),
-            'debt_equity': _grade_numeric(debt_equity, [0.3, 0.7, 1.5], higher_is_better=False),
-            'interest_coverage': _grade_numeric(interest_coverage, [10, 5, 2], higher_is_better=True),
-            'earnings_consistency': _grade_numeric(earnings_consistency_ratio, [10, 8, 6], higher_is_better=True),
-            'gm_stability': _grade_numeric(gm_stability, [0.05, 0.10, 0.20], higher_is_better=False),
-            'revenue_cagr': _grade_numeric(rev_cagr_pct, [10, 5, 0], higher_is_better=True),
-        }
-
-        weights = {
-            'roic': 20, 'fcf_margin': 20, 'debt_equity': 15, 'interest_coverage': 10,
-            'earnings_consistency': 15, 'gm_stability': 10, 'revenue_cagr': 10,
-        }
-
-        composite = _composite_score(grades, weights)
-
-        return {
-            'status': 'success',
-            'data': {
-                'symbol': symbol.upper(),
-                'composite': composite,
-                'metrics': {
-                    'roic': {'value': roic_pct, 'grade': grades['roic'], 'unit': '%'},
-                    'fcf_margin': {'value': fcf_margin_pct, 'grade': grades['fcf_margin'], 'unit': '%'},
-                    'debt_equity': {'value': debt_equity, 'grade': grades['debt_equity'], 'unit': 'x'},
-                    'interest_coverage': {'value': interest_coverage, 'grade': grades['interest_coverage'], 'unit': 'x'},
-                    'earnings_consistency': {'value': earnings_consistency_ratio, 'grade': grades['earnings_consistency'], 'unit': '/10'},
-                    'gm_stability': {'value': gm_stability, 'grade': grades['gm_stability'], 'unit': 'cv'},
-                    'revenue_cagr': {'value': rev_cagr_pct, 'grade': grades['revenue_cagr'], 'unit': '%'},
-                },
-            }
-        }
-    except Exception as e:
-        return {'status': 'error', 'error': str(e), 'symbol': symbol.upper()}
 
 def get_demo_data(symbol):
     """Return demo data when network is unavailable"""
@@ -399,7 +340,7 @@ def get_stock_info(symbol):
         stock = yf.Ticker(symbol)
         
         # Get current price from history
-        hist = stock.history(period="5d", interval="1d", timeout=10)
+        hist = stock.history(period="5d", interval="1d", auto_adjust=False, timeout=10)
         hist = _normalize_bars(hist)
         
         price = 0
@@ -422,8 +363,15 @@ def get_stock_info(symbol):
             day_high = float(latest['High'])
             day_low = float(latest['Low'])
         
-        # Get additional info
+        # Use one observation for price and timestamp. Unadjusted daily-bar fallback stays dated as a bar.
         info = stock.info
+        provider_price = research_number(info.get('regularMarketPrice')) or research_number(info.get('currentPrice'))
+        if provider_price is not None and provider_price <= 0:
+            provider_price = None
+        quote_price = provider_price if provider_price is not None and provider_price > 0 else (price if price > 0 else None)
+        if quote_price is None:
+            return _unavailable(symbol, 'A verified quote price is unavailable')
+        quote_time = _utc_iso_from_epoch(info.get('regularMarketTime')) if provider_price else (_utc_iso_from_epoch(hist.index[-1].timestamp()) if len(hist) and callable(getattr(hist.index[-1], 'timestamp', None)) else None)
         
         return {
             'status': 'success',
@@ -433,57 +381,59 @@ def get_stock_info(symbol):
                 'exchange': info.get('exchange', 'Unknown'),
                 'sector': info.get('sector', 'Unknown'),
                 'industry': info.get('industry', 'Unknown'),
-                'currency': info.get('currency', 'USD'),
+                'currency': info.get('currency'),
                 'isDemo': False,
-                'timestamp': _utc_iso_from_epoch(info.get('regularMarketTime')),
+                'timestamp': quote_time,
+                'priceBasis': 'provider_quote' if provider_price else 'unadjusted_daily_bar',
+                'fieldUnits': {'price': info.get('currency'), 'marketCap': info.get('currency'), 'freeCashflow': info.get('currency'), 'peRatio': 'x', 'forwardPE': 'x', 'debtToEquity': '%', 'returnOnEquity': 'fraction'},
                 'quoteType': info.get('quoteType'),
                 'marketState': info.get('marketState', 'UNKNOWN'),
-                'price': price,
+                'price': quote_price,
                 'change': change,
                 'changePercent': changePercent,
                 'volume': volume,
-                'avgVolume': info.get('averageVolume', 0),
+                'avgVolume': info.get('averageVolume'),
                 'bid': 0,
                 'ask': 0,
                 'open': open_price,
                 'previousClose': prev_close,
                 'dayHigh': day_high,
                 'dayLow': day_low,
-                'marketCap': info.get('marketCap', 0),
-                'peRatio': info.get('trailingPE', 0),
-                'eps': info.get('trailingEps', 0),
-                'beta': info.get('beta', 0),
-                'week52High': info.get('fiftyTwoWeekHigh', 0),
-                'week52Low': info.get('fiftyTwoWeekLow', 0),
-                'dividendYield': info.get('dividendYield', 0),
-                'dividendRate': info.get('dividendRate', 0),
+                'marketCap': info.get('marketCap'),
+                'peRatio': info.get('trailingPE'),
+                'eps': info.get('trailingEps'),
+                'beta': info.get('beta'),
+                'week52High': info.get('fiftyTwoWeekHigh'),
+                'week52Low': info.get('fiftyTwoWeekLow'),
+                'dividendYield': info.get('dividendYield'),
+                'dividendRate': info.get('dividendRate'),
                 'exDividendDate': info.get('exDividendDate'),
-                'sharesOutstanding': info.get('sharesOutstanding', 0),
-                'float': info.get('floatShares', 0),
-                'bookValue': info.get('bookValue', 0),
-                'priceToBook': info.get('priceToBook', 0),
-                'profitMargin': info.get('profitMargin', 0),
-                'returnOnEquity': info.get('returnOnEquity', 0),
-                'revenue': info.get('totalRevenue', 0),
-                'revenuePerShare': info.get('revenuePerShare', 0),
-                'grossProfit': info.get('grossProfit', 0),
-                'operatingCashflow': info.get('operatingCashflow', 0),
-                'freeCashflow': info.get('freeCashflow', 0),
-                'forwardPE': info.get('forwardPE', 0),
-                'pegRatio': info.get('pegRatio', 0),
-                'enterpriseValue': info.get('enterpriseValue', 0),
-                'enterpriseToRevenue': info.get('enterpriseToRevenue', 0),
-                'enterpriseToEbitda': info.get('enterpriseToEbitda', 0),
-                'sma50': info.get('fiftyDayAverage', 0),
-                'sma200': info.get('twoHundredDayAverage', 0),
-                'currentRatio': info.get('currentRatio', 0),
-                'quickRatio': info.get('quickRatio', 0),
-                'debtToEquity': info.get('debtToEquity', 0),
+                'sharesOutstanding': info.get('sharesOutstanding'),
+                'float': info.get('floatShares'),
+                'bookValue': info.get('bookValue'),
+                'priceToBook': info.get('priceToBook'),
+                'profitMargin': info.get('profitMargin'),
+                'returnOnEquity': info.get('returnOnEquity'),
+                'revenue': info.get('totalRevenue'),
+                'revenuePerShare': info.get('revenuePerShare'),
+                'grossProfit': info.get('grossProfit'),
+                'operatingCashflow': info.get('operatingCashflow'),
+                'freeCashflow': info.get('freeCashflow'),
+                'forwardPE': info.get('forwardPE'),
+                'pegRatio': info.get('pegRatio'),
+                'enterpriseValue': info.get('enterpriseValue'),
+                'enterpriseToRevenue': info.get('enterpriseToRevenue'),
+                'enterpriseToEbitda': info.get('enterpriseToEbitda'),
+                'sma50': info.get('fiftyDayAverage'),
+                'sma200': info.get('twoHundredDayAverage'),
+                'currentRatio': info.get('currentRatio'),
+                'quickRatio': info.get('quickRatio'),
+                'debtToEquity': info.get('debtToEquity'),
             }
         }
     except Exception as e:
-        demo = get_demo_data(symbol)
-        return demo if demo else {'status': 'error', 'error': str(e)}
+        demo = _sample_only(get_demo_data(symbol))
+        return demo if demo else _unavailable(symbol)
 
 def get_stock_info_batch(symbols):
     """Fetch several symbols concurrently inside one Python process."""
@@ -529,7 +479,7 @@ def get_history(symbol, period='1y', interval='1d'):
     # Try yfinance first, fallback to demo if needed
     try:
         stock = yf.Ticker(symbol)
-        hist = stock.history(period=period, interval=interval, timeout=10)
+        hist = stock.history(period=period, interval=interval, auto_adjust=True, timeout=10)
         
         hist = _normalize_bars(hist)
 
@@ -550,45 +500,75 @@ def get_history(symbol, period='1y', interval='1d'):
                 'symbol': symbol.upper(),
                 'range': period,
                 'interval': interval,
+                'adjustment': 'dividend_and_split_adjusted',
                 'data': data
             }
         }
     except Exception as e:
         # Fallback to demo
-        demo = get_demo_history(symbol, period)
+        demo = _sample_only(get_demo_history(symbol, period))
         if demo:
             return demo
         return {'status': 'error', 'error': str(e)}
 
-def get_rs_rating_from_cache(symbol):
-    """Returns (rs_rating: int 1-99, cache_stale: bool)."""
+def get_rs_rating_details(symbol):
+    """Custom-universe percentile; unknown and stale data are never neutral passes."""
     import sqlite3
-    import os
-    DB_PATH = get_database_path()
+    result = {'rating': None, 'stale': True, 'universe': 'custom-large-cap', 'asOf': None, 'coverage': 0}
     try:
-        if not os.path.exists(DB_PATH):
-            return 50, True
-            
-        conn = sqlite3.connect(DB_PATH)
-        rows = conn.execute('SELECT symbol, weighted_score FROM universe_cache').fetchall()
-        conn.close()
-
-        if len(rows) < 10:  # cache essentially empty
-            return 50, True
-
-        df = pd.DataFrame(rows, columns=['symbol', 'weighted_score'])
-        # Use rank(pct=True) to get percentile
+        path = get_database_path()
+        if not os.path.exists(path):
+            return result
+        with sqlite3.connect(path) as conn:
+            rows = conn.execute('SELECT symbol, weighted_score, updated_at, price_date, universe_version FROM universe_cache').fetchall()
+        result['coverage'] = len(rows)
+        if len(rows) < 10:
+            return result
+        times = [datetime.fromisoformat(row[2].replace('Z', '+00:00')).replace(tzinfo=timezone.utc) for row in rows]
+        result['refreshedAt'] = min(times).isoformat()
+        dates = [row[3] for row in rows]
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo('America/New_York')).date()
+        if any(not date or not str(row[4]).startswith('custom-large-cap-') for row, date in zip(rows, dates)) or len(set(dates)) != 1 or len({row[4] for row in rows}) != 1:
+            return result
+        age_days = (today - datetime.fromisoformat(dates[0]).date()).days
+        if age_days < 0 or age_days > 4:
+            return result
+        result['asOf'] = dates[0]
+        result['universe'] = rows[0][4]
+        result['weightedScoreMethod'] = 'custom-quarterly-weighted-performance-v1'
+        result['cohort'] = [{'symbol': row[0], 'weightedScore': row[1]} for row in sorted(rows)]
+        now = datetime.now(timezone.utc)
+        if any((now - stamp).total_seconds() > 96 * 3600 or (stamp - now).total_seconds() > 60 for stamp in times):
+            return result
+        if (max(times) - min(times)).total_seconds() > 3600:
+            return result
+        df = pd.DataFrame(rows, columns=['symbol', 'weighted_score', 'updated_at', 'price_date', 'universe_version'])
         df['rank_pct'] = df['weighted_score'].rank(pct=True)
-
         match = df[df['symbol'] == symbol.upper()]
         if match.empty:
-            return 50, True  # symbol not in universe cache
-
-        target_pct = match['rank_pct'].values[0]
-        # IBD RS Rating is 1-99
-        return max(1, min(99, int(target_pct * 99))), False
+            return result
+        result.update(rating=max(1, min(99, int(match['rank_pct'].values[0] * 99))), stale=False)
+        return result
     except Exception:
-        return 50, True
+        return result
+
+
+def get_rs_rating_from_cache(symbol):
+    details = get_rs_rating_details(symbol)
+    return details['rating'], details['stale']
+
+
+def _history_is_current(history):
+    try:
+        event = history.index[-1].to_pydatetime()
+        if event.tzinfo is None:
+            event = event.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - event).total_seconds()
+        return -60 <= age <= 96 * 3600
+    except Exception:
+        return False
+
 
 def detect_market_direction(index_symbol='^IXIC'):
     """
@@ -610,8 +590,8 @@ def detect_market_direction(index_symbol='^IXIC'):
         hist = index.history(period='6mo', interval='1d', timeout=10)
         hist = _normalize_bars(hist)
 
-        if hist is None or len(hist) < 60:
-            return {'status': 'Uptrend Under Pressure', 'ftd_detected': False}
+        if hist is None or len(hist) < 60 or not _history_is_current(hist):
+            return {'status': 'Unavailable', 'ftd_detected': False, 'reason': 'Insufficient market history'}
 
         closes = hist['Close'].values
         volumes = hist['Volume'].values
@@ -640,7 +620,7 @@ def detect_market_direction(index_symbol='^IXIC'):
                 sma200 = np.mean(closes[-200:])
                 if closes[-1] > sma200:
                     return {'status': 'Confirmed Uptrend', 'ftd_detected': False}
-            return {'status': 'Uptrend Under Pressure', 'ftd_detected': False}
+            return {'status': 'Unavailable', 'ftd_detected': False, 'reason': 'Insufficient market history'}
 
         day1_low = closes[correction_start]
 
@@ -671,119 +651,110 @@ def detect_market_direction(index_symbol='^IXIC'):
 
         return {'status': 'Uptrend Under Pressure', 'ftd_detected': False}
     except Exception as e:
-        # On any error, return neutral status
-        return {'status': 'Uptrend Under Pressure', 'ftd_detected': False}
+        # Missing market evidence is explicit, never a neutral pass
+        return {'status': 'Unavailable', 'ftd_detected': False, 'reason': 'Insufficient market history'}
 
-def get_canslim_analysis(symbol):
-    """Get CAN SLIM analysis for a stock"""
-    # Try yfinance first
+def get_canslim_analysis(symbol, statements=None):
+    """Measured earnings growth with explicitly named price/ownership proxies."""
     try:
         stock = yf.Ticker(symbol)
-        info = stock.info
-        
-        # Get recent data
-        hist = stock.history(period="2y", interval="1mo", timeout=10)
-        
-        # Calculate CAN SLIM criteria
-        price = info.get('currentPrice', 0)
-        week52_high = info.get('fiftyTwoWeekHigh', 0)
-        week52_low = info.get('fiftyTwoWeekLow', 0)
-        
-        # C - Current Quarterly Earnings (simplified)
-        eps = info.get('trailingEps', 0)
-        c_score = 50
-        if eps and eps > 0:
-            fwd_pe = info.get('forwardPE', 0)
-            if fwd_pe and fwd_pe > 0:
-                c_score = min(100, max(0, int(50 + (30 - fwd_pe) * 2)))
-        
-        # A - Annual Earnings Growth
-        a_score = 50
-        if info.get('earningsGrowth') and info.get('earningsGrowth') > 0:
-            growth = info.get('earningsGrowth') * 100
-            if growth >= 25: a_score = 100
-            elif growth >= 20: a_score = 80
-            elif growth >= 15: a_score = 60
-            elif growth >= 10: a_score = 40
-            elif growth >= 5: a_score = 20
-        
-        # N - New Factors (price at new highs)
-        n_score = 50
-        if week52_high > 0:
-            price_position = price / week52_high
-            n_score = int(price_position * 100)
-        
-        # S - Supply and Demand (volume)
-        avg_volume = info.get('averageVolume', 1)
-        volume = info.get('regularMarketVolume', 0)
-        s_score = 50
-        if avg_volume > 0:
-            volume_ratio = volume / avg_volume
-            if volume_ratio >= 1.5: s_score = 100
-            elif volume_ratio >= 1.2: s_score = 75
-            elif volume_ratio >= 1.0: s_score = 50
-            elif volume_ratio >= 0.8: s_score = 25
-        
-        # L - Leader or Laggard (IBD Weighted RS Rating)
-        l_score, cache_stale = get_rs_rating_from_cache(symbol)
-        
-        # I - Institutional Sponsorship
-        i_score = 50
-        holders = info.get('heldByInstitutions', 0)
-        if holders and holders > 1000: i_score = 90
-        elif holders and holders > 500: i_score = 70
-        elif holders and holders > 100: i_score = 50
-        
-        # M - Market Direction (Follow-Through Day detection)
-        m_score = 50
-        try:
-            market = detect_market_direction()
-            if market['status'] == 'Confirmed Uptrend':
-                m_score = 90 if market.get('ftd_detected') else 80
-            elif market['status'] == 'Uptrend Under Pressure':
-                m_score = 50
-            elif market['status'] == 'Market in Correction':
-                m_score = 15
-        except Exception:
-            m_score = 50
-        
-        # Calculate overall score
-        weights = {'C': 0.20, 'A': 0.15, 'N': 0.15, 'S': 0.15, 'L': 0.15, 'I': 0.10, 'M': 0.10}
-        overall = int(c_score * weights['C'] + a_score * weights['A'] + n_score * weights['N'] + 
-                     s_score * weights['S'] + l_score * weights['L'] + i_score * weights['I'] + 
-                     m_score * weights['M'])
-        
-        if overall >= 80: rating = 'Excellent'
-        elif overall >= 60: rating = 'Good'
-        elif overall >= 40: rating = 'Average'
-        else: rating = 'Poor'
-        
-        return {
-            'status': 'success',
-            'data': {
-                'symbol': symbol.upper(),
-                'cache_stale': cache_stale,
-                'generatedAt': __import__('datetime').datetime.utcnow().isoformat() + 'Z',
-                'overall': {
-                    'score': overall,
-                    'rating': rating,
-                    'passCount': sum([1 for s in [c_score, a_score, n_score, s_score, l_score, i_score, m_score] if s >= 50]),
-                    'failCount': sum([1 for s in [c_score, a_score, n_score, s_score, l_score, i_score, m_score] if s < 50])
-                },
-                'criteria': {
-                    'C': {'name': 'Current Quarterly Earnings', 'score': c_score, 'status': 'Pass' if c_score >= 50 else 'Fail', 'value': eps},
-                    'A': {'name': 'Annual Earnings Growth', 'score': a_score, 'status': 'Pass' if a_score >= 50 else 'Fail', 'value': info.get('earningsGrowth', 0) * 100},
-                    'N': {'name': 'New Factors', 'score': n_score, 'status': 'Pass' if n_score >= 50 else 'Fail', 'pricePosition': price / week52_high if week52_high else 0},
-                    'S': {'name': 'Supply and Demand', 'score': s_score, 'status': 'Pass' if s_score >= 50 else 'Fail', 'volumeRatio': volume / avg_volume if avg_volume else 0},
-                    'L': {'name': 'Leader or Laggard', 'score': l_score, 'status': 'Pass' if l_score >= 50 else 'Fail'},
-                    'I': {'name': 'Institutional Sponsorship', 'score': i_score, 'status': 'Pass' if i_score >= 50 else 'Fail'},
-                    'M': {'name': 'Market Direction', 'score': m_score, 'status': 'Pass' if m_score >= 50 else 'Fail'}
-                }
-            }
+        info = stock.info or {}
+        if info.get('quoteType') in ('ETF', 'MUTUALFUND'):
+            return {'status': 'success', 'data': {'symbol': symbol.upper(), 'applicable': False, 'generatedAt': datetime.now(timezone.utc).isoformat(),
+                    'overall': {'score': None, 'rating': 'Not applicable', 'passCount': 0, 'failCount': 0, 'unknownCount': 7},
+                    'criteria': {}, 'instrumentType': info['quoteType'], 'notes': ['Company earnings criteria do not apply to funds.']}}
+        quarterly = _statement_frames(statements.get('quarterly', {}))[0] if statements else stock.quarterly_financials
+        annual = _statement_frames(statements.get('annual', {}))[0] if statements else stock.financials
+        eps_growth, eps_dates = quarterly_growth(periods(quarterly, 'Diluted EPS', 'Basic EPS'))
+        sales_growth, sales_dates = quarterly_growth(periods(quarterly, 'Total Revenue'))
+        # A missing row must not silently move either metric to an older quarter.
+        # Select the fiscal periods from the statement before checking each series.
+        latest_quarter = max(quarterly.columns) if quarterly is not None and len(quarterly.columns) else None
+        prior_quarters = [d for d in quarterly.columns if 320 <= (latest_quarter - d).days <= 410] if latest_quarter is not None else []
+        expected_quarters = [latest_quarter, min(prior_quarters, key=lambda d: abs((latest_quarter - d).days - 365))] if prior_quarters else []
+        quarters_aligned = len(expected_quarters) == 2 and eps_dates == sales_dates == expected_quarters
+        if not quarters_aligned:
+            eps_growth = sales_growth = None
+        annual_eps = periods(annual, 'Diluted EPS', 'Basic EPS')
+        annual_cagr = annual_growth(annual_eps)
+        today_utc = datetime.now(timezone.utc).date()
+        if not eps_dates or not 0 <= (today_utc - max(eps_dates).date()).days <= 200:
+            eps_growth = None
+        if not sales_dates or not 0 <= (today_utc - max(sales_dates).date()).days <= 200:
+            sales_growth = None
+        if not annual_eps or not 0 <= (today_utc - max(annual_eps).date()).days <= 550:
+            annual_cagr = None
+        price = research_number(info.get('currentPrice')) or research_number(info.get('regularMarketPrice'))
+        high = research_number(info.get('fiftyTwoWeekHigh'))
+        quote_epoch = research_number(info.get('regularMarketTime'))
+        if quote_epoch is None or not -60 <= datetime.now(timezone.utc).timestamp() - quote_epoch <= 96 * 3600:
+            price = None
+        proximity = price / high if price is not None and high is not None and high > 0 else None
+        hist = _normalize_bars(stock.history(period='1y', interval='1d', timeout=10))
+        volume_ratio = None
+        volume_dates, volume_baseline_dates = [], []
+        volume_stale, volume_observations = True, 0
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo('America/New_York')).date()
+        if hist is not None and len(hist):
+            completed = hist[[d.date() < today for d in hist.index]].sort_index()
+            volume_observations = min(len(completed), 51)
+            if len(completed):
+                volume_dates = [completed.index[-1]]
+                # Daily bars use session dates, matching the RS cache convention;
+                # four calendar days accommodates weekends and a market holiday.
+                volume_stale = not 0 <= (today - completed.index[-1].date()).days <= 4
+            if len(completed) >= 51:
+                volume_baseline_dates = [completed.index[-51], completed.index[-2]]
+                avg_volume = float(completed['Volume'].iloc[-51:-1].mean())
+                if not volume_stale and avg_volume > 0 and (completed['Volume'].iloc[-51:] > 0).all():
+                    volume_ratio = float(completed['Volume'].iloc[-1]) / avg_volume
+        institutional = research_number(info.get('heldByInstitutions'))
+        if institutional is not None and not 0 <= institutional <= 1:
+            institutional = None
+        rs = get_rs_rating_details(symbol)
+        market = detect_market_direction()
+        market_score = {'Confirmed Uptrend': 90, 'Uptrend Under Pressure': 40, 'Market in Correction': 15}.get(market.get('status'))
+        def criterion(name, value, passing, method, dates=()):
+            return {'name': name, 'value': value, 'score': None if value is None else 100 if passing else 25,
+                    'status': 'Unknown' if value is None else 'Pass' if passing else 'Fail',
+                    'method': method, 'periods': [str(d)[:10] for d in dates]}
+        criteria = {
+            'C': criterion('Quarterly EPS and Sales Growth', eps_growth, eps_growth is not None and sales_growth is not None and eps_growth >= 25 and sales_growth >= 25,
+                           'Latest reported quarter versus the same quarter one year earlier; both EPS and sales must grow at least 25%', eps_dates),
+            'A': criterion('Annual EPS Growth', annual_cagr, annual_cagr is not None and annual_cagr >= 25,
+                           'EPS CAGR over at least three elapsed fiscal years; 25% threshold', sorted(annual_eps, reverse=True)),
+            'N': criterion('52-week High Proximity Proxy', proximity, proximity is not None and proximity >= .95,
+                           'Within 5% of reported 52-week high; does not measure new products or management'),
+            'S': criterion('Completed-session Volume Proxy', volume_ratio, volume_ratio is not None and volume_ratio >= 1.5,
+                           'Last completed session volume / preceding 50 completed sessions; 1.5x threshold; session date must be within four calendar days', volume_dates),
+            'L': criterion('Custom-universe Relative Strength', rs['rating'], rs['rating'] is not None and rs['rating'] >= 80,
+                           '80th percentile in the dated custom large-cap universe; not an official IBD rating'),
+            'I': criterion('Institutional Ownership Proxy', institutional, institutional is not None and institutional >= .1,
+                           'At least 10% reported institutional ownership; does not establish increasing sponsorship'),
+            'M': criterion('Market Direction', market_score, market.get('status') == 'Confirmed Uptrend',
+                           'Nasdaq follow-through and distribution-day heuristic'),
         }
-    except Exception as e:
-        demo = get_demo_canslim(symbol)
-        return demo if demo else {'status': 'error', 'error': str(e)}
+        if sales_growth is None:
+            criteria['C'].update(score=None, status='Unknown')
+        criteria['C']['salesGrowthPct'] = sales_growth
+        criteria['C']['salesPeriods'] = [str(d)[:10] for d in sales_dates]
+        criteria['C']['periodsAligned'] = quarters_aligned
+        criteria['S'].update(stale=volume_stale, observations=volume_observations,
+                             baselinePeriods=[str(d)[:10] for d in volume_baseline_dates])
+        known = [v for v in criteria.values() if v['score'] is not None]
+        score = round(sum(v['score'] for v in known) / len(known)) if len(known) >= 5 else None
+        return {'status': 'success', 'data': {'symbol': symbol.upper(), 'applicable': True,
+                'cache_stale': rs['stale'], 'relativeStrength': rs,
+                'generatedAt': datetime.now(timezone.utc).isoformat(),
+                'overall': {'score': score, 'rating': 'Insufficient evidence' if score is None else 'Excellent' if score >= 80 else 'Good' if score >= 60 else 'Poor',
+                            'passCount': sum(v['status'] == 'Pass' for v in criteria.values()),
+                            'failCount': sum(v['status'] == 'Fail' for v in criteria.values()),
+                            'unknownCount': sum(v['status'] == 'Unknown' for v in criteria.values()), 'coveragePct': round(len(known)/7*100)},
+                'criteria': criteria}}
+    except Exception:
+        return _sample_only(get_demo_canslim(symbol)) or _unavailable(symbol, 'Earnings and price evidence unavailable')
+
 
 def get_market_indexes():
     """Get major market indexes"""
@@ -833,7 +804,7 @@ def get_market_indexes():
         
         return {'status': 'success', 'data': result}
     except Exception as e:
-        demo = get_demo_indexes()
+        demo = _sample_only(get_demo_indexes())
         if demo:
             return demo
         return {'status': 'error', 'error': str(e)}
@@ -1008,8 +979,8 @@ def get_technical_indicators(symbol):
         hist = stock.history(period="1y", interval="1d", timeout=10)
         hist = _normalize_bars(hist)
         
-        if hist is None or len(hist) < 30:
-            return get_demo_technical(symbol)
+        if hist is None or len(hist) < 30 or not _history_is_current(hist):
+            return _sample_only(get_demo_technical(symbol)) or _unavailable(symbol, 'Technical history unavailable')
         
         # Extract price data
         closes = hist['Close'].values.tolist()
@@ -1138,7 +1109,8 @@ def get_technical_indicators(symbol):
             'status': 'success',
             'data': {
                 'symbol': symbol.upper(),
-                'generatedAt': __import__('datetime').datetime.utcnow().isoformat() + 'Z',
+                'generatedAt': datetime.now(timezone.utc).isoformat(),
+                'timestamp': hist.index[-1].isoformat(),
                 'current': {
                     'price': round(current_price, 2),
                     'rsi': get_latest(rsi),
@@ -1183,7 +1155,7 @@ def get_technical_indicators(symbol):
             }
         }
     except Exception as e:
-        return get_demo_technical(symbol)
+        return _sample_only(get_demo_technical(symbol)) or _unavailable(symbol, 'Technical history unavailable')
 
 def get_earnings_calendar(symbol):
     """Get upcoming earnings date for a stock"""
@@ -1398,9 +1370,13 @@ def main():
     elif action == 'history':
         result = get_history(symbol, period, interval)
     elif action == 'canslim':
-        result = get_canslim_analysis(symbol)
+        result = get_canslim_analysis(symbol, request.get('statements'))
     elif action == 'quality':
         result = get_quality_metrics(symbol)
+    elif action == 'quality_records':
+        result = get_quality_from_records(symbol, request.get('statements', {}), request.get('info', {}))
+    elif action == 'fund':
+        result = get_fund_research(symbol)
     elif action == 'news':
         result = get_news(symbol)
     elif action == 'indexes':
@@ -1409,8 +1385,7 @@ def main():
         result = get_technical_indicators(symbol)
     elif action == 'update_universe':
         from universe_updater import update_universe_cache
-        update_universe_cache()
-        result = {'status': 'success', 'message': 'Universe cache updated'}
+        result = {'status': 'success', 'data': update_universe_cache()}
     elif action == 'market_direction':
         result = detect_market_direction(request.get('index', '^IXIC'))
     elif action == 'earnings':
@@ -1420,6 +1395,8 @@ def main():
     else:
         result = {'status': 'error', 'error': f'Unknown action: {action}'}
     
+    if isinstance(result, dict):
+        result['meta'] = {'source': 'yfinance', 'retrievedAt': datetime.now(timezone.utc).isoformat(), **result.get('meta', {})}
     print(_nan_safe_dumps(result))
 
 if __name__ == '__main__':

@@ -4,7 +4,8 @@ import { useTickerStore } from '@/lib/store'
 import { useQuality } from '@/hooks/useQuality'
 
 const METRIC_LABELS: Record<string, string> = {
-  roic: 'ROIC',
+  roic: 'ROIC (debt + equity basis)',
+  roe: 'ROE (separate measure)',
   fcf_margin: 'FCF Margin',
   debt_equity: 'Debt / Equity',
   interest_coverage: 'Interest Coverage',
@@ -55,13 +56,17 @@ export function QualityScorecard({ symbol }: { symbol?: string }) {
         {activeSymbol && error && <p className="text-destructive text-sm">{error instanceof Error ? error.message : 'Failed to load quality metrics'}</p>}
         {data && (
           <div className="space-y-2">
+            {data.applicable === false && <p className="text-sm text-muted-foreground">Company quality ratios do not apply to funds.</p>}
+            {data.coveragePct != null && data.applicable !== false && <p className="text-xs text-muted-foreground">Metric coverage: {data.coveragePct}% · {data.source ?? 'research provider'}</p>}
+            {data.notes?.map(note => <p key={note} className="text-xs text-muted-foreground">{note}</p>)}
             {Object.entries(data.metrics).map(([key, metric]) => (
               <div key={key} className="data-hover flex items-center justify-between gap-3 rounded-md border border-border/60 px-3 py-2">
                 <div>
-                  <p className="text-xs text-muted-foreground">{METRIC_LABELS[key] ?? key}</p>
+                  <p className="text-xs text-muted-foreground" title={metric.method}>{METRIC_LABELS[key] ?? key}</p>
+                  {metric.observations != null && <p className="text-xs text-muted-foreground">{metric.stale ? 'Stale · ' : ''}{metric.observations} fiscal period{metric.observations === 1 ? '' : 's'}{metric.periods?.[0] ? ` · through ${metric.periods[0]}` : ''}</p>}
                   <p className="text-sm font-medium text-foreground">{formatMetricValue(metric.value, metric.unit)}</p>
                 </div>
-                <Badge variant={metric.grade === 'A' ? 'default' : metric.grade === 'B' ? 'secondary' : metric.grade === 'C' ? 'outline' : 'destructive'}>
+                <Badge variant={metric.grade === 'A' ? 'default' : metric.grade === 'B' ? 'secondary' : metric.grade === 'C' || !metric.grade ? 'outline' : 'destructive'}>
                   {metric.grade ?? '—'}
                 </Badge>
               </div>

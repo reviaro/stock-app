@@ -13,10 +13,10 @@ Output MUST be markdown with exactly these sections (use these headings verbatim
 2-4 sentences on why to own this business. Reference the moat and earnings power.
 
 ## Fair Value
-Provide fair_value_low and fair_value_high as dollar ranges. Show the reasoning in one sentence.
+Only report a fair-value range if an explicit deterministic valuation scenario and its dated inputs are provided. Otherwise write insufficient evidence and list the assumptions needed.
 
 ## Buy Below
-A single dollar price — the max you'd pay today given the fair-value range and margin of safety. Format: $NNN.NN.
+Only derive a buy-below price from an evidenced valuation scenario and an explicit margin-of-safety assumption. Otherwise write insufficient evidence.
 
 ## Sell Rule
 One sentence describing when you'd trim or exit.
@@ -77,7 +77,7 @@ One paragraph on which is the better business today, at current prices, and why.
         inputSchema: z.object({}),
         aggregator: 'aggregateWatchlistContext',
         systemPrompt: `You are APEX, producing a weekly watchlist review grouped by bucket.
-For each non-empty bucket, summarize the price trend, any notable headline, and any obvious flag.
+For each non-empty bucket, summarize the provided dated weeklyTrend, any sourced headline and any obvious flag. A point quote alone cannot establish a trend.
 
 ## Action Items
 3-5 bullets: what the user should look at this week.`,
@@ -87,7 +87,7 @@ For each non-empty bucket, summarize the price trend, any notable headline, and 
         inputs: [],
         inputSchema: z.object({}),
         aggregator: 'aggregatePortfolioContext',
-        systemPrompt: `You are APEX, producing a monthly portfolio review.
+        systemPrompt: `You are APEX, producing a monthly review of the explicitly identified manual transaction ledger. This excludes simulator and Alpaca holdings.
 
 ## Performance
 Per-position P&L summary and a portfolio-level line.

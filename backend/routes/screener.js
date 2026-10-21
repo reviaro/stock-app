@@ -1,6 +1,7 @@
 const { createAsyncRouter } = require('../services/http_errors');
 const db = require('../database/db');
 const pybridge = require('../services/pybridge');
+const { evidence } = require('../services/research_data');
 const { scoreCandidate } = require('../services/value_screener');
 
 const router = createAsyncRouter();
@@ -32,15 +33,20 @@ function createValueHandler({ db: database = db, pybridge: bridge = pybridge } =
             const quality = qualityRes?.data ?? {};
             const technical = technicalRes?.data ?? {};
             const score = scoreCandidate({ stock, quality, technical });
+            const provenance = evidence(stockRes);
+            if (!provenance.available || provenance.stale) { score.action='Research'; score.confidence=0; score.coveragePct=0; score.red_flags.push(provenance.warning || 'Stock evidence unavailable'); }
 
             return {
                 symbol,
                 name: stock.name ?? item.name ?? symbol,
                 sector: stock.sector ?? item.sector ?? 'Unknown',
-                price: stock.price ?? null,
+                price: provenance.available ? stock.price ?? null : null,
+                evidence: provenance,
                 changePercent: stock.changePercent ?? null,
                 forwardPE: stock.forwardPE ?? stock.peRatio ?? null,
                 qualityComposite: quality.composite ?? null,
+                qualitySource: qualityRes?.meta?.source || quality.source || 'yfinance',
+                primarySourceStatus: qualityRes?.meta?.primarySourceStatus || null,
                 hasThesis: Boolean(memo?.thesis),
                 ...score,
             };

@@ -11,6 +11,7 @@ import { Glossary } from '@/components/Glossary'
 import { HistoryPanel } from '@/components/HistoryPanel'
 import { PortfolioPanel } from '@/components/PortfolioPanel'
 import { savedThemeIsDark, setTheme } from '@/theme'
+import { ResearchEvidencePanel } from '@/components/ResearchEvidencePanel'
 import { SectorRotation } from '@/components/SectorRotation'
 
 const StockChart = lazy(() => import('@/components/StockChart').then((module) => ({ default: module.StockChart })))
@@ -208,6 +209,8 @@ export function Dashboard() {
           >
             <SectorRotation />
           </motion.div>
+
+          <div className="md:col-span-2 lg:col-span-6 min-w-0"><ResearchEvidencePanel /></div>
 
           {/* ── AI Financial Analyst Chat ── */}
           <motion.div

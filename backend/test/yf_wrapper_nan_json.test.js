@@ -152,7 +152,7 @@ import yf_wrapper
 
 class FakeTicker:
     def history(self, **kwargs):
-        idx = pd.date_range('2025-09-01', periods=260, tz='America/New_York')
+        idx = pd.date_range(end=pd.Timestamp.now(tz='America/New_York').normalize()-pd.Timedelta(days=1), periods=260)
         rows = []
         for i in range(260):
             price = 100.0 + (i % 17) - (i % 5) * 0.5 + i * 0.1
@@ -247,7 +247,7 @@ import pandas as pd
 sys.path.insert(0, 'python')
 import yf_wrapper
 
-idx = pd.date_range('2026-06-01', periods=70, tz='America/New_York')
+idx = pd.date_range(end=pd.Timestamp.now(tz='America/New_York').normalize()-pd.Timedelta(days=1), periods=70)
 closes = [100.0] * 70
 closes[50] = 110.0
 closes[51] = 100.0
@@ -302,7 +302,7 @@ import pandas as pd
 sys.path.insert(0, 'python')
 import universe_updater
 
-idx = pd.date_range('2025-09-01', periods=260, tz='America/New_York')
+idx = pd.date_range(end=pd.Timestamp.now(tz='America/New_York').normalize()-pd.Timedelta(days=1), periods=260)
 rows = []
 for i in range(260):
     close = 100.0 + i * 0.1
@@ -323,6 +323,14 @@ class FakeCursor:
 class FakeConnection:
     def __init__(self):
         self.cursor_obj = FakeCursor()
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        pass
+    def execute(self, sql, params=()):
+        pass
+    def executemany(self, sql, params):
+        self.cursor_obj.writes.extend(params)
     def cursor(self):
         return self.cursor_obj
     def commit(self):
@@ -360,7 +368,7 @@ import pandas as pd
 sys.path.insert(0, 'python')
 import universe_updater
 
-idx = pd.date_range('2025-09-01', periods=260, tz='America/New_York')
+idx = pd.date_range(end=pd.Timestamp.now(tz='America/New_York').normalize()-pd.Timedelta(days=1), periods=260)
 rows = []
 for i in range(260):
     close = 1e-308
@@ -381,6 +389,14 @@ class FakeCursor:
 class FakeConnection:
     def __init__(self):
         self.cursor_obj = FakeCursor()
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        pass
+    def execute(self, sql, params=()):
+        pass
+    def executemany(self, sql, params):
+        self.cursor_obj.writes.extend(params)
     def cursor(self):
         return self.cursor_obj
     def commit(self):
@@ -394,7 +410,10 @@ universe_updater.yf.Ticker = lambda _symbol: FakeTicker()
 universe_updater.sqlite3.connect = lambda _path: connection
 universe_updater.time.sleep = lambda _seconds: None
 with contextlib.redirect_stdout(sys.stderr):
-    universe_updater.update_universe_cache()
+    try:
+        universe_updater.update_universe_cache()
+    except RuntimeError as error:
+        assert 'previous cache retained' in str(error)
 print(json.dumps({'write_count': len(connection.cursor_obj.writes)}))
 `;
     const parsed = runPython(source);
@@ -410,7 +429,7 @@ sys.path.insert(0, 'python')
 import universe_updater
 import yf_wrapper
 
-idx = pd.date_range('2025-09-01', periods=260, tz='America/New_York')
+idx = pd.date_range(end=pd.Timestamp.now(tz='America/New_York').normalize()-pd.Timedelta(days=1), periods=260)
 rows = []
 for i in range(260):
     close = 100.0 + i * 0.1
@@ -430,6 +449,14 @@ class FakeCursor:
 class FakeConnection:
     def __init__(self):
         self.cursor_obj = FakeCursor()
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        pass
+    def execute(self, sql, params=()):
+        pass
+    def executemany(self, sql, params):
+        self.cursor_obj.writes.extend(params)
     def cursor(self):
         return self.cursor_obj
     def commit(self):
@@ -445,5 +472,8 @@ universe_updater.time.sleep = lambda _seconds: None
 yf_wrapper.main()
 `;
     const parsed = runPython(source, { input: JSON.stringify({ action: 'update_universe' }) });
-    assert.deepStrictEqual(parsed, { status: 'success', message: 'Universe cache updated' });
+    assert.equal(parsed.status,'success');
+    assert.equal(parsed.data.count,1);
+    assert.match(parsed.data.universe,/^custom-large-cap-/);
+    assert.equal(parsed.meta.source,'yfinance');
 });

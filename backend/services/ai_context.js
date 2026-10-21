@@ -1,5 +1,6 @@
 const db = require('../database/db');
 const pybridge = require('./pybridge');
+const { evidence, usablePrice } = require('./research_data');
 
 async function safeCall(fn, fallback) {
     try {
@@ -10,21 +11,11 @@ async function safeCall(fn, fallback) {
 }
 
 async function fetchStockContext(symbol) {
-    const sym = symbol.toUpperCase();
-    const [info, news, memo, quality] = await Promise.all([
-        safeCall(() => pybridge.getStockInfo(sym), { data: null }),
-        safeCall(() => pybridge.getNews(sym), []),
-        db.getMemo ? safeCall(() => db.getMemo(sym), null) : Promise.resolve(null),
-        pybridge.getQualityMetrics ? safeCall(() => pybridge.getQualityMetrics(sym), null) : Promise.resolve(null),
-    ]);
-
-    return {
-        symbol: sym,
-        info: info?.data ?? info ?? null,
-        news: Array.isArray(news) ? news.slice(0, 5) : [],
-        memo: memo || null,
-        quality: quality?.data ?? quality ?? null,
-    };
+    const sym=symbol.toUpperCase();
+    const packet=await require('./research_service').summary(sym);
+    const memo=db.getMemo?await safeCall(()=>db.getMemo(sym),null):null;
+    return {...packet,info:packet.data.info,news:packet.data.news,quality:packet.data.quality,
+        evidence:packet.provenance,memo};
 }
 
 async function fetchStockContextPair(symbolA, symbolB) {
@@ -36,21 +27,13 @@ async function aggregateWatchlistContext() {
     const rows = await db.getWatchlist();
     if (!rows.length) return { rows: [], byBucket: {} };
 
-    const enriched = await Promise.all(rows.map(async (row) => {
-        const [info, news] = await Promise.all([
-            safeCall(() => pybridge.getStockInfo(row.symbol), { data: null }),
-            safeCall(() => pybridge.getNews(row.symbol), []),
-        ]);
-
-        return {
-            symbol: row.symbol,
-            bucket: row.bucket ?? 'unsorted',
-            price: info?.data?.price ?? null,
-            sector: info?.data?.sector ?? null,
-            name: info?.data?.name ?? row.symbol,
-            news: Array.isArray(news) ? news.slice(0, 3).map((item) => item.title) : [],
-        };
-    }));
+    const enriched = [];
+    for (const row of rows) {
+        const context=await fetchStockContext(row.symbol);
+        enriched.push({symbol:row.symbol,bucket:row.bucket??'unsorted',name:context.info?.name??row.symbol,
+            price:context.info?.price??null,sector:context.info?.sector??null,news:context.news.slice(0,3),
+            weeklyTrend:context.data.weeklyTrend,evidence:context.evidence,packetId:context.id,blockers:context.blockers});
+    }
 
     const byBucket = {};
     for (const row of enriched) {
@@ -64,7 +47,7 @@ async function aggregateWatchlistContext() {
 async function aggregatePortfolioContext() {
     const transactions = db.listTransactions ? await db.listTransactions() : [];
     if (!transactions.length) {
-        return { positions: [], breaches: [], overdueMemos: [], cash: 0, valuationComplete: true, missingPriceSymbols: [], riskAssessment: 'not_assessed' };
+        return { account:{kind:'manual_ledger'}, positions: [], breaches: [], overdueMemos: [], cash: 0, valuationComplete: true, missingPriceSymbols: [], riskAssessment: 'not_assessed' };
     }
 
     const { buildSummary, computeHoldings, isValuationPrice } = require('./portfolio_ledger');
@@ -76,7 +59,8 @@ async function aggregatePortfolioContext() {
     await Promise.all(symbols.map(async (symbol) => {
         const info = await safeCall(() => pybridge.getStockInfo(symbol), { data: null });
         infoBySymbol[symbol] = info;
-        if (isValuationPrice(info?.data?.price)) currentPrices[symbol] = info.data.price;
+        const price = usablePrice(info);
+        if (isValuationPrice(price)) currentPrices[symbol] = price;
     }));
 
     const summary = buildSummary(transactions, currentPrices);
@@ -89,6 +73,7 @@ async function aggregatePortfolioContext() {
         const currentPrice = currentPrices[symbol] ?? null;
         return {
             symbol,
+            evidence: evidence(info),
             shares: holding.shares,
             avg_cost: holding.avg_cost,
             total_cost: holding.total_cost,
@@ -126,6 +111,7 @@ async function aggregatePortfolioContext() {
         .map((position) => position.symbol);
 
     return {
+        account: {kind:'manual_ledger', label:'Manual portfolio ledger; excludes simulator and Alpaca holdings'},
         positions, breaches, overdueMemos, cash: summary.cash, riskAssessment,
         valuationComplete: summary.valuationComplete, missingPriceSymbols: summary.missingPriceSymbols,
     };

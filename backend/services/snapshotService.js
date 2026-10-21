@@ -1,5 +1,6 @@
 const db = require('../database/db');
 const pybridge = require('./pybridge');
+const { numberOrNull, evidence } = require('./research_data');
 
 const MARKET_TIMEZONE = 'America/New_York';
 
@@ -29,10 +30,7 @@ function getCurrentSlot(now = new Date()) {
     return 'closeish';
 }
 
-function finiteNumber(value) {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : null;
-}
+const finiteNumber = numberOrNull;
 
 function roundMetric(value) {
     if (!Number.isFinite(value)) return null;
@@ -54,16 +52,20 @@ async function snapshotWatchlist(slot = getCurrentSlot(), { now = new Date(), db
     for (const item of watchlist) {
         let quote;
         let isCarryForward = false;
+        let provenance;
 
         try {
             const result = await pybridgeClient.getStockInfo(item.symbol);
             if (result.status !== 'success' || !result.data) {
                 throw new Error(result.error || 'No stock data returned');
             }
+            provenance = evidence(result, {now});
+            if (provenance.isDemo || !(finiteNumber(result.data.price)>0)) throw new Error('Verified quote unavailable');
             quote = result.data;
+            isCarryForward = provenance.stale || !provenance.timestampKnown;
         } catch (error) {
             const history = await dbClient.getStockHistory(item.symbol, 90);
-            const latest = history[history.length - 1];
+            const latest = history.filter(row => { try { return !JSON.parse(row.raw_payload || '{}').isDemo; } catch { return false; } }).at(-1);
             if (!latest) {
                 throw error;
             }
@@ -113,9 +115,9 @@ async function snapshotWatchlist(slot = getCurrentSlot(), { now = new Date(), db
             changePercent: quote.changePercent ?? null,
             currency: quote.currency ?? 'USD',
             source: 'yfinance',
-            isMarketClosed: isCarryForward,
+            isMarketClosed: isCarryForward || quote.marketState === 'CLOSED',
             isCarryForward,
-            rawPayload: JSON.stringify(quote),
+            rawPayload: JSON.stringify({...quote, evidence:provenance || {stale:true,source:'stored_history'}}),
             openPrice,
             dayHigh,
             fiftyTwoWeekHigh,

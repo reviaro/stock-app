@@ -168,6 +168,7 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
         const plan=JSON.parse(row.plan_json); const order=plan.nextOrder;
         const existing=(await store.orders()).find(o=>o.plan_id===plan.id || (plan.decisionKey && o.decision_key===plan.decisionKey));
         if (existing) return {order:cleanOrder(existing),replayed:true};
+        if (plan.decisionKey) await require('./research_decisions').validateStored(plan.decisionKey,order?.symbol,now());
         if (!order || plan.blockers.length) throw fail('LIVE_PLAN_BLOCKED','Resolve the preview blockers before submitting.');
         if (!automatic && confirmation!==`${order.side.toUpperCase()} ${order.symbol} LIVE`) throw fail('LIVE_CONFIRMATION_REQUIRED','Type the exact live-order confirmation.',400);
         if (!configuration(env).tradingEnabled) throw fail('LIVE_GATE_CLOSED','Server-side live trading is disabled.');
@@ -218,7 +219,10 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
     async function decision(input) {
         if (input?.account_id!==1) throw fail('LIVE_INVALID_DECISION','The long-term source account must be 1.',400);
         if (input.policyVersion!==(await store.settings()).version) throw fail('LIVE_POLICY_CHANGED','Read the current live policy before requesting a decision.');
+        const research=require('./research_decisions');
+        const analysis=await research.validateAnalysis(input.analysis,input.symbol,{now:now()});
         const d=await store.saveDecision(input);
+        await require('./research_store').saveDecisionEvidence(d.decision_key,analysis);
         const existing=(await store.orders()).find(o=>o.decision_key===d.decision_key);
         if (existing) return {order:cleanOrder(existing),replayed:true};
         const plan=await preview({decisionKey:d.decision_key,symbol:d.symbol,side:d.side});
@@ -231,6 +235,7 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
         const d=(await store.decisions()).find(d=>d.decision_key===key);
         if (!d) throw fail('LIVE_DECISION_NOT_FOUND','Decision not found.',404);
         if (d.policy_version!==(await store.settings()).version) throw fail('LIVE_POLICY_CHANGED','Ask the strategy agent for fresh analysis under the current policy.');
+        await require('./research_decisions').validateStored(key,d.symbol,now());
         return preview({decisionKey:key,symbol:d.symbol,side:d.side});
     }
     async function cancel(id) {

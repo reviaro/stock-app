@@ -65,11 +65,11 @@ export function OpportunitiesPage() {
                           {row.hasThesis && <span className="block text-[10px] text-primary">thesis saved</span>}
                         </button>
                       </td>
-                      <td className="font-mono text-right py-2 pr-3">{row.score}</td>
+                      <td className="font-mono text-right py-2 pr-3">{row.score}<span className="block text-[10px] text-muted-foreground">{row.coveragePct ?? row.confidence}% coverage</span></td>
                       <td className="py-2 pr-3"><Badge variant="outline" className={`text-[10px] ${actionClass(row.action)}`}>{row.action}</Badge></td>
                       <td className="font-mono text-right py-2 pr-3">${fmt(row.price)}</td>
                       <td className="font-mono text-right py-2 pr-3">{fmt(row.forwardPE, 1)}x</td>
-                      <td className="font-mono text-right py-2 pr-3">{fmt(row.qualityComposite, 0)}</td>
+                      <td className="font-mono text-right py-2 pr-3">{fmt(row.qualityComposite, 0)}<span className="block text-[10px] text-muted-foreground">{row.qualitySource === 'sec_edgar' ? 'SEC filings' : row.qualitySource === 'yfinance' ? 'Yahoo Finance' : 'research'}{row.primarySourceStatus === 'loading' ? ' · primary loading' : ''}</span></td>
                       <td className="py-2 pr-3 min-w-[260px]">
                         <ul className="list-disc pl-4 space-y-0.5 text-muted-foreground">
                           {row.reasons.map((r) => <li key={r}>{r}</li>)}
