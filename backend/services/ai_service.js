@@ -24,9 +24,9 @@ async function requireSimSleeve(accountId) {
 
 const tools = {
   getResearchEvidence: tool({
-    description: 'Get the shared dated research packet, measured scorecards, fund disclosures, news sources, filing references, data gaps and immutable evidence ID before company-specific conclusions.',
+    description: 'Get a compact summary of the shared dated research packet: measured scorecards, fund disclosures, news sources, recent filing references, data gaps and immutable evidence ID. The complete archive stays in the saved packet; shown references and holdings may be partial.',
     inputSchema: z.object({symbol:z.string().regex(/^[A-Z0-9^][A-Z0-9.^=-]{0,14}$/)}),
-    execute: async ({symbol}) => require('./research_service').packet(symbol),
+    execute: async ({symbol}) => require('./research_service').summary(symbol),
   }),
   getPortfolioContext: tool({
     description: 'Read an explicitly selected account. Watchlists are not holdings. Never combines manual, simulator and live account balances.',
@@ -46,11 +46,7 @@ const tools = {
   analyzeExposure: tool({
     description:'Calculate stock and dated fund look-through exposure for explicit portfolio weights. Unknown or partial fund holdings remain unknown.',
     inputSchema:z.object({holdings:z.array(z.object({symbol:z.string().regex(/^[A-Z][A-Z0-9.-]{0,14}$/),weightPct:z.number().min(0).max(100)})).max(100)}),
-    execute:async({holdings})=>{
-      const funds={};
-      for(const h of holdings){const packet=await require('./research_service').packet(h.symbol);if(packet.data.info?.quoteType==='ETF')funds[h.symbol]=packet.data.fund||{issuerVerified:false};}
-      return require('./fund_research').exposure(holdings,funds);
-    },
+    execute:async({holdings})=>require('./fund_research').analyzeExposure(holdings),
   }),
 
   getStockInfo: tool({
@@ -136,7 +132,8 @@ const tools = {
     execute: async (args) => {
       const symbol = args?.symbol;
       if (!symbol || typeof symbol !== 'string') return { error: 'Symbol required' };
-      return await pybridge.getQualityMetrics(symbol.toUpperCase());
+      const result = await pybridge.getQualityMetrics(symbol.toUpperCase());
+      return { ...result, data: require('./research_summary').compactQuality(result.data) };
     },
   }),
 

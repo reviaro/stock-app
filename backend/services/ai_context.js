@@ -12,7 +12,7 @@ async function safeCall(fn, fallback) {
 
 async function fetchStockContext(symbol) {
     const sym=symbol.toUpperCase();
-    const packet=await require('./research_service').packet(sym);
+    const packet=await require('./research_service').summary(sym);
     const memo=db.getMemo?await safeCall(()=>db.getMemo(sym),null):null;
     return {...packet,info:packet.data.info,news:packet.data.news,quality:packet.data.quality,
         evidence:packet.provenance,memo};

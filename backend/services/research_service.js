@@ -3,6 +3,7 @@ const {evidence,normalizeNews,usablePrice,hash}=require('./research_data');
 const defaultBridge=require('./pybridge');
 const defaultStore=require('./research_store');
 const {createAsyncTtlCache}=require('./market_data_cache');
+const {summarizePacket}=require('./research_summary');
 const failure=()=>({status:'error',meta:{unavailable:true}});
 function createResearchService({bridge=defaultBridge,store=defaultStore,now=()=>new Date(),fundDisclosure=require('./fund_research').latest}={}){
     const cache=createAsyncTtlCache({ttlMs:60_000,now:()=>now().getTime()});
@@ -41,7 +42,7 @@ function createResearchService({bridge=defaultBridge,store=defaultStore,now=()=>
                 evidenceFingerprint:hash({data,provenance})});
         });
     }
-    return {packet,invalidate:symbol=>cache.clear(symbol)};
+    return {packet,summary:async symbol=>summarizePacket(await packet(symbol)),invalidate:symbol=>cache.clear(symbol)};
 }
 const service=createResearchService();
 module.exports={createResearchService,...service};

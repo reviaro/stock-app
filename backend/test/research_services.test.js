@@ -79,7 +79,7 @@ test('prospective evaluation persists immutable, adjusted histories and links on
     const concurrent=await Promise.allSettled([evaluation.record(trial.id,input,decisionAt),evaluation.record(trial.id,input,decisionAt)]);
     assert.equal(concurrent.filter(r=>r.status==='fulfilled').length,1);
     let calls=0;
-    const history=async symbol=>{calls++;return {status:'success',data:{adjustment:'dividend_and_split_adjusted',data:[['2026-01-05T00:00:00-05:00',100],['2026-01-06T00:00:00-05:00',90],['2026-01-07T00:00:00-05:00',symbol==='TEST'?120:110]].map(([date,close])=>({date,close}))}};};
+    const history=async symbol=>{calls++;return {status:'success',data:{adjustment:'dividend_and_split_adjusted',data:[['2026-01-05T00:00:00-05:00',100],['2026-01-06T00:00:00-05:00',90],['2026-01-12T00:00:00-05:00',symbol==='TEST'?120:110]].map(([date,close])=>({date,close}))}};};
     assert.equal((await evaluation.observe(trial.id,{now:decisionAt,bridge:{getStockHistory:history}})).requested,0);assert.equal(calls,0);
     const later=new Date('2026-01-20T15:00:00Z');
     assert.equal((await evaluation.observe(trial.id,{now:later,bridge:{getStockHistory:history}})).recorded,2);

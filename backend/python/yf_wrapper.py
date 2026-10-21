@@ -667,6 +667,14 @@ def get_canslim_analysis(symbol, statements=None):
         annual = _statement_frames(statements.get('annual', {}))[0] if statements else stock.financials
         eps_growth, eps_dates = quarterly_growth(periods(quarterly, 'Diluted EPS', 'Basic EPS'))
         sales_growth, sales_dates = quarterly_growth(periods(quarterly, 'Total Revenue'))
+        # A missing row must not silently move either metric to an older quarter.
+        # Select the fiscal periods from the statement before checking each series.
+        latest_quarter = max(quarterly.columns) if quarterly is not None and len(quarterly.columns) else None
+        prior_quarters = [d for d in quarterly.columns if 320 <= (latest_quarter - d).days <= 410] if latest_quarter is not None else []
+        expected_quarters = [latest_quarter, min(prior_quarters, key=lambda d: abs((latest_quarter - d).days - 365))] if prior_quarters else []
+        quarters_aligned = len(expected_quarters) == 2 and eps_dates == sales_dates == expected_quarters
+        if not quarters_aligned:
+            eps_growth = sales_growth = None
         annual_eps = periods(annual, 'Diluted EPS', 'Basic EPS')
         annual_cagr = annual_growth(annual_eps)
         today_utc = datetime.now(timezone.utc).date()
@@ -684,13 +692,22 @@ def get_canslim_analysis(symbol, statements=None):
         proximity = price / high if price is not None and high is not None and high > 0 else None
         hist = _normalize_bars(stock.history(period='1y', interval='1d', timeout=10))
         volume_ratio = None
+        volume_dates, volume_baseline_dates = [], []
+        volume_stale, volume_observations = True, 0
         from zoneinfo import ZoneInfo
         today = datetime.now(ZoneInfo('America/New_York')).date()
         if hist is not None and len(hist):
-            completed = hist[[d.date() < today for d in hist.index]]
+            completed = hist[[d.date() < today for d in hist.index]].sort_index()
+            volume_observations = min(len(completed), 51)
+            if len(completed):
+                volume_dates = [completed.index[-1]]
+                # Daily bars use session dates, matching the RS cache convention;
+                # four calendar days accommodates weekends and a market holiday.
+                volume_stale = not 0 <= (today - completed.index[-1].date()).days <= 4
             if len(completed) >= 51:
+                volume_baseline_dates = [completed.index[-51], completed.index[-2]]
                 avg_volume = float(completed['Volume'].iloc[-51:-1].mean())
-                if avg_volume > 0 and (completed['Volume'].iloc[-51:] > 0).all():
+                if not volume_stale and avg_volume > 0 and (completed['Volume'].iloc[-51:] > 0).all():
                     volume_ratio = float(completed['Volume'].iloc[-1]) / avg_volume
         institutional = research_number(info.get('heldByInstitutions'))
         if institutional is not None and not 0 <= institutional <= 1:
@@ -710,7 +727,7 @@ def get_canslim_analysis(symbol, statements=None):
             'N': criterion('52-week High Proximity Proxy', proximity, proximity is not None and proximity >= .95,
                            'Within 5% of reported 52-week high; does not measure new products or management'),
             'S': criterion('Completed-session Volume Proxy', volume_ratio, volume_ratio is not None and volume_ratio >= 1.5,
-                           'Last completed session volume / preceding 50 completed sessions; 1.5x threshold'),
+                           'Last completed session volume / preceding 50 completed sessions; 1.5x threshold; session date must be within four calendar days', volume_dates),
             'L': criterion('Custom-universe Relative Strength', rs['rating'], rs['rating'] is not None and rs['rating'] >= 80,
                            '80th percentile in the dated custom large-cap universe; not an official IBD rating'),
             'I': criterion('Institutional Ownership Proxy', institutional, institutional is not None and institutional >= .1,
@@ -722,6 +739,9 @@ def get_canslim_analysis(symbol, statements=None):
             criteria['C'].update(score=None, status='Unknown')
         criteria['C']['salesGrowthPct'] = sales_growth
         criteria['C']['salesPeriods'] = [str(d)[:10] for d in sales_dates]
+        criteria['C']['periodsAligned'] = quarters_aligned
+        criteria['S'].update(stale=volume_stale, observations=volume_observations,
+                             baselinePeriods=[str(d)[:10] for d in volume_baseline_dates])
         known = [v for v in criteria.values() if v['score'] is not None]
         score = round(sum(v['score'] for v in known) / len(known)) if len(known) >= 5 else None
         return {'status': 'success', 'data': {'symbol': symbol.upper(), 'applicable': True,

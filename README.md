@@ -452,6 +452,10 @@ separate costs, benchmark and dated-holdings research rather than corporate grad
 `GET /api/research/:symbol` returns the shared UI/agent evidence packet, source
 provenance, missing-data blockers, immutable ID and content hash. It distinguishes
 provider event dates from retrieval time. `?refresh=1` collects a new packet.
+AI tools and generated briefs use a compact projection with measured scores and
+recent references. Complete statements and filing archives remain available through
+`GET /api/research/packets/:id`; the content hash identifies that complete saved
+record. Partial references or holdings in a chat summary do not establish full coverage.
 Research prices never replace execution quotes. CAN SLIM price, volume and ownership
 proxies are labeled explicitly; custom-universe relative strength is not an official
 IBD rating. The universe refresh replaces a coherent cohort atomically and retains
@@ -484,8 +488,13 @@ it does not establish that the investment thesis is correct.
 The Strategy Research Lab includes prospective agent evaluations. Freeze the model,
 strategy version, benchmark, collection window, outcome horizon, cost assumption
 and minimum sample before collecting distinct-symbol buy/hold/avoid decisions.
-The server records immutable, dividend/split-adjusted histories for matched next-close
-and maturity comparisons; it does not accept caller-supplied returns. Outcomes are
+The server records immutable, dividend/split-adjusted histories. New evaluations
+measure the horizon in calendar days after the next common completed closing entry;
+exit is the first common completed close on or after that maturity. One-day horizons
+therefore require distinct entry and exit sessions. Existing evaluations retain their
+frozen decision-date timing; a legacy horizon with no positive holding period is
+explicitly excluded and requires a new evaluation. The server does not accept
+caller-supplied returns. Outcomes are
 research observations, not executed portfolio returns or verified live readiness.
 No evaluation automatically promotes a strategy. The existing simulator evidence
 and risk gates remain separate. DCF scenarios require an explicit enterprise or equity
