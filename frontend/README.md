@@ -1,8 +1,9 @@
-# Stock Dashboard frontend
+# Oakline frontend
 
-React, TypeScript, Vite, and Tailwind provide the research dashboard, portfolio,
-simulator, paper-trading views, and AI chat. Follow the [root setup guide](../README.md#setup)
-to configure the backend and its Python environments first.
+React, TypeScript, Vite, and Tailwind provide Oakline's research dashboard,
+portfolio, simulator, paper-trading and live-investing views, Research Lab, and
+AI chat. Follow the [root setup guide](../README.md#setup) to configure the
+backend and its Python environments first.
 
 ## Development
 

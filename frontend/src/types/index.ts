@@ -1,5 +1,5 @@
 /**
- * Shared TypeScript types for the stock dashboard.
+ * Shared TypeScript types for Oakline.
  * Field names match exactly what the Express backend returns from the Python yfinance wrapper.
  */
 

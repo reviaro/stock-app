@@ -59,7 +59,7 @@ export function Dashboard() {
       <div className="max-w-[1600px] mx-auto">
         {/* Header with title and glossary button */}
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-          <h1 className="text-2xl font-bold text-foreground">Stock Dashboard</h1>
+          <h1 className="text-2xl font-bold text-foreground">Market overview</h1>
           <div className="flex items-center gap-2">
             <button
               type="button"

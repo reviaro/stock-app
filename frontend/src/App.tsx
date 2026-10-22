@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { WorkspaceErrorBoundary } from '@/components/WorkspaceErrorBoundary'
+import { OaklineBrand } from '@/components/OaklineBrand'
 import { useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence, motion, MotionConfig } from 'framer-motion'
 
@@ -66,7 +67,8 @@ function LoginPage({ onAuthenticated, initialError }: {
       <section className="w-full max-w-sm rounded-xl border border-border bg-card p-6 shadow-lg">
         <div className="mb-6">
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-primary">Private investment workspace</p>
-          <h1 className="mt-2 text-2xl font-bold text-foreground">Stock Dashboard</h1>
+          <h1 className="mt-3 text-3xl text-foreground"><OaklineBrand /></h1>
+          <p className="mt-2 text-base text-foreground">Invest with perspective.</p>
           <p className="mt-2 text-sm text-muted-foreground">Sign in to access portfolio, simulator, research, and broker data.</p>
         </div>
         <form className="space-y-4" onSubmit={submit}>
@@ -126,7 +128,7 @@ function App() {
         }
       })
       .catch(() => {
-        if (active) setAuth({ status: 'guest', error: 'Unable to reach the dashboard server.' })
+        if (active) setAuth({ status: 'guest', error: 'Unable to reach Oakline.' })
       })
     return () => { active = false }
   }, [])
@@ -145,7 +147,7 @@ function App() {
   }
 
   if (auth.status === 'loading') {
-    return <main className="min-h-screen flex items-center justify-center bg-background text-sm text-muted-foreground">Securing dashboard…</main>
+    return <main className="min-h-screen flex items-center justify-center bg-background text-sm text-muted-foreground">Opening Oakline…</main>
   }
   if (auth.status === 'guest') {
     return <LoginPage initialError={auth.error} onAuthenticated={(username, sampleData) => setAuth({ status: 'authenticated', username, sampleData })} />
@@ -154,36 +156,43 @@ function App() {
   return (
     <MotionConfig reducedMotion="user">
       <a href="#workspace-content" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[70] focus:rounded focus:bg-background focus:p-3 focus:text-foreground">Skip to workspace</a>
-      <nav aria-label="Workspaces" className="sticky top-0 z-50 flex items-end gap-1 overflow-x-auto border-b border-border bg-background/90 backdrop-blur-sm px-4 pt-3 pb-0">
-        {TABS.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            aria-current={activeTab === tab.id ? 'page' : undefined}
-            aria-controls="workspace-content"
-            onClick={() => setActiveTab(tab.id)}
-            className={[
-              'shrink-0 whitespace-nowrap px-4 py-2 text-sm rounded-t-md border border-b-0 transition-colors',
-              activeTab === tab.id
-                ? 'border-border bg-card text-foreground font-semibold'
-                : 'border-transparent text-muted-foreground hover:text-foreground',
-            ].join(' ')}
-          >
-            {tab.label}
+      <header className="sticky top-0 z-50 border-b border-border bg-background/95 backdrop-blur-sm">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3">
+          <button type="button" onClick={() => setActiveTab('dashboard')} aria-label="Oakline home" className="rounded-md text-xl text-foreground">
+            <OaklineBrand />
           </button>
-        ))}
-        <div className="ml-auto flex items-center gap-3 pb-1.5 pl-4 text-xs text-muted-foreground">
-          {auth.sampleData && <span className="whitespace-nowrap rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 font-medium text-primary">Sample data</span>}
-          <span>{auth.username}</span>
-          <button
-            type="button"
-            onClick={() => void logout()}
-            className="rounded-md border border-border px-2.5 py-1 transition-colors hover:border-primary hover:text-foreground"
-          >
-            Sign out
-          </button>
+          <div className="flex min-w-0 flex-wrap items-center gap-3 text-xs text-muted-foreground">
+            {auth.sampleData && <span className="whitespace-nowrap rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 font-medium text-primary">Sample data</span>}
+            <span className="max-w-40 truncate" title={auth.username}>{auth.username}</span>
+            <button
+              type="button"
+              onClick={() => void logout()}
+              className="shrink-0 rounded-md border border-border px-2.5 py-1 transition-colors hover:border-primary hover:text-foreground"
+            >
+              Sign out
+            </button>
+          </div>
         </div>
-      </nav>
+        <nav aria-label="Workspaces" className="flex items-end gap-1 overflow-x-auto px-4">
+          {TABS.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              aria-current={activeTab === tab.id ? 'page' : undefined}
+              aria-controls="workspace-content"
+              onClick={() => setActiveTab(tab.id)}
+              className={[
+                'shrink-0 whitespace-nowrap px-4 py-2 text-sm rounded-t-md border border-b-0 transition-colors',
+                activeTab === tab.id
+                  ? 'border-border bg-card text-foreground font-semibold'
+                  : 'border-transparent text-muted-foreground hover:text-foreground',
+              ].join(' ')}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </nav>
+      </header>
 
       {logoutError && <p role="alert" className="p-3 text-sm text-destructive">{logoutError}</p>}
       <section id="workspace-content" tabIndex={-1} aria-label={TABS.find((tab) => tab.id === activeTab)?.label}>
