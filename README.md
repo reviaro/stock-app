@@ -114,6 +114,10 @@ for the commands, including the separate Portfolio Lab Python checks.
 
 ## Safety and scope
 
+For scoped Paper Day Trading v2 automation, see the
+[entry preview API](docs/paper-entry-preview.md) for server-calculated sizing,
+reviewed dollar budgets, submission checks, and recovery rules.
+
 This project is educational and research software, not financial advice. It
 does not guarantee returns. Paper and live broker integrations use separate
 credentials and fixed endpoints. Both start with order submission disabled.

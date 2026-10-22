@@ -93,6 +93,162 @@ test('healthy entry: pending plan and event first, exactly one submit, parent an
     assert.deepStrictEqual(events, ['submission_started', 'entry_admitted', 'submission_acknowledged', 'entry_settled']);
 });
 
+function previewIntent(patch = {}) {
+    const { qty: _qty, ...input } = intent(patch);
+    return { ...input, max_notional_dollars: 2000, max_risk_dollars: 100 };
+}
+
+test('preview then submit re-reads the quote and refuses a move above the reviewed entry ceiling', async () => {
+    const { client, calls } = fakeClient();
+    const execution = createV2Execution({ store, client, now: () => NOW });
+    const input = previewIntent({ target: 110 });
+    const before = await store.listEvents();
+    const preview = await execution.previewEntry(input);
+    assert.strictEqual(preview.eligible, true);
+    assert.deepStrictEqual(await store.listEvents(), before);
+    assert.deepStrictEqual(await store.listPlans(), []);
+    client.getLatestQuote = async () => ({ symbol: 'NVDA', quote: { t: '2026-09-23T14:59:59.000Z', bp: 100.98, bs: 3, ap: 101, as: 2 } });
+    await assert.rejects(execution.submitEntry({ ...input, ...preview.submission }), { code: 'ALPACA_V2_ENTRY_PRICE_MOVED' });
+    assert.strictEqual(calls.submit.length, 0);
+    assert.deepStrictEqual(await store.listPlans(), []);
+    const refused = (await store.listEvents()).find((event) => event.event_type === 'entry_refused');
+    assert.strictEqual(refused.reason_code, 'ALPACA_V2_ENTRY_PRICE_MOVED');
+    assert.strictEqual(JSON.parse(refused.detail_json).max_entry_price, 100.5);
+});
+
+test('preview never authorizes stale account headroom; final submission rechecks cash reserve', async () => {
+    const { client, calls } = fakeClient();
+    const execution = createV2Execution({ store, client, now: () => NOW });
+    const input = previewIntent();
+    const preview = await execution.previewEntry(input);
+    client.getAccount = async () => ({ status: 'ACTIVE', cash: '10500', equity: '100000' });
+    await assert.rejects(execution.submitEntry({ ...input, ...preview.submission }), { code: 'ALPACA_V2_MIN_CASH_RESERVE_BREACHED' });
+    assert.strictEqual(calls.submit.length, 0);
+    assert.deepStrictEqual(await store.listPlans(), []);
+});
+
+test('eligible preview can be submitted once with its budgets and ceiling retained in evidence', async () => {
+    const { client, calls } = fakeClient();
+    const execution = createV2Execution({ store, client, now: () => NOW });
+    const input = previewIntent();
+    const preview = await execution.previewEntry(input);
+    const body = { ...input, ...preview.submission };
+    const result = await execution.submitEntry(body);
+    assert.strictEqual(result.outcome, 'acknowledged');
+    assert.strictEqual(calls.submit.length, 1);
+    assert.strictEqual(calls.submit[0].qty, preview.qty);
+    assert.strictEqual(calls.submit[0].limit_price, preview.entryPrice);
+    const evidence = JSON.parse(result.plan.entry_evidence_json);
+    assert.strictEqual(evidence.max_notional_dollars, 2000);
+    assert.strictEqual(evidence.max_risk_dollars, 100);
+    assert.strictEqual(evidence.max_entry_price, preview.entryPrice);
+    assert.strictEqual((await execution.submitEntry(body)).outcome, 'replayed');
+    assert.strictEqual(calls.submit.length, 1);
+});
+
+for (const elapsed of [10_000, 10_001, -1]) {
+    test(`final admission bounds the entire broker snapshot age even when the last quote is fresh: ${elapsed}ms`, async () => {
+        let clock = NOW.getTime();
+        const { client, calls } = fakeClient({
+            // The account result is captured first. A late quote cannot make it current again.
+            getLatestQuote: async () => {
+                clock += elapsed;
+                return { symbol: 'NVDA', quote: { t: new Date(clock).toISOString(), bp: 99.98, bs: 3, ap: 100, as: 2 } };
+            },
+        });
+        const execution = createV2Execution({ store, client, now: () => new Date(clock) });
+        if (elapsed === 10_000) {
+            assert.strictEqual((await execution.submitEntry(intent())).outcome, 'acknowledged');
+            assert.strictEqual(calls.submit.length, 1);
+        } else {
+            await assert.rejects(execution.submitEntry(intent()), { code: 'ALPACA_V2_BROKER_SNAPSHOT_STALE' });
+            assert.strictEqual(calls.submit.length, 0);
+            assert.deepStrictEqual(await store.listPlans(), []);
+        }
+    });
+}
+
+for (const [scenario, delay, patch, quoteAge, reason] of [
+    ['slow admission', 11_000, {}, 0, 'ALPACA_V2_BROKER_SNAPSHOT_STALE'],
+    ['quote expires during admission', 2000, {}, 9000, 'ALPACA_V2_QUOTE_UNAVAILABLE'],
+    ['deadline passes during admission', 1000, { exit_deadline: '2026-09-23T15:00:00.500Z' }, 0, 'ALPACA_V2_EXIT_DEADLINE_INVALID'],
+    ['evidence expires during admission', 1000, { candidate_evidence: { observed_at: '2026-09-23T14:45:00.500Z' } }, 0, 'ALPACA_V2_EVIDENCE_INVALID'],
+]) {
+    test(`${scenario} cancels and settles the never-sent plan without a broker call`, async () => {
+        let clock = NOW.getTime();
+        const slowStore = { ...store, transaction: (fn) => store.transaction((repo) => fn({ ...repo,
+            createPlan: async (input) => { const result = await repo.createPlan(input); clock += delay; return result; },
+        })) };
+        const { client, calls } = fakeClient({ getLatestQuote: async () => ({ symbol: 'NVDA', quote: {
+            t: new Date(clock - quoteAge).toISOString(), bp: 99.98, bs: 3, ap: 100, as: 2,
+        } }) });
+        const execution = createV2Execution({ store: slowStore, client, now: () => new Date(clock) });
+        await assert.rejects(execution.submitEntry(intent(patch)), { code: 'ALPACA_V2_ENTRY_EXPIRED_BEFORE_SEND' });
+        assert.strictEqual(calls.submit.length, 0);
+        const plan = await store.getPlanByClientOrderId(intent().client_order_id);
+        assert.strictEqual(plan.state, 'cancelled');
+        assert.strictEqual(plan.parent_order_id, null);
+        assert.deepStrictEqual(await store.listEntrySubmissions(), []);
+        const event = (await store.listEvents(plan.id)).find((entry) => entry.action === 'expired_before_send');
+        assert.strictEqual(event.reason_code, reason);
+        assert.strictEqual(event.outcome, 'not_sent');
+        const replay = await execution.submitEntry(intent(patch));
+        assert.strictEqual(replay.outcome, 'replayed');
+        assert.strictEqual(replay.plan.state, 'cancelled');
+        assert.strictEqual(calls.submit.length, 0);
+        assert.strictEqual((await store.getMonitorState()).attention_required, 0);
+    });
+}
+
+test('expiry cleanup preserves a concurrent attention latch and still settles its unsent admission', async () => {
+    let clock = NOW.getTime();
+    const slowStore = { ...store, transaction: (fn) => store.transaction((repo) => fn({ ...repo,
+        createPlan: async (input) => {
+            const result = await repo.createPlan(input);
+            await repo.latchAttention({ planId: result.plan.id, code: 'SYNTHETIC_ATTENTION', eventKey: 'synthetic:expiry:attention' });
+            clock += 11_000;
+            return result;
+        },
+    })) };
+    const { client, calls } = fakeClient();
+    const execution = createV2Execution({ store: slowStore, client, now: () => new Date(clock) });
+    await assert.rejects(execution.submitEntry(intent()), { code: 'ALPACA_V2_CONTROL_STATE_CHANGED' });
+    assert.strictEqual(calls.submit.length, 0);
+    assert.deepStrictEqual(await store.listEntrySubmissions(), []);
+    assert.strictEqual((await store.getPlanByClientOrderId(intent().client_order_id)).state, 'attention_required');
+    assert.strictEqual((await store.getMonitorState()).attention_required, 1);
+});
+
+test('older broker fill proofs expiring during admission prevent send even when account and quote remain fresh', async () => {
+    for (const [symbol, id] of [['XYZ', 'proof-one'], ['ABC', 'proof-two']]) {
+        const { plan } = await store.createPlan({
+            client_order_id: `dt2-${id}`, symbol, setup: 'example', catalyst: 'example', thesis: 'example', invalidation: 'example',
+            planned_qty: 1, planned_entry_price: 100, planned_stop: 98, planned_target: 104, planned_risk_dollars: 2,
+            exit_deadline: '2026-09-23T19:30:00.000Z',
+        });
+        await store.updatePlan(plan.id, { state: 'working', parent_order_id: id });
+    }
+    let clock = NOW.getTime(); let proofReads = 0;
+    const slowStore = { ...store, transaction: (fn) => store.transaction((repo) => fn({ ...repo,
+        createPlan: async (input) => { const result = await repo.createPlan(input); clock += 2000; return result; },
+    })) };
+    const { client, calls } = fakeClient({
+        getOrder: async (id) => {
+            if (++proofReads === 2) clock += 9000;
+            return { id, symbol: id === 'proof-one' ? 'XYZ' : 'ABC', side: 'buy', filled_qty: '0', legs: [] };
+        },
+        getLatestQuote: async () => ({ symbol: 'NVDA', quote: { t: new Date(clock).toISOString(), bp: 99.98, bs: 3, ap: 100, as: 2 } }),
+    });
+    const execution = createV2Execution({ store: slowStore, client, now: () => new Date(clock) });
+    await assert.rejects(execution.submitEntry(intent()), { code: 'ALPACA_V2_ENTRY_EXPIRED_BEFORE_SEND' });
+    assert.strictEqual(calls.submit.length, 0);
+    const plan = await store.getPlanByClientOrderId(intent().client_order_id);
+    assert.strictEqual(plan.state, 'cancelled');
+    const event = (await store.listEvents(plan.id)).find((entry) => entry.action === 'expired_before_send');
+    assert.strictEqual(event.reason_code, 'ALPACA_V2_DAILY_PNL_UNAVAILABLE');
+    assert.deepStrictEqual(await store.listEntrySubmissions(), []);
+});
+
 test('a definite 4xx rejection persists rejected with a sanitized reason and never retries', async () => {
     const { client, calls } = fakeClient({ submitOrder: async (order) => { calls.submit.push(order); throw brokerError(422, 'ALPACA_BROKER_REJECTED'); } });
     const execution = createV2Execution({ store, client, now: () => NOW });

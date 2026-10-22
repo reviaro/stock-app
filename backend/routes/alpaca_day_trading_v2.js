@@ -3,7 +3,7 @@
 // Alpaca Day Trading v2 strategy-lab API. Readers get sanitized status/reason codes and
 // user-meaningful quantities and prices only -- never broker/client/order ids, raw broker
 // bodies, account ids, URLs, credentials, or exception text. Operator controls require an
-// authenticated operator session; the scoped automation principal may only submit entries,
+// authenticated operator session; the scoped automation principal may only preview or submit entries,
 // NO TRADE decisions, and reviews for account 2.
 const { createAsyncRouter } = require('../services/http_errors');
 const defaultStore = require('../services/alpaca_day_trade_v2_store');
@@ -22,10 +22,17 @@ const KEY = /^[A-Za-z0-9:._-]{1,100}$/;
 
 // Fixed phrases only: policy errors never leak computed account figures.
 const ERRORS = {
+    ALPACA_V2_ENTRY_EXPIRED_BEFORE_SEND: [409, 'the entry expired and was cancelled before broker submission; prepare a fresh intent and preview'],
     ALPACA_V2_FIELD_NOT_ALLOWED: [400, 'the entry included a field that is not permitted'],
     ALPACA_V2_ACCOUNT_SCOPE_REQUIRED: [400, 'account_id 2 is required'],
     ALPACA_V2_CLIENT_ORDER_ID_INVALID: [400, 'a v2 client order id is required'],
     ALPACA_V2_QTY_INVALID: [400, 'invalid share quantity'],
+    ALPACA_V2_SIZING_INVALID: [400, 'valid notional and risk budgets are required'],
+    ALPACA_V2_ENTRY_PRICE_MOVED: [409, 'the entry price exceeds the reviewed maximum; request a new preview'],
+    ALPACA_V2_NOTIONAL_BUDGET_EXCEEDED: [422, 'the entry exceeds the reviewed notional budget'],
+    ALPACA_V2_RISK_BUDGET_EXCEEDED: [422, 'the entry exceeds the reviewed risk budget'],
+    ALPACA_V2_OPEN_RISK_UNAVAILABLE: [503, 'existing open risk could not be verified'],
+    ALPACA_V2_BROKER_SNAPSHOT_STALE: [409, 'the broker snapshot is no longer current; request a new preview'],
     ALPACA_V2_STRATEGY_FIELDS_REQUIRED: [400, 'setup, catalyst, thesis, and invalidation are required'],
     ALPACA_V2_SYMBOL_INVALID: [400, 'a US equity symbol is required'],
     ALPACA_V2_EXIT_DEADLINE_INVALID: [400, 'the exit deadline must fall within the current session'],
@@ -78,8 +85,52 @@ function fail(res, status, code, error) {
 }
 
 function respondError(res, err) {
-    const [status, message] = ERRORS[err?.code] || [500, 'the request could not be completed'];
-    return fail(res, status, ERRORS[err?.code] ? err.code : 'ALPACA_V2_ERROR', message);
+    const known = typeof err?.code === 'string' && Object.hasOwn(ERRORS, err.code);
+    const [status, message] = known ? ERRORS[err.code] : [500, 'the request could not be completed'];
+    return fail(res, status, known ? err.code : 'ALPACA_V2_ERROR', message);
+}
+
+const PREVIEW_CONSTRAINT_KEYS = [
+    'maxNotionalDollars', 'maxRiskDollars', 'maxQty', 'availableCashDollars', 'minimumCashReserveDollars',
+    'maxPositionDollars', 'maxRiskPerTradeDollars', 'remainingOpenRiskDollars', 'minRewardRiskRatio',
+    'maxDailyLossDollars', 'dailyRealizedPnl',
+];
+
+function sanitizeEntryPreview(preview = {}) {
+    const finite = (value) => typeof value === 'number' && Number.isFinite(value) ? value : null;
+    const timestamp = (value) => typeof value === 'string'
+        && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+        && Number.isFinite(Date.parse(value)) ? value : null;
+    const codes = Array.isArray(preview.blockerCodes) ? preview.blockerCodes : ['ALPACA_V2_ERROR'];
+    const blockers = [...new Set(codes.map((code) => typeof code === 'string' && Object.hasOwn(ERRORS, code) ? code : 'ALPACA_V2_ERROR'))]
+        .map((code) => ({ code, message: code === 'ALPACA_V2_ERROR' ? 'the preview could not be verified' : ERRORS[code][1] }));
+    const entryPrice = finite(preview.entryPrice);
+    const quote = preview.quote ? {
+        bidPrice: finite(preview.quote.bidPrice), askPrice: finite(preview.quote.askPrice),
+        feed: ['iex', 'sip'].includes(preview.quote.feed) ? preview.quote.feed : null,
+        sourceTimestamp: timestamp(preview.quote.sourceTimestamp), retrievedAt: timestamp(preview.quote.retrievedAt),
+    } : null;
+    const submission = preview.submission ? {
+        qty: finite(preview.submission.qty), max_entry_price: finite(preview.submission.max_entry_price),
+        max_notional_dollars: finite(preview.submission.max_notional_dollars), max_risk_dollars: finite(preview.submission.max_risk_dollars),
+    } : null;
+    const asOf = timestamp(preview.asOf);
+    const quoteExpiresAt = timestamp(preview.quoteExpiresAt);
+    const eligible = preview.eligible === true && blockers.length === 0
+        && Number.isSafeInteger(preview.qty) && preview.qty > 0 && entryPrice > 0
+        && submission?.qty === preview.qty && submission.max_entry_price >= entryPrice
+        && submission.max_notional_dollars > 0 && submission.max_risk_dollars > 0
+        && quote?.bidPrice > 0 && quote.askPrice >= quote.bidPrice && quote.feed !== null
+        && quote.sourceTimestamp !== null && quote.retrievedAt !== null && asOf !== null && quoteExpiresAt !== null;
+    if (!eligible && blockers.length === 0) blockers.push({ code: 'ALPACA_V2_ERROR', message: 'the preview could not be verified' });
+    return {
+        eligible, qty: eligible ? preview.qty : 0, entryPrice, quote,
+        notionalDollars: eligible ? finite(preview.notionalDollars) : null,
+        riskDollars: eligible ? finite(preview.riskDollars) : null,
+        rewardRiskRatio: eligible ? finite(preview.rewardRiskRatio) : null,
+        constraints: Object.fromEntries(PREVIEW_CONSTRAINT_KEYS.map((key) => [key, finite(preview.constraints?.[key])])),
+        blockers, submission: eligible ? submission : null, asOf, quoteExpiresAt, indicative: true,
+    };
 }
 
 const isOperator = (req) => req.auth?.type === 'session' && req.auth?.role === 'operator';
@@ -170,6 +221,17 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
     }
 
     // ---- scoped automation ----
+
+    router.post('/entries/preview', async (req, res) => {
+        res.setHeader('Cache-Control', 'no-store');
+        if (!requireScope(req, res)) return undefined;
+        try {
+            const preview = await getExecution().previewEntry(req.body);
+            return res.json({ status: 'success', data: sanitizeEntryPreview(preview) });
+        } catch (err) {
+            return respondError(res, err);
+        }
+    });
 
     router.post('/entries', async (req, res) => {
         if (!requireScope(req, res)) return undefined;
@@ -537,4 +599,4 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
     return router;
 }
 
-module.exports = { createV2Router, sanitizePlan, sanitizeEvent };
+module.exports = { createV2Router, sanitizePlan, sanitizeEvent, sanitizeEntryPreview };

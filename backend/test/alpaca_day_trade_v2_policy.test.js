@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 
 const {
-    buildV2EntryOrder, buildTimeExitOrder, timeExitClientOrderId, ALLOWED_INTENT_FIELDS, DEFAULT_V2_POLICY,
+    buildV2EntryOrder, buildV2EntryPreview, assertV2PreviewIntent, buildTimeExitOrder, timeExitClientOrderId, ALLOWED_INTENT_FIELDS, DEFAULT_V2_POLICY,
 } = require('../services/alpaca_day_trade_v2_policy');
 
 const NOW = new Date('2026-09-23T15:00:00.000Z');
@@ -65,6 +65,7 @@ test('the caller allowlist is exactly the documented intent fields', () => {
     assert.deepStrictEqual([...ALLOWED_INTENT_FIELDS].sort(), [
         'account_id', 'catalyst', 'client_order_id', 'exit_deadline', 'invalidation', 'qty', 'setup', 'stop', 'symbol', 'target', 'thesis',
         'setup_id', 'strategy_version', 'catalyst_class', 'candidate_evidence',
+        'max_notional_dollars', 'max_risk_dollars', 'max_entry_price',
     ].sort());
 });
 
@@ -83,7 +84,7 @@ test('requires account 2 and a v2 client order id', () => {
 });
 
 test('rejects non-whole, non-positive, or non-numeric quantities', () => {
-    for (const qty of [0, -1, 1.5, '10', null, Number.NaN]) rejectsWith('ALPACA_V2_QTY_INVALID', { intent: { qty } });
+    for (const qty of [0, -1, 1.5, '10', null, Number.NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) rejectsWith('ALPACA_V2_QTY_INVALID', { intent: { qty } });
 });
 
 test('requires every strategy field', () => {
@@ -214,4 +215,244 @@ test('the time-exit order is one exact-quantity DAY market sell with a determini
     });
     assert.throws(() => buildTimeExitOrder({ plan, qty: 0 }), (err) => err.code === 'ALPACA_V2_QTY_INVALID');
     assert.throws(() => buildTimeExitOrder({ plan, qty: 2.5 }), (err) => err.code === 'ALPACA_V2_QTY_INVALID');
+});
+
+function previewInputs(overrides = {}) {
+    const args = inputs(overrides);
+    if (!Object.hasOwn(overrides.intent || {}, 'qty')) delete args.intent.qty;
+    args.intent = { max_notional_dollars: 5000, max_risk_dollars: 100, ...args.intent };
+    return args;
+}
+
+function submissionArgs(args, preview) {
+    const { max_qty: _maxQty, ...intent } = args.intent;
+    return { ...args, intent: { ...intent, ...preview.submission } };
+}
+
+test('preview returns the largest risk-budgeted whole quantity, exact quote provenance, and a capped submission', () => {
+    const args = previewInputs({ quoteRetrievedAt: '2026-09-23T14:59:59.000Z' });
+    const original = structuredClone(args);
+    const preview = buildV2EntryPreview(args);
+    assert.strictEqual(preview.eligible, true);
+    assert.strictEqual(preview.qty, 40);
+    assert.strictEqual(preview.entryPrice, 100.5);
+    assert.strictEqual(preview.notionalDollars, 4020);
+    assert.strictEqual(preview.riskDollars, 100);
+    assert.strictEqual(preview.rewardRiskRatio, 1.4);
+    assert.deepStrictEqual(preview.quote, { bidPrice: 99.98, askPrice: 100, feed: 'iex',
+        sourceTimestamp: '2026-09-23T14:59:58.000Z', retrievedAt: '2026-09-23T14:59:59.000Z' });
+    assert.deepStrictEqual(preview.submission, { qty: 40, max_entry_price: 100.5, max_notional_dollars: 5000, max_risk_dollars: 100 });
+    assert.deepStrictEqual(preview.blockerCodes, []);
+    assert.deepStrictEqual(args, original, 'preview must not mutate caller facts or intent');
+    assert.strictEqual(buildV2EntryOrder(submissionArgs(args, preview)).order.qty, 40);
+    assert.throws(() => buildV2EntryOrder({ ...submissionArgs(args, preview), intent: { ...submissionArgs(args, preview).intent, qty: 41 } }),
+        (error) => error.code === 'ALPACA_V2_RISK_BUDGET_EXCEEDED');
+});
+
+test('preview respects notional dollars and an optional caller quantity ceiling', () => {
+    assert.strictEqual(buildV2EntryPreview(previewInputs({ intent: { max_notional_dollars: 2010 } })).qty, 20);
+    assert.strictEqual(buildV2EntryPreview(previewInputs({ intent: { max_notional_dollars: 2009.9999 } })).qty, 19);
+    assert.strictEqual(buildV2EntryPreview(previewInputs({ intent: { max_qty: 7 } })).qty, 7);
+    assert.strictEqual(buildV2EntryPreview(previewInputs({ intent: { max_qty: Number.MAX_SAFE_INTEGER } })).qty, 40);
+});
+
+test('preview preserves position, per-trade, aggregate-risk, reserve, and working-order caps', () => {
+    const generous = { max_notional_dollars: 100000, max_risk_dollars: 100000 };
+    const cases = [
+        [{ intent: generous }, 248, 'ALPACA_V2_POSITION_LIMIT_EXCEEDED'],
+        [{ intent: { ...generous, stop: 94, target: 108 } }, 153, 'ALPACA_V2_RISK_PER_TRADE_EXCEEDED'],
+        [{ intent: generous, context: { currentOpenRiskDollars: 1900 } }, 40, 'ALPACA_V2_TOTAL_OPEN_RISK_EXCEEDED'],
+        [{ intent: generous, account: { cash: '11000' } }, 9, 'ALPACA_V2_MIN_CASH_RESERVE_BREACHED'],
+        [{ intent: generous, account: { cash: '11000' }, openOrders: [{ side: 'buy', qty: '8', filled_qty: '3', limit_price: '100' }] }, 4, 'ALPACA_V2_MIN_CASH_RESERVE_BREACHED'],
+    ];
+    for (const [overrides, expectedQty, expectedCode] of cases) {
+        const args = previewInputs(overrides);
+        const preview = buildV2EntryPreview(args);
+        assert.strictEqual(preview.qty, expectedQty);
+        const submission = submissionArgs(args, preview);
+        assert.ok(buildV2EntryOrder(submission));
+        assert.throws(() => buildV2EntryOrder({ ...submission, intent: { ...submission.intent, qty: expectedQty + 1 } }),
+            (error) => error.code === expectedCode);
+    }
+});
+
+test('preview never rounds a sub-share budget up into an order', () => {
+    for (const [limits, code] of [
+        [{ max_notional_dollars: 100.49999 }, 'ALPACA_V2_NOTIONAL_BUDGET_EXCEEDED'],
+        [{ max_risk_dollars: 2.49999 }, 'ALPACA_V2_RISK_BUDGET_EXCEEDED'],
+    ]) {
+        const result = buildV2EntryPreview(previewInputs({ intent: limits }));
+        assert.strictEqual(result.eligible, false);
+        assert.strictEqual(result.qty, 0);
+        assert.strictEqual(result.submission, null);
+        assert.strictEqual(result.notionalDollars, null);
+        assert.strictEqual(result.riskDollars, null);
+        assert.strictEqual(result.rewardRiskRatio, null);
+        assert.strictEqual(result.entryPrice, 100.5);
+        assert.ok(result.quote);
+        assert.deepStrictEqual(result.blockerCodes, [code]);
+    }
+});
+
+test('four-decimal prices and sub-cent loss budgets remain exact before policy rounding', () => {
+    const args = previewInputs({ intent: { stop: 0.0099, target: 0.0102, max_notional_dollars: 0.03, max_risk_dollars: 0.0003 },
+        quote: { quote: { t: NOW.toISOString(), bp: 0.0099, bs: 1, ap: 0.01, as: 1 } } });
+    const result = buildV2EntryPreview(args);
+    assert.strictEqual(result.qty, 3);
+    assert.strictEqual(result.notionalDollars, 0.03);
+    assert.strictEqual(result.riskDollars, 0.0003);
+    const order = submissionArgs(args, result);
+    assert.strictEqual(buildV2EntryOrder(order).plan.planned_risk_dollars, 0);
+    assert.throws(() => buildV2EntryOrder({ ...order, intent: { ...order.intent, qty: 4, max_notional_dollars: 1 } }),
+        (error) => error.code === 'ALPACA_V2_RISK_BUDGET_EXCEEDED');
+    assert.strictEqual(buildV2EntryPreview({ ...args, intent: { ...args.intent, max_risk_dollars: 0.00029999999 } }).qty, 2);
+    assert.strictEqual(buildV2EntryPreview({ ...args, intent: { ...args.intent, max_risk_dollars: 1e-4 } }).qty, 1);
+    assert.strictEqual(buildV2EntryPreview({ ...args, intent: { ...args.intent, max_risk_dollars: 1e-7 } }).eligible, false);
+    const halfCent = { ...args, intent: { ...args.intent, max_notional_dollars: 0.5, max_risk_dollars: 0.005 } };
+    const fifty = buildV2EntryPreview(halfCent);
+    assert.strictEqual(fifty.qty, 50);
+    assert.strictEqual(buildV2EntryOrder(submissionArgs(halfCent, fifty)).plan.planned_risk_dollars, 0.01);
+});
+
+test('preview handles a bounded entry crossing the one-dollar tick boundary', () => {
+    const result = buildV2EntryPreview(previewInputs({ intent: { stop: 0.99, target: 1.02, max_notional_dollars: 10, max_risk_dollars: 1 },
+        quote: { quote: { t: NOW.toISOString(), bp: 0.998, bs: 1, ap: 0.999, as: 1 } } }));
+    assert.strictEqual(result.entryPrice, 1);
+    assert.strictEqual(result.qty, 10);
+    assert.strictEqual(result.riskDollars, 0.1);
+});
+
+test('preview rejects geometry that collapses at broker tick precision or overflows reward/risk', () => {
+    for (const intent of [{ stop: 100.4999999999 }, { stop: 0.0099, target: 1e306 }]) {
+        const args = previewInputs({ intent, ...(intent.target === 1e306
+            ? { quote: { quote: { t: NOW.toISOString(), bp: 0.0099, bs: 1, ap: 0.01, as: 1 } } } : {}) });
+        const result = buildV2EntryPreview(args);
+        assert.strictEqual(result.eligible, false);
+        assert.deepStrictEqual(result.blockerCodes, ['ALPACA_V2_GEOMETRY_INVALID']);
+    }
+});
+
+test('preview returns policy blockers for market, account, asset, duplicate, reward/risk, and daily-loss gates', () => {
+    const cases = [
+        [{ clock: { is_open: false } }, 'ALPACA_V2_MARKET_CLOSED'],
+        [{ clock: { next_close: '2026-09-23T15:10:00Z' } }, 'ALPACA_V2_ENTRY_CUTOFF_PASSED'],
+        [{ account: { trading_blocked: true } }, 'ALPACA_V2_ACCOUNT_NOT_TRADABLE'],
+        [{ asset: { tradable: false } }, 'ALPACA_V2_ASSET_NOT_TRADABLE'],
+        [{ context: { hasActivePlanForSymbol: true } }, 'ALPACA_V2_DUPLICATE_SYMBOL_PLAN'],
+        [{ intent: { target: 102 } }, 'ALPACA_V2_REWARD_RISK_TOO_LOW'],
+        [{ intent: { stop: 101 } }, 'ALPACA_V2_GEOMETRY_INVALID'],
+        [{ context: { dailyRisk: { complete: false } } }, 'ALPACA_V2_DAILY_PNL_UNAVAILABLE'],
+        [{ context: { dailyRisk: { complete: true, sessionDate: '2026-09-23', realizedPnl: -2000 } } }, 'ALPACA_V2_DAILY_LOSS_LIMIT_REACHED'],
+        [{ account: { cash: '0' } }, 'ALPACA_V2_INSUFFICIENT_CASH'],
+        [{ account: { cash: '10000' } }, 'ALPACA_V2_MIN_CASH_RESERVE_BREACHED'],
+        [{ context: { currentOpenRiskDollars: 2000 } }, 'ALPACA_V2_TOTAL_OPEN_RISK_EXCEEDED'],
+        [{ openOrders: [{ side: 'buy', qty: 1, type: 'market' }] }, 'ALPACA_V2_CASH_COMMITMENT_UNKNOWN'],
+    ];
+    for (const [overrides, code] of cases) {
+        const result = buildV2EntryPreview(previewInputs(overrides));
+        assert.strictEqual(result.eligible, false, code);
+        assert.strictEqual(result.qty, 0);
+        assert.strictEqual(result.submission, null);
+        assert.deepStrictEqual(result.blockerCodes, [code]);
+    }
+});
+
+test('preview never presents stale, future, missing, crossed, mismatched, or empty-size quotes as usable', () => {
+    const baseQuote = inputs().quote.quote;
+    const quotes = [
+        { quote: { ...baseQuote, t: '2026-09-23T14:59:49.999Z' } },
+        { quote: { ...baseQuote, t: '2026-09-23T15:00:00.001Z' } },
+        { quote: {} }, { symbol: 'OTHER' }, { quote: { ...baseQuote, bp: 101 } },
+        { quote: { ...baseQuote, as: 0 } }, { quote: { ...baseQuote, ap: Infinity } },
+    ];
+    for (const quote of quotes) {
+        const result = buildV2EntryPreview(previewInputs({ quote }));
+        assert.strictEqual(result.eligible, false);
+        assert.strictEqual(result.quote, null);
+        assert.strictEqual(result.entryPrice, null);
+        assert.deepStrictEqual(result.blockerCodes, ['ALPACA_V2_QUOTE_UNAVAILABLE']);
+    }
+    assert.strictEqual(buildV2EntryPreview(previewInputs({ quote: { quote: { ...baseQuote, t: '2026-09-23T14:59:50.000Z' } } })).eligible, true);
+});
+
+test('preview validates all caller limits and rejects broker fields before reading facts', () => {
+    for (const key of ['max_notional_dollars', 'max_risk_dollars']) {
+        for (const value of [undefined, null, 0, -1, NaN, Infinity, -Infinity, '100', true, {}, []]) {
+            const intent = previewInputs({ intent: { [key]: value } }).intent;
+            assert.throws(() => assertV2PreviewIntent(intent), (error) => error.code === 'ALPACA_V2_SIZING_INVALID');
+        }
+        const intent = previewInputs().intent;
+        delete intent[key];
+        assert.throws(() => assertV2PreviewIntent(intent), (error) => error.code === 'ALPACA_V2_SIZING_INVALID');
+    }
+    for (const max_qty of [undefined, null, 0, -1, 1.1, '10', true, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+        assert.throws(() => assertV2PreviewIntent(previewInputs({ intent: { max_qty } }).intent),
+            (error) => error.code === 'ALPACA_V2_SIZING_INVALID');
+    }
+    for (const key of ['qty', 'max_entry_price', 'limit_price', 'entry_price', 'quote', 'feed', 'side', 'notional', 'dry_run', 'preview']) {
+        assert.throws(() => assertV2PreviewIntent(previewInputs({ intent: { [key]: 1 } }).intent),
+            (error) => error.code === 'ALPACA_V2_FIELD_NOT_ALLOWED');
+    }
+    for (const symbol of [undefined, null, '', 123, [], {}, 'TOO-LONG', 'A/B']) {
+        assert.throws(() => assertV2PreviewIntent(previewInputs({ intent: { symbol } }).intent),
+            (error) => error.code === 'ALPACA_V2_SYMBOL_INVALID');
+    }
+    for (const intent of [undefined, null, [], 1, 'test']) {
+        assert.throws(() => assertV2PreviewIntent(intent), (error) => error.code === 'ALPACA_V2_FIELD_NOT_ALLOWED');
+    }
+});
+
+test('preview retains entry strategy and metadata validation instead of inventing fields', () => {
+    for (const [patch, code] of [
+        [{ account_id: 1 }, 'ALPACA_V2_ACCOUNT_SCOPE_REQUIRED'],
+        [{ account_id: '2' }, 'ALPACA_V2_ACCOUNT_SCOPE_REQUIRED'],
+        [{ client_order_id: 'not-a-v2-id' }, 'ALPACA_V2_CLIENT_ORDER_ID_INVALID'],
+        [{ thesis: '' }, 'ALPACA_V2_STRATEGY_FIELDS_REQUIRED'],
+        [{ stop: '98' }, 'ALPACA_V2_GEOMETRY_INVALID'],
+        [{ target: 104.123 }, 'ALPACA_V2_GEOMETRY_INVALID'],
+        [{ exit_deadline: 'later' }, 'ALPACA_V2_EXIT_DEADLINE_INVALID'],
+        [{ candidate_evidence: { observed_at: '2026-09-23T15:00:01Z' } }, 'ALPACA_V2_EVIDENCE_INVALID'],
+    ]) {
+        assert.throws(() => buildV2EntryPreview(previewInputs({ intent: patch })), (error) => error.code === code);
+    }
+});
+
+test('preview constraints contain only known quantitative fields and never nonfinite numbers', () => {
+    const result = buildV2EntryPreview(previewInputs({ account: { equity: 'unknown', cash: 'unknown' },
+        context: { currentOpenRiskDollars: NaN, dailyRisk: { complete: false, realizedPnl: NaN } } }));
+    assert.deepStrictEqual(Object.keys(result.constraints).sort(), ['maxNotionalDollars', 'maxRiskDollars', 'maxQty',
+        'availableCashDollars', 'minimumCashReserveDollars', 'maxPositionDollars', 'maxRiskPerTradeDollars',
+        'remainingOpenRiskDollars', 'minRewardRiskRatio', 'maxDailyLossDollars', 'dailyRealizedPnl'].sort());
+    assert.ok(Object.values(result.constraints).every((value) => value === null || (typeof value === 'number' && Number.isFinite(value))));
+    assert.strictEqual(result.constraints.availableCashDollars, null);
+    assert.strictEqual(result.constraints.maxPositionDollars, null);
+    assert.strictEqual(result.constraints.dailyRealizedPnl, null);
+});
+
+test('actual submission rechecks preview price and caller budgets, while legacy intents still work', () => {
+    assert.strictEqual(buildV2EntryOrder(inputs()).order.qty, 10);
+    const args = previewInputs({ intent: { max_notional_dollars: 2010, max_risk_dollars: 50 } });
+    const preview = buildV2EntryPreview(args);
+    const submission = submissionArgs(args, preview);
+    assert.strictEqual(buildV2EntryOrder(submission).order.qty, 20);
+    const higherQuote = { ...submission.quote, quote: { ...submission.quote.quote, ap: 100.01 } };
+    assert.throws(() => buildV2EntryOrder({ ...submission, quote: higherQuote }), (error) => error.code === 'ALPACA_V2_ENTRY_PRICE_MOVED');
+    const withoutPriceCap = { ...submission.intent };
+    delete withoutPriceCap.max_entry_price;
+    assert.throws(() => buildV2EntryOrder({ ...submission, quote: higherQuote, intent: withoutPriceCap }),
+        (error) => error.code === 'ALPACA_V2_NOTIONAL_BUDGET_EXCEEDED');
+    assert.throws(() => buildV2EntryOrder({ ...submission, quote: higherQuote, intent: { ...withoutPriceCap, max_notional_dollars: 10000 } }),
+        (error) => error.code === 'ALPACA_V2_RISK_BUDGET_EXCEEDED');
+    assert.strictEqual(buildV2EntryOrder({ ...submission, quote: { ...submission.quote, quote: { ...submission.quote.quote, ap: 99.99 } } }).order.qty, 20);
+});
+
+test('optional submission ceilings reject explicit malformed values and cannot be forwarded as broker fields', () => {
+    for (const key of ['max_notional_dollars', 'max_risk_dollars', 'max_entry_price']) {
+        for (const value of [undefined, null, 0, -1, NaN, Infinity, '100', true, {}, []]) {
+            rejectsWith('ALPACA_V2_SIZING_INVALID', { intent: { [key]: value } });
+        }
+    }
+    const built = buildV2EntryOrder(inputs({ intent: { max_notional_dollars: 1005, max_risk_dollars: 25, max_entry_price: 100.5 } }));
+    for (const key of ['max_notional_dollars', 'max_risk_dollars', 'max_entry_price', 'max_qty']) assert.ok(!Object.hasOwn(built.order, key));
+    rejectsWith('ALPACA_V2_FIELD_NOT_ALLOWED', { intent: { max_qty: 10 } });
 });
