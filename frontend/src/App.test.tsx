@@ -4,8 +4,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
 
 vi.mock('@/components/Dashboard', () => ({
-  Dashboard: () => <div>Stock Dashboard</div>,
-  default: () => <div>Stock Dashboard</div>,
+  Dashboard: () => <h1>Market overview</h1>,
+  default: () => <h1>Market overview</h1>,
 }))
 
 vi.mock('@/pages/AlpacaPaperPage', () => ({
@@ -50,7 +50,7 @@ describe('App', () => {
 
     renderWithProviders(<App />)
 
-    expect(await screen.findByRole('heading', { name: 'Stock Dashboard' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Oakline' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument()
     expect(screen.queryByText('Research Lab')).not.toBeInTheDocument()
   })
@@ -71,13 +71,13 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'secret' } })
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
 
-    await waitFor(() => expect(screen.getByText('Stock Dashboard')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Market overview' })).toBeInTheDocument())
     expect(fetch).toHaveBeenLastCalledWith('/api/auth/login', expect.objectContaining({ method: 'POST' }))
   })
 
-  it('renders the Stock Dashboard heading', async () => {
+  it('opens the market overview in the authenticated workspace', async () => {
     renderWithProviders(<App />)
-    expect(await screen.findByText('Stock Dashboard')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Market overview' })).toBeInTheDocument()
     expect(screen.queryByText('Sample data')).not.toBeInTheDocument()
   })
 

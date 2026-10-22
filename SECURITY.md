@@ -20,7 +20,10 @@ technical details.
 
 ## Broker and credential boundary
 
-The Alpaca integration is intentionally paper-only. The service rejects the
-live trading endpoint, and paper-order submission is disabled unless its
-independent enablement controls are explicitly configured. Never commit broker
-credentials, dashboard secrets, runtime databases, exports, or logs.
+Oakline's Alpaca paper client rejects the live trading endpoint, and paper-order
+submission is disabled unless its independent enablement controls are explicitly
+configured. The separate live-investing client requires its own credentials,
+expected account identity, and explicit submission gate. Live investing starts
+paused and unfunded; allocation limits and execution mode require operator review.
+Preserve the separation between paper, live, and simulator accounts. Never commit
+broker credentials, application secrets, runtime databases, exports, or logs.

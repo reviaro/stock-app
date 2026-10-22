@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none">
+  <title>Oakline</title>
+  <rect width="40" height="40" rx="10" fill="#EAF0E8"/>
+  <path d="M20 5c-3.8 0-6 3.2-4.8 6.2-3.8-1.8-7.4 1.6-5 5-4.4.8-4.4 6.5.2 7.3-1.8 4.4 3.6 7 8 3.9V35h3.2v-7.6c4.4 3.1 9.8.5 8-3.9 4.6-.8 4.6-6.5.2-7.3 2.4-3.4-1.2-6.8-5-5C26 8.2 23.8 5 20 5Z" fill="#28543E"/>
+  <path d="M20 12v16m0-8-5-4m5 8 5-4" stroke="#EAF0E8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

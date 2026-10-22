@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-yfinance wrapper for stock dashboard
+yfinance wrapper for Oakline
 Takes JSON input from stdin, outputs JSON to stdout
 """
 import yfinance as yf

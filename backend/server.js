@@ -124,7 +124,7 @@ function createApp({ auth = createAuthFromEnv(), env = process.env } = {}) {
 function resolveListenHost(env = process.env) {
     const host = env.STOCK_DASHBOARD_HOST || '127.0.0.1';
     if (host === '127.0.0.1' || host === '::1') return host;
-    if (host !== '0.0.0.0') throw new Error('Stock Dashboard listener must use loopback or the guarded LAN proxy mode');
+    if (host !== '0.0.0.0') throw new Error('Oakline listener must use loopback or the guarded LAN proxy mode');
     if (env.STOCK_DASHBOARD_SECURE_COOKIE !== '1') throw new Error('LAN proxy mode requires secure cookies');
     let publicOrigin;
     try {
@@ -164,7 +164,7 @@ async function start() {
 
         const host = resolveListenHost();
         const server = app.listen(PORT, host, () => {
-            console.log(`Stock Dashboard running on ${host}:${PORT}`);
+            console.log(`Oakline running on ${host}:${PORT}`);
         });
         if (releaseSampleLock) {
             process.once('exit', releaseSampleLock);

@@ -1,22 +1,24 @@
-# Stock Dashboard
+# Oakline
 
-A self-hosted stock research and paper-trading workbench I use myself. It brings
-market data, a transaction-ledger portfolio, risk rules, and an AI analyst with
-tools into one app. The screenshots below use a fictional portfolio in a separate
-sample database.
+*Invest with perspective.*
+
+A self-hosted investment research and trading workbench. Oakline brings market
+data, a transaction-ledger portfolio, risk rules, and an AI analyst with tools
+into one app, with separate paper-trading and guarded live-investing workspaces.
+The screenshots below use a fictional portfolio in a separate sample database.
 
 ![Market dashboard with market pulse and a stock chart](docs/screenshots/01-dashboard.png)
 
 | Portfolio and risk rules | Paper-trading simulator |
 |---|---|
-| [![Fictional holdings, P&L, and a position-limit breach](docs/screenshots/02-portfolio.png)](docs/screenshots/02-portfolio.png) | [![Separate simulator sleeves and fictional trade history](docs/screenshots/04-simulator.png)](docs/screenshots/04-simulator.png) |
+| [![Fictional holdings and portfolio risk controls](docs/screenshots/02-portfolio.png)](docs/screenshots/02-portfolio.png) | [![Separate simulator sleeves and fictional trade history](docs/screenshots/04-simulator.png)](docs/screenshots/04-simulator.png) |
 
-[![AI analyst using the portfolio risk tool to explain a position-limit breach](docs/screenshots/03-ai-analyst.png)](docs/screenshots/03-ai-analyst.png)
+[![AI analyst workspace on the fictional sample account](docs/screenshots/03-ai-analyst.png)](docs/screenshots/03-ai-analyst.png)
 
-Live OpenAI response on the fictional account: the risk tool reports MSFT at
-18.15% against a 15% position limit. No trades were requested or executed.
+The analyst screenshot shows the workspace before a conversation starts.
+No model response or trade was generated for these screenshots.
 
-[![Portfolio Lab comparing five allocation methods with walk-forward results](docs/screenshots/05-portfolio-lab.png)](docs/screenshots/05-portfolio-lab.png)
+[![Portfolio Lab comparing five allocation methods using synthetic sample histories](docs/screenshots/05-portfolio-lab.png)](docs/screenshots/05-portfolio-lab.png)
 
 **Two-minute walkthrough:** recording pending. There is no hosted demo; use the
 [local sample setup](#local-sample-portfolio) to explore it yourself.
@@ -66,9 +68,9 @@ they change as the app evolves.
 
 | Measure | Count |
 |---|---:|
-| Backend JavaScript tests / test files | 758 / 79 |
-| Frontend tests / test files | 88 / 27 |
-| API route files | 19 |
+| Backend JavaScript tests / test files | 919 / 95 |
+| Frontend tests / test files | 107 / 30 |
+| API route files | 21 |
 | Standalone migration files | 2 |
 
 Schema initialization also lives in `backend/database/db.js`. See [Tests](#tests)
@@ -155,6 +157,10 @@ python3 -m venv portfolio_lab/venv && portfolio_lab/venv/bin/pip install -r port
 cp .env.example .env   # configure the required auth values documented below
 node server.js         # http://localhost:3002
 ```
+
+Oakline retains the existing `STOCK_DASHBOARD_*` configuration names for
+compatibility. Existing installations and agent integrations can keep their
+current environment variables.
 
 `.env` keys:
 
