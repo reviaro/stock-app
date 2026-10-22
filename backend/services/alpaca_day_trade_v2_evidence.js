@@ -7,6 +7,7 @@ const LEGACY_METADATA = Object.freeze({
 });
 const ENTRY_EVIDENCE_KEYS = Object.freeze([
     'symbol', 'qty', 'stop', 'target', 'entry_price', 'exit_deadline', 'setup', 'catalyst', 'thesis', 'invalidation',
+    'max_entry_price', 'max_notional_dollars', 'max_risk_dollars',
     'setup_id', 'strategy_version', 'catalyst_class', 'metadata_status', 'candidate_evidence_status',
     'candidate_observed_at', 'candidate_catalyst_at', 'candidate_relative_volume', 'candidate_relative_strength_pct',
     'candidate_trend', 'candidate_entry_trigger', 'candidate_atr', 'candidate_revision_reason',
@@ -94,7 +95,9 @@ function captureEntryEvidence(intent, { quote, policy = {}, now = new Date(), re
     try { result = normalizeEntryMetadata(source, { now, maxAgeMs: policy.maxCandidateAgeMs }); }
     catch (_error) { result = { ...LEGACY_METADATA, metadata_status: 'invalid', candidate_evidence_status: 'invalid' }; }
     if (typeof source.symbol === 'string' && /^[A-Za-z]{1,5}(\.[A-Za-z])?$/.test(source.symbol.trim())) result.symbol = source.symbol.trim().toUpperCase();
-    for (const key of ['qty', 'stop', 'target']) if (boundedNumber(source[key])) result[key] = source[key];
+    for (const key of ['qty', 'stop', 'target', 'max_entry_price', 'max_notional_dollars', 'max_risk_dollars']) {
+        if (boundedNumber(source[key])) result[key] = source[key];
+    }
     for (const key of ['setup', 'catalyst', 'thesis', 'invalidation']) {
         if (typeof source[key] === 'string') result[key] = source[key].slice(0, 1000);
     }

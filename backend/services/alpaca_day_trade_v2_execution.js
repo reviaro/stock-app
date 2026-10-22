@@ -4,7 +4,7 @@
 // broker POST, submit exactly one bracket, and fail closed on any uncertainty. It never POSTs a
 // second entry for a client id: an unresolved plan is only ever resolved by looking the client
 // id up at the broker.
-const { buildV2EntryOrder, DEFAULT_V2_POLICY } = require('./alpaca_day_trade_v2_policy');
+const { buildV2EntryOrder, buildV2EntryPreview, assertV2PreviewIntent, DEFAULT_V2_POLICY } = require('./alpaca_day_trade_v2_policy');
 const crypto = require('node:crypto');
 const { captureEntryEvidence } = require('./alpaca_day_trade_v2_evidence');
 const { computeV2DailyRisk, selectV2RiskPlans } = require('./alpaca_day_trade_v2_risk');
@@ -124,6 +124,7 @@ function createV2Execution({ store, client, policy = DEFAULT_V2_POLICY, now = ()
     }
 
     async function readBrokerFacts(symbol) {
+        const readStartedAt = now().getTime();
         try {
             const quoteRead = async () => {
                 const quote = await client.getLatestQuote(symbol, { feed: policy.feed });
@@ -134,9 +135,17 @@ function createV2Execution({ store, client, policy = DEFAULT_V2_POLICY, now = ()
                 quoteRead(), client.getOrders({ status: 'open' }),
             ]);
             if (!Array.isArray(openOrders)) throw new Error('missing orders');
-            return { account, clock, asset, ...quoted, openOrders };
+            return { account, clock, asset, ...quoted, openOrders, readStartedAt };
         } catch (_error) {
             throw executionError('ALPACA_V2_BROKER_UNAVAILABLE', 'broker account state could not be read');
+        }
+    }
+
+    function assertBrokerFactsFresh(facts, checkedAt) {
+        if (!Number.isFinite(policy.maxQuoteAgeMs) || policy.maxQuoteAgeMs < 0
+            || !Number.isFinite(facts.readStartedAt) || checkedAt.getTime() < facts.readStartedAt
+            || checkedAt.getTime() - facts.readStartedAt > policy.maxQuoteAgeMs) {
+            throw executionError('ALPACA_V2_BROKER_SNAPSHOT_STALE', 'broker facts are no longer current; refresh the preview');
         }
     }
 
@@ -172,6 +181,13 @@ function createV2Execution({ store, client, policy = DEFAULT_V2_POLICY, now = ()
         return evidence;
     }
 
+    function assertBrokerRiskProofFresh(proof, checkedAt) {
+        if (!Number.isFinite(policy.maxQuoteAgeMs) || policy.maxQuoteAgeMs < 0
+            || proof.capturedAt.some((time) => !Number.isFinite(time) || checkedAt < time || checkedAt - time > policy.maxQuoteAgeMs)) {
+            throw executionError('ALPACA_V2_DAILY_PNL_UNAVAILABLE', 'broker fill evidence is no longer current; retry');
+        }
+    }
+
     function assertBrokerRiskEvidence(plans, fills, evidence) {
         for (const plan of selectV2RiskPlans({ plans, fills, now: now() })) {
             const proof = evidence.get(plan.id);
@@ -179,11 +195,7 @@ function createV2Execution({ store, client, policy = DEFAULT_V2_POLICY, now = ()
             if (!proof || ids.some((id, index) => id !== proof.ids[index])) {
                 throw executionError('ALPACA_V2_DAILY_PNL_UNAVAILABLE', 'plan linkage changed during the fill check');
             }
-            const checkedAt = now().getTime();
-            if (!Number.isFinite(policy.maxQuoteAgeMs) || policy.maxQuoteAgeMs < 0
-                || proof.capturedAt.some((time) => !Number.isFinite(time) || checkedAt < time || checkedAt - time > policy.maxQuoteAgeMs)) {
-                throw executionError('ALPACA_V2_DAILY_PNL_UNAVAILABLE', 'broker fill evidence is no longer current; retry');
-            }
+            assertBrokerRiskProofFresh(proof, now().getTime());
             const seen = new Set();
             for (const order of proof.orders) {
                 const quantity = Number(order?.filled_qty);
@@ -212,6 +224,63 @@ function createV2Execution({ store, client, policy = DEFAULT_V2_POLICY, now = ()
                 throw executionError('ALPACA_V2_DAILY_PNL_UNAVAILABLE', 'broker order evidence is incomplete');
             }
         }
+    }
+
+    async function readEntryRiskContext(repo, symbol, brokerRiskEvidence) {
+        const allPlans = await repo.listPlans();
+        const fills = await repo.listFills();
+        const dailyRisk = computeV2DailyRisk({ plans: allPlans, fills, now: now() });
+        if (!dailyRisk.complete) throw executionError('ALPACA_V2_DAILY_PNL_UNAVAILABLE', 'today\'s reconciled v2 realized result is unavailable');
+        assertBrokerRiskEvidence(allPlans, fills, brokerRiskEvidence);
+        const openPlans = allPlans.filter((candidate) => !['closed', 'cancelled', 'rejected'].includes(candidate.state));
+        const risks = openPlans.map((candidate) => candidate.planned_risk_dollars);
+        if (risks.some((risk) => typeof risk !== 'number' || !Number.isFinite(risk) || risk < 0)) {
+            throw executionError('ALPACA_V2_OPEN_RISK_UNAVAILABLE', 'open planned risk could not be verified');
+        }
+        const currentOpenRiskDollars = risks.reduce((sum, risk) => sum + risk, 0);
+        if (!Number.isFinite(currentOpenRiskDollars)) throw executionError('ALPACA_V2_OPEN_RISK_UNAVAILABLE', 'open planned risk could not be verified');
+        return {
+            hasActivePlanForSymbol: openPlans.some((candidate) => candidate.symbol === symbol),
+            currentOpenRiskDollars,
+            dailyRisk,
+        };
+    }
+
+    // Advisory only: no recovery, journal, plan, reservation, or broker mutation.
+    // Admission still independently obtains current facts and rechecks every gate.
+    async function previewEntry(intent) {
+        assertV2PreviewIntent(intent);
+        const symbol = intent.symbol.trim().toUpperCase();
+        const snapshot = await store.transaction(async (repo) => {
+            await assertEntryGates(repo);
+            await repo.assertNoEntrySubmissions();
+            if (await repo.getPlanByClientOrderId(intent.client_order_id)) {
+                throw executionError('ALPACA_V2_DUPLICATE_CLIENT_ORDER_ID', 'this client order id was already used');
+            }
+            return { plans: await repo.listPlans(), fills: await repo.listFills(), entryVersion: await repo.getEntryVersion() };
+        });
+        const brokerRiskEvidence = await readBrokerRiskEvidence(snapshot.plans, snapshot.fills);
+        const facts = await readBrokerFacts(symbol);
+        return store.transaction(async (repo) => {
+            await assertEntryGates(repo);
+            await repo.assertNoEntrySubmissions();
+            if (await repo.getEntryVersion() !== snapshot.entryVersion) {
+                throw executionError('ALPACA_V2_CONTROL_STATE_CHANGED', 'account state changed during this check; review and retry');
+            }
+            if (await repo.getPlanByClientOrderId(intent.client_order_id)) {
+                throw executionError('ALPACA_V2_DUPLICATE_CLIENT_ORDER_ID', 'this client order id was already used');
+            }
+            const context = await readEntryRiskContext(repo, symbol, brokerRiskEvidence);
+            const checkedAt = now();
+            assertBrokerFactsFresh(facts, checkedAt);
+            const preview = buildV2EntryPreview({ intent, ...facts, context, policy, now: checkedAt });
+            return {
+                ...preview,
+                indicative: true,
+                asOf: checkedAt.toISOString(),
+                quoteExpiresAt: preview.quote ? new Date(new Date(preview.quote.sourceTimestamp).getTime() + policy.maxQuoteAgeMs).toISOString() : null,
+            };
+        });
     }
 
     async function submitEntryUnqueued(intent, attempt) {
@@ -251,29 +320,19 @@ function createV2Execution({ store, client, policy = DEFAULT_V2_POLICY, now = ()
         // Admission is the shared ordering point for every server and monitor process.
         // Gates, current risk, plan and send marker commit together. Operator controls
         // cannot report success while this marker exists. No broker I/O holds this lock.
-        const { built, plan } = await store.transaction(async (repo) => {
+        const { built, plan, context } = await store.transaction(async (repo) => {
             await assertEntryGates(repo);
             await repo.assertNoEntrySubmissions();
             if (await repo.getEntryVersion() !== entryVersion) {
                 throw executionError('ALPACA_V2_CONTROL_STATE_CHANGED', 'account state changed during this check; review and retry');
             }
-            const allPlans = await repo.listPlans();
-            const fills = await repo.listFills();
-            const dailyRisk = computeV2DailyRisk({ plans: allPlans, fills, now: now() });
-            if (dailyRisk.complete) {
-                attempt.evidence = { ...attempt.evidence, daily_realized_pnl: dailyRisk.realizedPnl,
-                    daily_loss_limit: Number(facts.account?.equity) * policy.maxDailyLossPct, session_date: dailyRisk.sessionDate };
-            }
-            if (!dailyRisk.complete) throw executionError('ALPACA_V2_DAILY_PNL_UNAVAILABLE', 'today\'s reconciled v2 realized result is unavailable');
-            assertBrokerRiskEvidence(allPlans, fills, brokerRiskEvidence);
-            const openPlans = allPlans.filter((candidate) => !['closed', 'cancelled', 'rejected'].includes(candidate.state));
+            const context = await readEntryRiskContext(repo, symbol, brokerRiskEvidence);
+            attempt.evidence = { ...attempt.evidence, daily_realized_pnl: context.dailyRisk.realizedPnl,
+                daily_loss_limit: Number(facts.account?.equity) * policy.maxDailyLossPct, session_date: context.dailyRisk.sessionDate };
+            const checkedAt = now();
+            assertBrokerFactsFresh(facts, checkedAt);
             const built = buildV2EntryOrder({
-                intent, ...facts, policy, now: now(),
-                context: {
-                    hasActivePlanForSymbol: openPlans.some((candidate) => candidate.symbol === symbol),
-                    currentOpenRiskDollars: openPlans.reduce((sum, candidate) => sum + Number(candidate.planned_risk_dollars || 0), 0),
-                    dailyRisk,
-                },
+                intent, ...facts, policy, now: checkedAt, context,
             });
             attempt.evidence = built.plan.entry_evidence;
             const { plan } = await repo.createPlan({ ...built.plan, occurred_at: now().toISOString() });
@@ -282,8 +341,33 @@ function createV2Execution({ store, client, policy = DEFAULT_V2_POLICY, now = ()
                 outcome: 'approved', detail: built.plan.entry_evidence, occurred_at: now().toISOString(),
             });
             await repo.admitEntrySubmission(plan.id, { owner: sender, occurredAt: now().toISOString() });
-            return { built, plan };
+            return { built, plan, context };
         });
+
+        // Durable admission can itself be slow. Recheck immediately before the
+        // broker call; a committed plan is not permission to send expired facts.
+        try {
+            const checkedAt = now();
+            for (const proof of brokerRiskEvidence.values()) assertBrokerRiskProofFresh(proof, checkedAt.getTime());
+            assertBrokerFactsFresh(facts, checkedAt);
+            buildV2EntryOrder({ intent, ...facts, policy, now: checkedAt, context });
+        } catch (error) {
+            const occurredAt = now().toISOString();
+            const cancelled = await store.transaction(async (repo) => {
+                const current = await repo.getPlan(plan.id);
+                const mayCancel = current.state === 'pending_submission' && !current.parent_order_id;
+                await repo.updatePlan(plan.id, mayCancel ? { state: 'cancelled' } : {}, {
+                    events: [{ event_key: `plan:${plan.id}:expired_before_send`, event_type: 'submission',
+                        action: 'expired_before_send', outcome: 'not_sent',
+                        reason_code: /^ALPACA_V2_[A-Z_]+$/.test(error?.code || '') ? error.code : 'ALPACA_V2_ERROR',
+                        detail: { symbol: plan.symbol }, occurred_at: occurredAt }],
+                });
+                await repo.settleEntrySubmission(plan.id, occurredAt);
+                return mayCancel;
+            });
+            throw executionError(cancelled ? 'ALPACA_V2_ENTRY_EXPIRED_BEFORE_SEND' : 'ALPACA_V2_CONTROL_STATE_CHANGED',
+                'the admitted entry was not sent; review its state before retrying');
+        }
 
         let ack;
         try {
@@ -365,7 +449,7 @@ function createV2Execution({ store, client, policy = DEFAULT_V2_POLICY, now = ()
         return run;
     }
 
-    return { submitEntry };
+    return { submitEntry, previewEntry };
 }
 
 module.exports = {
