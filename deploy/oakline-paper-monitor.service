@@ -1,0 +1,44 @@
+[Unit]
+Description=Oakline paper day-trading monitor
+Wants=network-online.target
+After=network-online.target oakline.service
+OnFailure=oakline-security-alert@%n.service
+
+[Service]
+Type=simple
+User=oakline
+Group=oakline
+WorkingDirectory=/opt/oakline/app/backend
+ExecStartPre=/opt/oakline/runtime/bin/node /opt/oakline/app/backend/scripts/start-isolated.js --check
+ExecStart=/opt/oakline/runtime/bin/node /opt/oakline/app/backend/scripts/start-isolated.js --paper-monitor
+# This separate credential file contains only paper-monitor settings.
+LoadCredential=app.env:/etc/oakline/paper.env
+Environment=NODE_ENV=production
+Environment=OAKLINE_SECURITY_MANIFEST=/etc/oakline/security.json
+Environment=DB_PATH_OVERRIDE=/var/lib/oakline/stocks.db
+Environment=ALPACA_V2_MONITOR_LOCK_PATH=/run/oakline-monitor/monitor.lock
+StateDirectory=oakline
+StateDirectoryMode=0700
+RuntimeDirectory=oakline-monitor
+RuntimeDirectoryMode=0700
+UMask=0077
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/oakline /run/oakline-monitor
+
+[Install]
+WantedBy=multi-user.target

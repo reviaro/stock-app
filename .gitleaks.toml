@@ -1,0 +1,20 @@
+title = "Oakline secret scanning"
+
+[extend]
+useDefault = true
+
+# Fixed idempotency identifiers in two historical synthetic tests are not keys.
+# Keep the exception restricted to these exact literals and test paths.
+[[allowlists]]
+description = "Synthetic order-id fixtures"
+condition = "AND"
+paths = ['''^backend/test/alpaca_(day_trading_migration|paper_order_audit)\.test\.js$''']
+regexTarget = "secret"
+regexes = ['''^(ltr-2f9a1c3e4b5d6a7c8e9f0a1b2c3d4e5f|dt-ambiguous-1)$''']
+
+[[allowlists]]
+description = "RFC 6238 published SHA-1 test vector key, never an operational secret"
+condition = "AND"
+paths = ['''^backend/test/(auth_security|alpaca_live_routes|server_auth_integration)\.test\.js$''']
+regexTarget = "secret"
+regexes = ['''^GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ$''']

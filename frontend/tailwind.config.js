@@ -4,6 +4,10 @@ export default {
     content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
   theme: {
   	extend: {
+      // Keep existing utility names visually stable while removing the v3 toolchain.
+      boxShadow: { sm: '0 1px 2px 0 rgb(0 0 0 / 0.05)' },
+      blur: { sm: '4px' },
+      backdropBlur: { sm: '4px' },
   		borderRadius: {
   			lg: 'var(--radius)',
   			md: 'calc(var(--radius) - 2px)',

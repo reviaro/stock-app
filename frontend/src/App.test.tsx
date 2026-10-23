@@ -38,14 +38,14 @@ describe('App', () => {
   beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ status: 'success', data: { authenticated: true, username: 'dashboard-user' } }),
+      json: async () => ({ status: 'success', data: { authenticated: true, username: 'dashboard-user', mfaConfigured: false } }),
     }))
   })
 
   it('shows login instead of dashboard content for an unauthenticated visitor', async () => {
     vi.mocked(fetch).mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ status: 'success', data: { authenticated: false } }),
+      json: async () => ({ status: 'success', data: { authenticated: false, mfaConfigured: false } }),
     } as Response)
 
     renderWithProviders(<App />)
@@ -59,11 +59,11 @@ describe('App', () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ status: 'success', data: { authenticated: false } }),
+        json: async () => ({ status: 'success', data: { authenticated: false, mfaConfigured: false } }),
       } as Response)
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ status: 'success', data: { authenticated: true, username: 'dashboard-user' } }),
+        json: async () => ({ status: 'success', data: { authenticated: true, username: 'dashboard-user', mfaConfigured: false } }),
       } as Response)
 
     renderWithProviders(<App />)
@@ -80,11 +80,52 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: 'Market overview' })).toBeInTheDocument()
     expect(screen.queryByText('Sample data')).not.toBeInTheDocument()
   })
+  it('asks for an authenticator code only when server login requires it', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'success', data: { authenticated: false, mfaConfigured: true } }) } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'success', data: { authenticated: true, username: 'dashboard-user', mfaConfigured: true } }) } as Response)
+    renderWithProviders(<App />)
+    fireEvent.change(await screen.findByLabelText('Password'), { target: { value: 'fictional-password' } })
+    fireEvent.change(screen.getByLabelText('Authenticator code'), { target: { value: '123456' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Market overview' })).toBeInTheDocument())
+    expect(fetch).toHaveBeenLastCalledWith('/api/auth/login', expect.objectContaining({ body: JSON.stringify({ username: 'dashboard-user', password: 'fictional-password', otp: '123456' }) }))
+  })
+
+  it.each(['network failure', 'server error', 'missing capabilities'])('retries %s before allowing login and restores the required authenticator field', async (failure) => {
+    if (failure === 'network failure') {
+      vi.mocked(fetch).mockRejectedValueOnce(new Error('Offline'))
+    } else {
+      vi.mocked(fetch).mockResolvedValueOnce({
+        ok: failure !== 'server error',
+        json: async () => ({ status: 'success', data: { authenticated: false, ...(failure === 'server error' ? { mfaConfigured: false } : {}) } }),
+      } as Response)
+    }
+    vi.mocked(fetch)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'success', data: { authenticated: false, mfaConfigured: true } }) } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'success', data: { authenticated: true, username: 'dashboard-user', mfaConfigured: true } }) } as Response)
+
+    renderWithProviders(<App />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Unable to verify sign-in requirements')
+    expect(screen.queryByRole('button', { name: 'Sign in' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Password')).not.toBeInTheDocument()
+    expect(fetch).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry connection' }))
+    expect(screen.queryByRole('button', { name: 'Sign in' })).not.toBeInTheDocument()
+    fireEvent.change(await screen.findByLabelText('Authenticator code'), { target: { value: '123456' } })
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'fictional-password' } })
+    expect(fetch).toHaveBeenNthCalledWith(2, '/api/auth/session', { credentials: 'same-origin' })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+
+    expect(await screen.findByRole('heading', { name: 'Market overview' })).toBeInTheDocument()
+    expect(fetch).toHaveBeenLastCalledWith('/api/auth/login', expect.objectContaining({ body: JSON.stringify({ username: 'dashboard-user', password: 'fictional-password', otp: '123456' }) }))
+  })
 
   it('shows the sample badge when the server session identifies sample data', async () => {
     vi.mocked(fetch).mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ status: 'success', data: { authenticated: true, username: 'sample-investor', sampleData: true } }),
+      json: async () => ({ status: 'success', data: { authenticated: true, username: 'sample-investor', sampleData: true, mfaConfigured: false } }),
     } as Response)
     renderWithProviders(<App />)
     expect(await screen.findByText('Sample data')).toBeInTheDocument()
@@ -92,8 +133,8 @@ describe('App', () => {
 
   it('shows the sample badge immediately after sample login', async () => {
     vi.mocked(fetch)
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'success', data: { authenticated: false } }) } as Response)
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'success', data: { authenticated: true, username: 'sample-investor', sampleData: true } }) } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'success', data: { authenticated: false, mfaConfigured: false } }) } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'success', data: { authenticated: true, username: 'sample-investor', sampleData: true, mfaConfigured: false } }) } as Response)
     renderWithProviders(<App />)
     fireEvent.change(await screen.findByLabelText('Username'), { target: { value: 'sample-investor' } })
     fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'sample-portfolio' } })

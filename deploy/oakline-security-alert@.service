@@ -1,0 +1,10 @@
+[Unit]
+Description=Record an Oakline service failure for the host alert collector
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/logger -p authpriv.alert -t oakline-security -- Service %i failed; operator review required
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

@@ -7,6 +7,8 @@ const { configuration, createLiveClient, fail } = require('./alpaca_live_client'
 const { getProvenQuote, ceilToTick, floorToTick } = require('./alpaca_market_data');
 const { computeHoldings, buildSimulatorAccount } = require('./simulator_ledger');
 const { getDefaultHybridQuote } = require('./hybrid_market_data');
+const { emitSecurityEvent } = require('./security_events');
+const MAX_EXECUTION_EVIDENCE_AGE_MS = 10_000;
 
 const numeric = (value, label) => {
     if (!['number','string'].includes(typeof value) || String(value).trim()==='' || !Number.isFinite(Number(value))) throw fail('LIVE_INVALID_BROKER_DATA','Missing or invalid '+label+'.',503);
@@ -51,6 +53,7 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
     }
     async function snapshot(retry=true) {
         const state = await store.settings(); const client = clientFactory();
+        const readStartedAt = now().getTime();
         const [account, clock, rawPositions, openOrders] = await Promise.all([client.getAccount(),client.getClock(),client.getPositions(),client.getOrders()]);
         const accountKey = requireAccount(account,state);
         if (!Array.isArray(rawPositions) || !Array.isArray(openOrders) || typeof clock?.is_open !== 'boolean') throw fail('LIVE_INVALID_BROKER_DATA','Broker positions, orders or clock could not be verified.',503);
@@ -87,7 +90,7 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
         const cash = numeric(account.cash,'cash'); const equity = numeric(account.equity,'equity');
         const cashBuyingPower = numeric(account.non_marginable_buying_power,'cash buying power');
         if (cash<0 || equity<=0 || cashBuyingPower<0) issues.push('Cash-only investing requires positive equity and non-negative cash balances.');
-        return {state,client,accountKey,account,clock,orders,owned,positions,openOrders,cash,equity,cashBuyingPower,issues};
+        return {state,client,accountKey,account,clock,orders,owned,positions,openOrders,cash,equity,cashBuyingPower,issues,readStartedAt};
     }
     async function overview() {
         const state=await store.settings(); const config=configuration(env);
@@ -162,7 +165,7 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
         return publicPlan(plan);
     }
     function publicPlan(plan) { const {accountKey,brokerQuantities,...safe}=plan; void accountKey; void brokerQuantities; return safe; }
-    async function execute(planId,{confirmation,automatic=false}={}) {
+    async function executeReviewed(planId,{confirmation,automatic=false}={}) {
         const row=await store.getPlan(planId);
         if (!row) throw fail('LIVE_PLAN_NOT_FOUND','Preview a live order first.',404);
         const plan=JSON.parse(row.plan_json); const order=plan.nextOrder;
@@ -177,16 +180,19 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
         if (fresh.accountKey!==plan.accountKey || fresh.state.version!==plan.policyVersion || fresh.issues.length) throw fail('LIVE_STATE_CHANGED','Broker state, settings or trading readiness changed. Preview again.');
         const quantities=fresh.positions.map(h=>[h.symbol,h.qty]).sort((a,b)=>a[0].localeCompare(b[0]));
         if (JSON.stringify(quantities)!==JSON.stringify(plan.brokerQuantities)) throw fail('LIVE_STATE_CHANGED','Broker holdings changed. Preview again.');
+        const assetReadStartedAt=now().getTime();
         const asset=await fresh.client.getAsset(order.symbol);
         if (asset?.symbol!==order.symbol || asset.class!=='us_equity' || asset.status!=='active' || asset.tradable!==true || asset.exchange==='OTC'
             || (!Number.isInteger(order.qty) && asset.fractionable!==true)) throw fail('LIVE_ASSET_CHANGED','The asset is no longer eligible.');
         const q=await getProvenQuote({client:fresh.client,symbol:order.symbol,feed:'iex',now:now()});
+        const quoteTimes=[Date.parse(q.sourceTimestamp)];
         if (q.bidPrice<1 || (q.askPrice-q.bidPrice)/q.bidPrice*10000>fresh.state.policy.maxSpreadBps
             || (order.side==='buy'?q.askPrice>order.limitPrice:q.bidPrice<order.limitPrice)) throw fail('LIVE_PRICE_CHANGED','The market moved beyond the approved limit or spread. Preview again.');
         const p=fresh.state.policy;
         let managed=0;
         for (const position of fresh.positions.filter(h=>fresh.owned[h.symbol]>0)) {
             const mark=position.symbol===order.symbol?q:await getProvenQuote({client:fresh.client,symbol:position.symbol,feed:'iex',now:now()});
+            quoteTimes.push(Date.parse(mark.sourceTimestamp));
             managed+=position.qty*mark.askPrice;
         }
         const unmanaged=fresh.positions.reduce((n,h)=>n+(!fresh.owned[h.symbol]?h.value:0),0);
@@ -194,14 +200,40 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
         if (order.side==='buy' && order.qty*order.limitPrice>Math.max(0,Math.min(fresh.cash,fresh.cashBuyingPower,allocationCapital*(1-p.reservePct/100)-managed))+1e-8) throw fail('LIVE_CASH_CHANGED','Cash funding or the reserve changed.');
         if (order.side==='buy' && ((fresh.owned[order.symbol]||0)*q.askPrice+order.qty*order.limitPrice)>allocationCapital*p.maxPositionPct/100+0.01) throw fail('LIVE_POSITION_LIMIT','The current position would exceed the approved weight.');
         if (order.side==='sell' && (order.qty>(fresh.owned[order.symbol]||0)+1e-8 || order.qty>(fresh.positions.find(h=>h.symbol===order.symbol)?.qty||0))) throw fail('LIVE_OWNERSHIP_CHANGED','The sell exceeds app-owned or verified broker shares.');
-        if ((await fresh.client.getClock())?.is_open!==true) throw fail('LIVE_MARKET_CLOSED','The regular session closed before submission.');
+        const clockReadStartedAt=now().getTime();
+        const finalClock=await fresh.client.getClock();
+        if (finalClock?.is_open!==true) throw fail('LIVE_MARKET_CLOSED','The regular session closed before submission.');
+        const sessionClose=Date.parse(finalClock.next_close);
+        if (!Number.isFinite(sessionClose)) throw fail('LIVE_INVALID_BROKER_DATA','The regular-session closing time could not be verified.',503);
+        const assertFresh=()=>{
+            const checkedAt=now().getTime();
+            if (!configuration(env).tradingEnabled) throw fail('LIVE_GATE_CLOSED','Server-side live trading is disabled.');
+            requireAccount(fresh.account,fresh.state);
+            if (!Number.isFinite(checkedAt) || !Number.isFinite(Date.parse(plan.expiresAt)) || !Number.isFinite(Date.parse(plan.createdAt))
+                || Date.parse(plan.expiresAt)<=checkedAt || checkedAt<Date.parse(plan.createdAt)) throw fail('LIVE_PLAN_EXPIRED','The reviewed plan expired before dispatch.');
+            if (checkedAt>=sessionClose) throw fail('LIVE_MARKET_CLOSED','The regular session closed before dispatch.');
+            const evidence=[fresh.readStartedAt,assetReadStartedAt,clockReadStartedAt,...quoteTimes];
+            if (evidence.some(t=>!Number.isFinite(t) || checkedAt<t || checkedAt-t>MAX_EXECUTION_EVIDENCE_AGE_MS)) {
+                throw fail('LIVE_EXECUTION_EVIDENCE_STALE','Broker facts or quote evidence expired before dispatch.');
+            }
+        };
+        assertFresh();
         const reserved=await store.reserveOrder(plan,order,{enabled:()=>configuration(env).tradingEnabled
-            && now().getTime()-Date.parse(q.sourceTimestamp)<=10000 && now().getTime()>=Date.parse(q.sourceTimestamp),automatic});
+            && now().getTime()-Date.parse(q.sourceTimestamp)<=10000 && now().getTime()>=Date.parse(q.sourceTimestamp),automatic,now});
         if (reserved.replayed) return {order:cleanOrder(reserved.order),replayed:true};
         const local=reserved.order;
+        const dispatched=await store.dispatchOrder(plan,local,{automatic,assertFresh,submit:current=>fresh.client.submit({
+            symbol:current.symbol,side:current.side,qty:String(current.qty),type:'limit',time_in_force:'day',
+            limit_price:String(current.limit_price),extended_hours:false,order_class:'simple',client_order_id:current.client_order_id,
+        })});
+        if (dispatched.replayed) return {order:cleanOrder(dispatched.order),replayed:true};
+        if (dispatched.refused) {
+            throw fail('LIVE_ORDER_NOT_SENT','The reserved order was canceled before broker dispatch because its authorization or evidence changed. Preview a new intent.');
+        }
         try {
-            const remote=await fresh.client.submit({symbol:local.symbol,side:local.side,qty:String(local.qty),type:'limit',time_in_force:'day',
-                limit_price:String(local.limit_price),extended_hours:false,order_class:'simple',client_order_id:local.client_order_id});
+            const outcome=await dispatched.settlement;
+            if (outcome.error) throw outcome.error;
+            const remote=outcome.value;
             await store.updateOrder(local.id,orderObservation(local,remote));
         } catch(e) {
             let found=null;
@@ -215,6 +247,16 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
             }
         }
         return {order:cleanOrder((await store.orders()).find(o=>o.id===local.id)),replayed:false};
+    }
+    async function execute(planId,options={}) {
+        try {
+            const result=await executeReviewed(planId,options);
+            if (options.automatic && !result.replayed) emitSecurityEvent('live_execute',{outcome:'success'});
+            return result;
+        } catch (error) {
+            if (options.automatic) emitSecurityEvent('live_execute',{outcome:error.status>=500?'failure':'refused',code:error.code});
+            throw error;
+        }
     }
     async function decision(input) {
         if (input?.account_id!==1) throw fail('LIVE_INVALID_DECISION','The long-term source account must be 1.',400);
@@ -276,6 +318,10 @@ function createLiveInvesting({ store=defaultStore, env=process.env, clientFactor
         if (asset?.symbol!==input.symbol || asset.class!=='us_equity' || asset.status!=='active' || asset.tradable!==true || asset.exchange==='OTC') throw fail('LIVE_ASSET_CHANGED','Only eligible stocks and ETFs can be adopted.');
         return store.adopt({accountKey:s.accountKey,symbol:input.symbol,brokerQty:actual,expectedOwned:s.owned[input.symbol]||0,policyVersion:s.state.version,reason:input.reason});
     }
-    return {overview,preview,execute,decision,previewDecision,cancel,simulatorDraft,adopt,savePolicy:store.savePolicy};
+    async function pause(expectedVersion) {
+        const current=await store.settings();
+        return store.savePolicy({...current.policy,paused:true},expectedVersion,'');
+    }
+    return {overview,preview,execute,decision,previewDecision,cancel,simulatorDraft,adopt,pause,savePolicy:store.savePolicy};
 }
 module.exports={createLiveInvesting,orderObservation,cleanOrder};

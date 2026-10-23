@@ -305,7 +305,7 @@ function AddStockSearch({ onClose }: { onClose: () => void }) {
               setIsSearching(Boolean(nextQuery.trim()))
             }}
             placeholder="Search by symbol or name…"
-            className="w-full pl-3 pr-12 py-2 rounded-md bg-secondary text-foreground text-sm border border-border focus:border-primary focus:outline-none transition-colors placeholder:text-muted-foreground"
+            className="w-full pl-3 pr-12 py-2 rounded-md bg-secondary text-foreground text-sm border border-border focus:border-primary focus:outline-hidden transition-colors placeholder:text-muted-foreground"
             onKeyDown={(e) => {
               if (e.key === 'Escape') onClose()
               if (e.key === 'Enter') {

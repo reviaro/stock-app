@@ -4,7 +4,7 @@
   "description": "Oakline investment research, portfolio analysis, and trading workbench",
   "main": "server.js",
   "engines": {
-    "node": ">=20.18.1"
+    "node": ">=24.5.0"
   },
   "overrides": {
     "qs": "6.16.0"

@@ -16,8 +16,9 @@ const PortfolioLabPage = lazy(() => import('@/pages/PortfolioLabPage').then((mod
 type Tab = 'dashboard' | 'opportunities' | 'simulator' | 'research-lab' | 'portfolio-lab' | 'alpaca-paper' | 'alpaca-live'
 type AuthState =
   | { status: 'loading' }
-  | { status: 'guest'; error?: string }
-  | { status: 'authenticated'; username: string; sampleData: boolean }
+  | { status: 'unavailable' }
+  | { status: 'guest'; mfaConfigured: boolean }
+  | { status: 'authenticated'; username: string; sampleData: boolean; mfaConfigured: boolean }
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
@@ -29,13 +30,14 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'alpaca-live', label: 'Long-Term Live' },
 ]
 
-function LoginPage({ onAuthenticated, initialError }: {
-  onAuthenticated: (username: string, sampleData: boolean) => void
-  initialError?: string
+function LoginPage({ onAuthenticated, mfaConfigured }: {
+  onAuthenticated: (username: string, sampleData: boolean, mfaConfigured: boolean) => void
+  mfaConfigured: boolean
 }) {
   const [username, setUsername] = useState('dashboard-user')
   const [password, setPassword] = useState('')
-  const [error, setError] = useState(initialError || '')
+  const [otp, setOtp] = useState('')
+  const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -47,14 +49,15 @@ function LoginPage({ onAuthenticated, initialError }: {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username, password, ...(mfaConfigured ? { otp } : {}) }),
       })
       const json = await response.json()
       if (!response.ok || json.status !== 'success') {
         throw new Error(json.error || 'Unable to sign in')
       }
       setPassword('')
-      onAuthenticated(json.data.username, json.data.sampleData === true)
+      setOtp('')
+      onAuthenticated(json.data.username, json.data.sampleData === true, json.data.mfaConfigured === true)
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : 'Unable to sign in')
     } finally {
@@ -79,7 +82,7 @@ function LoginPage({ onAuthenticated, initialError }: {
               autoComplete="username"
               value={username}
               onChange={(event) => setUsername(event.target.value)}
-              className="mt-1.5 w-full rounded-md border border-border bg-background px-3 py-2 text-foreground outline-none focus:border-primary"
+              className="mt-1.5 w-full rounded-md border border-border bg-background px-3 py-2 text-foreground outline-hidden focus:border-primary"
               required
             />
           </label>
@@ -91,10 +94,16 @@ function LoginPage({ onAuthenticated, initialError }: {
               type="password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
-              className="mt-1.5 w-full rounded-md border border-border bg-background px-3 py-2 text-foreground outline-none focus:border-primary"
+              className="mt-1.5 w-full rounded-md border border-border bg-background px-3 py-2 text-foreground outline-hidden focus:border-primary"
               required
             />
           </label>
+          {mfaConfigured && <label className="block text-sm font-medium text-foreground">
+            Authenticator code
+            <input aria-label="Authenticator code" autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{6}" maxLength={6}
+              value={otp} onChange={event => setOtp(event.target.value.replace(/\D/g, ''))}
+              className="mt-1.5 w-full rounded-md border border-border bg-background px-3 py-2 text-foreground outline-hidden focus:border-primary" required />
+          </label>}
           {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
           <button
             type="submit"
@@ -114,6 +123,7 @@ function App() {
   const [logoutError, setLogoutError] = useState('')
   const [activeTab, setActiveTab] = useState<Tab>('dashboard')
   const [auth, setAuth] = useState<AuthState>({ status: 'loading' })
+  const [sessionAttempt, setSessionAttempt] = useState(0)
 
   useEffect(() => {
     let active = true
@@ -121,17 +131,20 @@ function App() {
       .then(async (response) => {
         const json = await response.json()
         if (!active) return
-        if (response.ok && json.data?.authenticated) {
-          setAuth({ status: 'authenticated', username: json.data.username, sampleData: json.data.sampleData === true })
+        if (!response.ok || json.status !== 'success' || typeof json.data?.authenticated !== 'boolean' || typeof json.data?.mfaConfigured !== 'boolean') {
+          throw new Error('Unable to verify sign-in requirements')
+        }
+        if (json.data.authenticated) {
+          setAuth({ status: 'authenticated', username: json.data.username, sampleData: json.data.sampleData === true, mfaConfigured: json.data.mfaConfigured === true })
         } else {
-          setAuth({ status: 'guest' })
+          setAuth({ status: 'guest', mfaConfigured: json.data?.mfaConfigured === true })
         }
       })
       .catch(() => {
-        if (active) setAuth({ status: 'guest', error: 'Unable to reach Oakline.' })
+        if (active) setAuth({ status: 'unavailable' })
       })
     return () => { active = false }
-  }, [])
+  }, [sessionAttempt])
 
   async function logout() {
     setLogoutError('')
@@ -140,7 +153,7 @@ function App() {
       if (!response.ok) throw new Error('Sign out failed. Please try again.')
       queryClient.clear()
       setActiveTab('dashboard')
-      setAuth({ status: 'guest' })
+      setAuth({ status: 'guest', mfaConfigured: auth.status === 'authenticated' && auth.mfaConfigured })
     } catch {
       setLogoutError('Unable to sign out. Check your connection and try again.')
     }
@@ -149,8 +162,22 @@ function App() {
   if (auth.status === 'loading') {
     return <main className="min-h-screen flex items-center justify-center bg-background text-sm text-muted-foreground">Opening Oakline…</main>
   }
+  if (auth.status === 'unavailable') {
+    return (
+      <main className="min-h-screen flex items-center justify-center bg-background px-4">
+        <section className="w-full max-w-sm rounded-xl border border-border bg-card p-6 shadow-lg">
+          <h1 className="text-3xl text-foreground"><OaklineBrand /></h1>
+          <p role="alert" className="mt-4 text-sm text-destructive">Unable to verify sign-in requirements. Check your connection and try again.</p>
+          <button type="button" onClick={() => { setAuth({ status: 'loading' }); setSessionAttempt(attempt => attempt + 1) }}
+            className="mt-4 w-full rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90">
+            Retry connection
+          </button>
+        </section>
+      </main>
+    )
+  }
   if (auth.status === 'guest') {
-    return <LoginPage initialError={auth.error} onAuthenticated={(username, sampleData) => setAuth({ status: 'authenticated', username, sampleData })} />
+    return <LoginPage mfaConfigured={auth.mfaConfigured} onAuthenticated={(username, sampleData, mfaConfigured) => setAuth({ status: 'authenticated', username, sampleData, mfaConfigured })} />
   }
 
   return (

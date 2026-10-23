@@ -1,5 +1,7 @@
 'use strict';
 
+require('./tls_trust').initializeTlsTrust();
+
 // Use the patched dependency for application requests even when Node bundles an
 // older Undici. Leave global fetch intact: the AI SDK detects Node's native fetch
 // to enable its separate, DNS-validated download path (also patched in the lock).
