@@ -1,6 +1,7 @@
 'use strict';
 
 const http = require('./http_runtime');
+const { assertLiveIsolation } = require('./live_isolation');
 const LIVE_URL = 'https://api.alpaca.markets';
 const DATA_URL = 'https://data.alpaca.markets';
 const fail = (code, message, status = 409) => Object.assign(new Error(message), { code, status });
@@ -15,9 +16,12 @@ function configuration(env = process.env) {
         environment: 'live', assetScope: 'US stocks and ETFs', executionModes: ['confirm','automatic'] };
 }
 
-function createLiveClient({ env = process.env, fetchImpl = http.fetch } = {}) {
+function createLiveClient({ env = process.env, fetchImpl = http.fetch, verifyIsolation = assertLiveIsolation } = {}) {
     if (!configuration(env).configured) throw fail('LIVE_NOT_CONFIGURED', 'Add separate Alpaca live credentials on the server.', 503);
     async function request(base, path, { method = 'GET', body, notFound = false } = {}) {
+        // Scope checks are not sufficient if a local agent can read broker keys.
+        // Recheck installation facts before every use of the live credential.
+        verifyIsolation(env);
         let response;
         try {
             response = await fetchImpl(base + path, { method, redirect: 'error', signal: AbortSignal.timeout(12000),

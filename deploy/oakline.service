@@ -1,0 +1,45 @@
+[Unit]
+Description=Oakline investment workspace
+Wants=network-online.target
+After=network-online.target
+OnFailure=oakline-security-alert@%n.service
+
+[Service]
+Type=simple
+User=oakline
+Group=oakline
+WorkingDirectory=/opt/oakline/app/backend
+ExecStartPre=/opt/oakline/runtime/bin/node /opt/oakline/app/backend/scripts/start-isolated.js --check
+ExecStart=/opt/oakline/runtime/bin/node /opt/oakline/app/backend/scripts/start-isolated.js
+LoadCredential=app.env:/etc/oakline/app.env
+Environment=NODE_ENV=production
+Environment=OAKLINE_SECURITY_MANIFEST=/etc/oakline/security.json
+Environment=DB_PATH_OVERRIDE=/var/lib/oakline/stocks.db
+Environment=STOCK_DASHBOARD_MFA_STATE_FILE=/var/lib/oakline/auth-state.json
+Environment=PYTHON_PATH=/opt/oakline/app/backend/venv/bin/python
+Environment=PORTFOLIO_LAB_PYTHON=/opt/oakline/app/backend/portfolio_lab/venv/bin/python
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONNOUSERSITE=1
+StateDirectory=oakline
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/oakline
+
+[Install]
+WantedBy=multi-user.target

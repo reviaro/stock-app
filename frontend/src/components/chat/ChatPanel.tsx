@@ -205,7 +205,7 @@ export function ChatPanel() {
             onKeyDown={handleKeyDown}
             placeholder="Ask about a stock, sector, or market condition..."
             rows={1}
-            className="flex-1 min-w-0 min-h-[36px] max-h-[120px] resize-none rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            className="flex-1 min-w-0 min-h-[36px] max-h-[120px] resize-none rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-hidden focus:ring-1 focus:ring-ring"
             disabled={isLoading}
           />
 

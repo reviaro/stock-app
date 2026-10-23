@@ -7,7 +7,8 @@ import type { LiveOverview } from '@/types/alpacaLive'
 const { hooks } = vi.hoisted(() => {
   const mutation = () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), reset: vi.fn(), isPending: false, isSuccess: false, data: undefined, error: null })
   return { hooks: { overview: { data: undefined as LiveOverview | undefined, isLoading: false, isFetching: false, error: null, refetch: vi.fn() },
-    policy: mutation(), preview: mutation(), execute: mutation(), cancel: mutation(), draft: mutation(), ownership: mutation() } }
+    security: { data: { authenticated: true, mfaConfigured: true, recentMfa: true, recentAuthUntil: new Date(Date.now() + 300000).toISOString() }, error: null, refetch: vi.fn() },
+    policy: mutation(), pause: mutation(), preview: mutation(), execute: mutation(), cancel: mutation(), draft: mutation(), ownership: mutation() } }
 })
 vi.mock('@/hooks/useAlpacaLive', () => ({ useAlpacaLive: () => hooks }))
 const baseline = (): LiveOverview => ({ configuration: { configured: false, accountBound: false, tradingEnabled: false, environment: 'live' },
@@ -17,7 +18,8 @@ const baseline = (): LiveOverview => ({ configuration: { configured: false, acco
 describe('Long-Term Live workspace', () => {
   beforeEach(() => {
     vi.clearAllMocks(); hooks.overview.data = baseline()
-    for (const key of ['policy', 'preview', 'execute', 'cancel', 'draft', 'ownership'] as const) Object.assign(hooks[key], { isPending: false, isSuccess: false, data: undefined, error: null })
+    hooks.security.data = { authenticated: true, mfaConfigured: true, recentMfa: true, recentAuthUntil: new Date(Date.now() + 300000).toISOString() }
+    for (const key of ['policy', 'pause', 'preview', 'execute', 'cancel', 'draft', 'ownership'] as const) Object.assign(hooks[key], { isPending: false, isSuccess: false, data: undefined, error: null })
   })
   it('shows disconnected setup and keeps order preview disabled before credentials', () => {
     render(<AlpacaLivePage />)
@@ -89,5 +91,23 @@ describe('Long-Term Live workspace', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Review current order' }))
     expect(hooks.preview.mutate).toHaveBeenCalledWith({ decisionKey: 'synthetic-decision' })
     expect(hooks.execute.mutate).not.toHaveBeenCalled()
+  })
+  it('blocks policy and order authority after verification expires while retaining immediate pause', () => {
+    hooks.security.data = { authenticated: true, mfaConfigured: true, recentMfa: false, recentAuthUntil: new Date(Date.now() - 1).toISOString() }
+    hooks.overview.data = { ...baseline(), policy: { ...baseline().policy, paused: false } }
+    render(<AlpacaLivePage />)
+    expect(screen.getByRole('button', { name: 'Save live policy' })).toBeDisabled()
+    expect(screen.getByLabelText('Verify password')).toBeVisible()
+    const pause = screen.getByRole('button', { name: 'Pause new orders now' })
+    expect(pause).toBeEnabled()
+    fireEvent.click(pause)
+    expect(hooks.pause.mutate).toHaveBeenCalledWith(0)
+    expect(hooks.policy.mutate).not.toHaveBeenCalled()
+  })
+  it('requires authenticator setup before exposing privileged live controls', () => {
+    hooks.security.data = { authenticated: true, mfaConfigured: false, recentMfa: false, recentAuthUntil: '' }
+    render(<AlpacaLivePage />)
+    expect(screen.getByText('Set up an authenticator on the server before authorizing live actions.')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Save live policy' })).toBeDisabled()
   })
 })

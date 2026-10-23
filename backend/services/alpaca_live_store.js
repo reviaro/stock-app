@@ -85,12 +85,12 @@ const settings = () => connection(state);
 const orders = () => connection(c => all(c, 'SELECT * FROM alpaca_live_orders ORDER BY created_at DESC,id DESC'));
 const getPlan = id => connection(async c => (await all(c, 'SELECT * FROM alpaca_live_plans WHERE id=?',[id]))[0] || null);
 const savePlan = plan => connection(c => run(c,'INSERT INTO alpaca_live_plans VALUES(?,?,?,?,?)',[plan.id,plan.accountKey,plan.policyVersion,plan.expiresAt,JSON.stringify(plan)]));
-async function reserveOrder(plan, order, { enabled, automatic = false }) {
+async function reserveOrder(plan, order, { enabled, automatic = false, now = () => new Date() }) {
     return transaction(async c => {
         const existing = (await all(c,'SELECT * FROM alpaca_live_orders WHERE plan_id=? OR (? IS NOT NULL AND decision_key=?)',[plan.id,plan.decisionKey,plan.decisionKey]))[0];
         if (existing) return { order: existing, replayed: true };
         const current = await state(c);
-        if (!enabled() || current.policy.paused || current.version !== plan.policyVersion || Date.parse(plan.expiresAt) <= Date.now()) throw fail('LIVE_GATE_CLOSED', 'Trading is paused, disabled, or the plan expired.');
+        if (!enabled() || current.policy.paused || current.version !== plan.policyVersion || Date.parse(plan.expiresAt) <= now().getTime()) throw fail('LIVE_GATE_CLOSED', 'Trading is paused, disabled, or the plan expired.');
         if (current.sequence!==plan.stateSequence) throw fail('LIVE_STATE_CHANGED','Order evidence changed after the preview. Refresh before submitting.');
         if (automatic && current.policy.executionMode !== 'automatic') throw fail('LIVE_CONFIRMATION_REQUIRED','Operator confirmation is required for this decision.');
         if (current.accountKey && current.accountKey !== plan.accountKey) throw fail('LIVE_ACCOUNT_CHANGED', 'This installation is bound to a different live account.');
@@ -103,6 +103,64 @@ async function reserveOrder(plan, order, { enabled, automatic = false }) {
         await event(c,'order_reserved',{ id, planId:plan.id, order });
         return { order: (await all(c,'SELECT * FROM alpaca_live_orders WHERE id=?',[id]))[0], replayed:false };
     });
+}
+// Serialize the final check and the *start* of dispatch with policy/ownership
+// writes, even in another process. The durable reservation already exists before
+// this transaction. Never await a broker response while holding SQLite's write
+// lock: that would delay an emergency pause and the paper monitor's writes.
+async function dispatchOrder(plan, reserved, { automatic = false, assertFresh, submit }) {
+    let started = false;
+    try {
+        return await transaction(async c => {
+            const local = (await all(c, 'SELECT * FROM alpaca_live_orders WHERE id=?', [reserved.id]))[0];
+            if (!local) throw fail('LIVE_ORDER_NOT_FOUND', 'The reserved live order is missing.', 503);
+            const claimed = (await all(c, "SELECT id FROM alpaca_live_events WHERE action='order_dispatch_claimed' AND json_extract(detail_json,'$.id')=? LIMIT 1", [local.id])).length > 0;
+            if (claimed || local.status !== 'submitting' || local.broker_id || local.filled_qty !== 0) {
+                return { replayed: true, order: local };
+            }
+            let refusal;
+            try {
+                const current = await state(c);
+                const intent = plan.nextOrder;
+                if (local.plan_id !== plan.id || local.account_key !== plan.accountKey || local.decision_key !== (plan.decisionKey || null)
+                    || local.client_order_id !== reserved.client_order_id || local.symbol !== intent?.symbol || local.side !== intent?.side
+                    || local.qty !== intent?.qty || local.limit_price !== intent?.limitPrice) {
+                    throw fail('LIVE_DISPATCH_INTENT_CHANGED', 'The reserved order no longer matches its reviewed intent.');
+                }
+                if (current.policy.paused || current.version !== plan.policyVersion || current.accountKey !== plan.accountKey
+                    || current.sequence !== plan.stateSequence + 1 || (automatic && current.policy.executionMode !== 'automatic')) {
+                    throw fail('LIVE_DISPATCH_STATE_CHANGED', 'The live policy or execution evidence changed before dispatch.');
+                }
+                const other = await all(c, "SELECT id FROM alpaca_live_orders WHERE id<>? AND status NOT IN ('filled','canceled','expired','rejected') LIMIT 1", [local.id]);
+                if (other.length) throw fail('LIVE_RECONCILIATION_REQUIRED', 'Reconcile the outstanding live order first.');
+                // This claim means the final gate is being checked, not that a
+                // broker accepted the order. A subsequent refusal records no send.
+                await event(c, 'order_dispatch_claimed', { id: local.id, planId: plan.id });
+                const result = assertFresh();
+                if (result && typeof result.then === 'function') throw new Error('The final dispatch check must be synchronous');
+            } catch (e) {
+                refusal = typeof e.code === 'string' && e.code.startsWith('LIVE_') ? e.code : 'LIVE_DISPATCH_CHECK_FAILED';
+            }
+            if (refusal) {
+                await run(c, "UPDATE alpaca_live_orders SET status='canceled',updated_at=? WHERE id=? AND status='submitting' AND broker_id IS NULL AND filled_qty=0", [new Date().toISOString(), local.id]);
+                await run(c, 'UPDATE alpaca_live_settings SET sequence=sequence+1 WHERE id=1');
+                await event(c, 'order_not_sent', { id: local.id, planId: plan.id, code: refusal });
+                return { refused: true, reason: refusal };
+            }
+            // No await is allowed between the final check above and invoking
+            // submit. While the write fence is held, a pause cannot commit here.
+            // From this point any exception is an uncertain broker outcome.
+            started = true;
+            let settlement;
+            try {
+                settlement = Promise.resolve(submit(local)).then(value => ({ value }), error => ({ error }));
+            } catch (error) { settlement = Promise.resolve({ error }); }
+            return { replayed: false, order: local, settlement };
+        });
+    } catch (e) {
+        if (started) throw fail('LIVE_ORDER_UNKNOWN', 'Dispatch started but its record could not be completed. Reconcile the existing order before retrying.', 503);
+        throw e;
+    }
 }
 async function updateOrder(id, patch) {
     const fields = ['status','broker_id','filled_qty','filled_avg_price'];
@@ -147,4 +205,4 @@ async function adopt({accountKey,symbol,brokerQty,expectedOwned,policyVersion,re
         return {symbol,ownedQty:brokerQty,replayed:false};
     });
 }
-module.exports = { init, settings, savePolicy, orders, getPlan, savePlan, reserveOrder, updateOrder, hash, finalStatuses, DEFAULT_POLICY, validatePolicy, saveDecision, decisions, ownership, adopt };
+module.exports = { init, settings, savePolicy, orders, getPlan, savePlan, reserveOrder, dispatchOrder, updateOrder, hash, finalStatuses, DEFAULT_POLICY, validatePolicy, saveDecision, decisions, ownership, adopt };

@@ -2,6 +2,7 @@
 if (process.env.SAMPLE_DATA !== '1') require('dotenv').config();
 const { validateSampleEnvironment, verifySampleDatabase, acquireSampleLock } = require('./services/sample_mode');
 validateSampleEnvironment();
+require('./services/tls_trust').initializeTlsTrust();
 const express = require('express');
 const cors = require('cors');
 const net = require('node:net');
@@ -83,6 +84,7 @@ function createApp({ auth = createAuthFromEnv(), env = process.env } = {}) {
     }));
 
     // Protect every data and mutation API. Loopback automation is allowed by auth policy.
+    app.use('/api', (_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
     app.use('/api', auth.requireAuth);
     app.use('/api', authorizeApiRequest);
     app.use('/api/watchlist', watchlistRoutes);
@@ -145,6 +147,7 @@ function resolveListenHost(env = process.env) {
 async function start() {
     let releaseSampleLock;
     try {
+        require('./services/live_isolation').assertLiveIsolation(process.env, { deep: true });
         if (validateSampleEnvironment()) {
             releaseSampleLock = acquireSampleLock(process.env.DB_PATH_OVERRIDE);
             await verifySampleDatabase(process.env.DB_PATH_OVERRIDE);

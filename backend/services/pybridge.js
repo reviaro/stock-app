@@ -9,6 +9,16 @@ const PYTHON_BIN = process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/py
 const PYTHON_PATH = process.env.PYTHON_PATH || path.join(__dirname, '..', 'venv', PYTHON_BIN);
 const SCRIPT_PATH = path.join(__dirname, '..', 'python', 'yf_wrapper.py');
 
+function researchEnvironment(env = process.env) {
+    // Market-data workers need locale/cache/transport settings, not operator,
+    // model-provider or broker credentials. Never inherit the full app env.
+    const allowed = ['PATH','HOME','USER','LANG','LC_ALL','TZ','TMPDIR','TMP','TEMP','SystemRoot','WINDIR',
+        'XDG_CACHE_HOME','SSL_CERT_FILE','SSL_CERT_DIR','REQUESTS_CA_BUNDLE','CURL_CA_BUNDLE',
+        'DB_PATH_OVERRIDE','SAMPLE_DATA'];
+    return { ...Object.fromEntries(allowed.filter(key => env[key] !== undefined).map(key => [key,env[key]])),
+        PYTHONDONTWRITEBYTECODE: '1', PYTHONNOUSERSITE: '1' };
+}
+
 function createPythonCaller({
     spawnImpl = spawn,
     pythonPath = PYTHON_PATH,
@@ -21,6 +31,7 @@ function createPythonCaller({
         return new Promise((resolve, reject) => {
             const python = spawnImpl(pythonPath, [scriptPath], {
                 stdio: ['pipe', 'pipe', 'pipe'],
+                env: researchEnvironment(),
             });
             let stdout = '';
             let stderr = '';
@@ -228,6 +239,7 @@ function createPybridge({
 const defaultBridge = createPybridge();
 
 module.exports = {
+    researchEnvironment,
     callPython,
     createPythonCaller,
     createPybridge,

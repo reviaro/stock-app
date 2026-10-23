@@ -112,7 +112,7 @@ test('sample sessions identify sample data and use a separate cookie from produc
     const origin = `http://127.0.0.1:${server.address().port}`;
     try {
         const login = await fetch(`${origin}/api/auth/login`, { method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', Origin: origin },
             body: JSON.stringify({ username: 'sample-investor', password: 'sample-portfolio' }) });
         assert.equal(login.status, 200);
         assert.equal((await login.json()).data.sampleData, true);

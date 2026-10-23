@@ -25,7 +25,7 @@ async function fixture(mode='confirm') {
     const account={id:prefix,currency:'USD',status:'ACTIVE',trading_blocked:false,account_blocked:false,cash:'10000',equity:'10000',non_marginable_buying_power:'10000'};
     const state={positions:[],open:[],orders:new Map(),submitted:[],clockOpen:true,price:100,badQuote:false,unknown:false,reject:false,cancelPending:false};
     const client={
-        getAccount:async()=>({...account}),getClock:async()=>({is_open:state.clockOpen}),
+        getAccount:async()=>({...account}),getClock:async()=>({is_open:state.clockOpen,next_close:new Date(Date.now()+3600_000).toISOString()}),
         getPositions:async()=>structuredClone(state.positions),getOrders:async()=>structuredClone(state.open),
         getAsset:async symbol=>({symbol,class:'us_equity',status:'active',tradable:true,fractionable:true,exchange:'NASDAQ'}),
         getLatestQuote:async symbol=>({symbol,quote:{bp:state.price,ap:state.price+0.02,bs:100,as:100,t:state.badQuote?'2020-01-01T00:00:00Z':new Date(Date.now()-100).toISOString()}}),
@@ -61,7 +61,7 @@ test('credentials and live endpoint are isolated from paper and sample mode neve
     assert.equal(configuration({SAMPLE_DATA:'1',ALPACA_LIVE_API_KEY:'x',ALPACA_LIVE_SECRET_KEY:'x',ALPACA_LIVE_TRADING_ENABLED:'true'}).configured,false);
 });
 test('live client sends credentials only to fixed HTTPS hosts, rejects redirects and redacts broker errors',async()=>{
-    const calls=[];const client=createLiveClient({env:{ALPACA_LIVE_API_KEY:'fake-live',ALPACA_LIVE_SECRET_KEY:'fake-secret'},fetchImpl:async(url,options)=>{calls.push({url,options});return {ok:false,status:403,json:async()=>({private:'never return raw body'})};}});
+    const calls=[];const client=createLiveClient({env:{ALPACA_LIVE_API_KEY:'fake-live',ALPACA_LIVE_SECRET_KEY:'fake-secret'},verifyIsolation:()=>{},fetchImpl:async(url,options)=>{calls.push({url,options});return {ok:false,status:403,json:async()=>({private:'never return raw body'})};}});
     await assert.rejects(client.getAccount(),e=>e.code==='LIVE_BROKER_REFUSED'&&!e.message.includes('never return'));
     assert.equal(calls[0].url,'https://api.alpaca.markets/v2/account');assert.equal(calls[0].options.redirect,'error');
 });
@@ -247,4 +247,129 @@ test('additive migration is repeatable and preserves existing simulator history,
         assert.deepEqual(rows,before[t]);
     }
     await new Promise(r=>after.close(r));assert.equal((await f.store.settings()).version,1);
+});
+
+async function eventsFor(orderId) {
+    const connection=db.getDb();
+    try { return await new Promise((resolve,reject)=>connection.all(
+        "SELECT action,detail_json FROM alpaca_live_events WHERE json_extract(detail_json,'$.id')=? ORDER BY id",[orderId],
+        (error,rows)=>error?reject(error):resolve(rows.map(row=>({action:row.action,...JSON.parse(row.detail_json)}))))); }
+    finally { await new Promise(resolve=>connection.close(resolve)); }
+}
+
+test('a committed pause in another process cancels an unsent reservation and retains its consumed ID',async()=>{
+    const f=await fixture();const plan=await f.service.preview();
+    const reserve=f.store.reserveOrder;
+    f.store.reserveOrder=async(...args)=>{
+        const reserved=await reserve(...args);
+        const {execFile}=require('node:child_process');
+        // Share only this temporary fixture DB with the child, not a real app DB.
+        const env={...process.env,STOCK_DASHBOARD_TEST_DEFAULT_DB:''};
+        await require('node:util').promisify(execFile)(process.execPath,['-e',
+            "const s=require(process.argv[1]);s.settings().then(v=>s.savePolicy({...v.policy,paused:true},v.version,'')).catch(()=>process.exitCode=1)",
+            require.resolve('../services/alpaca_live_store')],{env,timeout:15000});
+        return reserved;
+    };
+    await assert.rejects(f.service.execute(plan.id,confirms(plan)),{code:'LIVE_ORDER_NOT_SENT'});
+    assert.equal(f.state.submitted.length,0);
+    assert.equal((await f.store.settings()).policy.paused,true);
+    const [row]=await f.store.orders();assert.equal(row.status,'canceled');
+    const events=await eventsFor(row.id);
+    assert.ok(events.some(e=>e.action==='order_not_sent' && e.code==='LIVE_DISPATCH_STATE_CHANGED'));
+    const replay=await f.service.execute(plan.id,confirms(plan));
+    assert.equal(replay.replayed,true);assert.equal(replay.order.id,row.id);assert.equal(replay.order.status,'canceled');
+    assert.equal(f.state.submitted.length,0);
+});
+
+for (const [name,offset,reason] of [['plan',70000,'LIVE_PLAN_EXPIRED'],['quote',10100,'LIVE_EXECUTION_EVIDENCE_STALE']]) {
+    test(`a ${name} that expires after reservation never reaches the broker`,async()=>{
+        const f=await fixture();let elapsed=0;
+        const service=createLiveInvesting({store:f.store,env:f.env,clientFactory:()=>f.client,now:()=>new Date(Date.now()+elapsed)});
+        const plan=await service.preview();const reserve=f.store.reserveOrder;
+        f.store.reserveOrder=async(...args)=>{const result=await reserve(...args);elapsed=offset;return result;};
+        await assert.rejects(service.execute(plan.id,confirms(plan)),{code:'LIVE_ORDER_NOT_SENT'});
+        assert.equal(f.state.submitted.length,0);
+        const [row]=await f.store.orders();assert.equal(row.status,'canceled');
+        assert.ok((await eventsFor(row.id)).some(e=>e.action==='order_not_sent' && e.code===reason));
+        assert.equal((await f.store.settings()).policy.paused,false);
+    });
+}
+
+test('fresh quotes do not make an old account snapshot current',async()=>{
+    const f=await fixture();let elapsed=0;
+    const clock=()=>new Date(Date.now()+elapsed);
+    const service=createLiveInvesting({store:f.store,env:f.env,clientFactory:()=>f.client,now:clock});
+    const plan=await service.preview();const account=f.client.getAccount;
+    f.client.getAccount=async()=>{const result=await account();elapsed=11000;return result;};
+    f.client.getLatestQuote=async symbol=>({symbol,quote:{bp:100,ap:100.02,bs:100,as:100,t:new Date(clock().getTime()-100).toISOString()}});
+    await assert.rejects(service.execute(plan.id,confirms(plan)),{code:'LIVE_EXECUTION_EVIDENCE_STALE'});
+    assert.equal(f.state.submitted.length,0);assert.equal((await f.store.orders()).length,0);
+});
+
+test('a session close after reservation blocks dispatch even while the quote is fresh',async()=>{
+    const f=await fixture();let elapsed=0;
+    const service=createLiveInvesting({store:f.store,env:f.env,clientFactory:()=>f.client,now:()=>new Date(Date.now()+elapsed)});
+    const plan=await service.preview();const closes=Date.now()+3000;
+    f.client.getClock=async()=>({is_open:true,next_close:new Date(closes).toISOString()});
+    const reserve=f.store.reserveOrder;
+    f.store.reserveOrder=async(...args)=>{const result=await reserve(...args);elapsed=4000;return result;};
+    await assert.rejects(service.execute(plan.id,confirms(plan)),{code:'LIVE_ORDER_NOT_SENT'});
+    assert.equal(f.state.submitted.length,0);
+    assert.ok((await eventsFor((await f.store.orders())[0].id)).some(e=>e.code==='LIVE_MARKET_CLOSED'));
+});
+
+test('the current account binding and automatic-mode policy are checked after reservation',async()=>{
+    for (const change of ['account','mode']) {
+        const f=await fixture('automatic');const plan=await f.service.preview();const reserve=f.store.reserveOrder;
+        f.store.reserveOrder=async(...args)=>{
+            const result=await reserve(...args);
+            if (change==='account') f.env.ALPACA_LIVE_ACCOUNT_ID='different-synthetic-account';
+            else { const state=await f.store.settings();await f.store.savePolicy({...state.policy,executionMode:'confirm'},state.version,'ENABLE LIVE INVESTING'); }
+            return result;
+        };
+        await assert.rejects(f.service.execute(plan.id,{automatic:true}),{code:'LIVE_ORDER_NOT_SENT'});
+        assert.equal(f.state.submitted.length,0);assert.equal((await f.store.orders())[0].status,'canceled');
+    }
+});
+
+test('pause waits only for dispatch admission, not a slow broker response',async()=>{
+    const f=await fixture();const plan=await f.service.preview();const submit=f.client.submit;
+    let release,notify;
+    const started=new Promise(resolve=>{notify=resolve;});
+    const responsePending=new Promise(resolve=>{release=resolve;});
+    f.client.submit=async order=>{const response=await submit(order);notify();await responsePending;return response;};
+    const execution=f.service.execute(plan.id,confirms(plan));
+    try {
+        await started;
+        let timeout;
+        const paused=await Promise.race([f.service.pause(1),new Promise((_,reject)=>{timeout=setTimeout(()=>reject(new Error('Pause waited for broker response')),2000);})]).finally(()=>clearTimeout(timeout));
+        assert.equal(paused.policy.paused,true);
+        assert.deepEqual(paused.policy,{...f.policy,paused:true});
+        assert.equal(f.state.submitted.length,1);
+    } finally { release(); }
+    await execution;
+    assert.equal((await f.store.settings()).policy.paused,true);
+});
+
+test('a database failure after dispatch starts preserves uncertainty and never resubmits',async()=>{
+    const f=await fixture();const plan=await f.service.preview();
+    const getDb=db.getDb;let rejectedCommit=false;
+    db.getDb=()=>{
+        const connection=getDb(),run=connection.run;
+        connection.run=function(sql,...args){
+            if (sql==='COMMIT' && f.state.submitted.length && !rejectedCommit) {
+                rejectedCommit=true;const callback=args.at(-1);process.nextTick(()=>callback(new Error('Synthetic post-dispatch commit failure')));return connection;
+            }
+            return run.call(this,sql,...args);
+        };
+        return connection;
+    };
+    try { await assert.rejects(f.service.execute(plan.id,confirms(plan)),{code:'LIVE_ORDER_UNKNOWN'}); }
+    finally { db.getDb=getDb; }
+    assert.equal(rejectedCommit,true);assert.equal(f.state.submitted.length,1);
+    const replay=await f.service.execute(plan.id,confirms(plan));assert.equal(replay.replayed,true);
+    assert.equal(replay.order.status,'submitting');assert.equal(f.state.submitted.length,1);
+    await f.service.overview();
+    assert.equal((await f.store.orders())[0].status,'new');
+    assert.equal(f.state.submitted.length,1);
 });

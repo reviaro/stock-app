@@ -6,7 +6,7 @@ import { useSimAccount, useSimHoldings } from '@/hooks/useSimulator'
 import { useAddStrategyRun, useStrategyExperiment, useStrategyExperiments } from '@/hooks/useStrategyLab'
 import type { PortfolioLabModel, PortfolioLabResult } from '@/types/portfolioLab'
 
-const inputClass = 'mt-1 w-full rounded-md border border-border bg-secondary px-2 py-1.5 text-xs text-foreground outline-none focus:border-primary'
+const inputClass = 'mt-1 w-full rounded-md border border-border bg-secondary px-2 py-1.5 text-xs text-foreground outline-hidden focus:border-primary'
 const buttonClass = 'rounded-md border border-border px-3 py-1.5 text-xs font-medium transition-colors hover:border-primary hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50'
 
 function parseSymbols(value: string) {

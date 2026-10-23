@@ -146,18 +146,20 @@ from port 3002.
 
 ### Prerequisites
 
-- Node.js **24** is recommended and used by CI. The frontend also supports
-  Node.js **20.19+** or **22.12+** within those major versions; earlier versions
-  cannot run the installed Vite and jsdom dependencies.
-- Python **3.11 or newer** (required by the backend's `pandas` dependency)
+- Node.js **24.5 or newer**. The backend requires configurable TLS trust; CI uses Node 24.
+- Python **3.12** is the tested target for the complete, hashed dependency locks.
 
 ### Backend
 
 ```bash
 cd backend
-npm install
-python3 -m venv venv && venv/bin/pip install -r python/requirements.txt
-python3 -m venv portfolio_lab/venv && portfolio_lab/venv/bin/pip install -r portfolio_lab/requirements.txt
+npm ci
+python3 -m venv venv
+venv/bin/python -m pip install --require-hashes --only-binary=:all: -r python/installer.lock
+venv/bin/python -m pip install --require-hashes --only-binary=:all: -r python/requirements.lock
+python3 -m venv portfolio_lab/venv
+portfolio_lab/venv/bin/python -m pip install --require-hashes --only-binary=:all: -r python/installer.lock
+portfolio_lab/venv/bin/python -m pip install --require-hashes --only-binary=:all: -r portfolio_lab/requirements.lock
 cp .env.example .env   # configure the required auth values documented below
 node server.js         # http://localhost:3002
 ```
@@ -182,6 +184,8 @@ current environment variables.
 | `STOCK_DASHBOARD_USERNAME` | Required single-user login name |
 | `STOCK_DASHBOARD_PASSWORD_HASH` | Required scrypt password hash; never store the plaintext password |
 | `STOCK_DASHBOARD_SESSION_SECRET` | Required random session-signing secret of at least 32 characters |
+| `STOCK_DASHBOARD_TOTP_SECRET` | Optional private base32 authenticator secret; required for sensitive live-investing controls. Never expose it to the browser or an agent. |
+| `STOCK_DASHBOARD_MFA_STATE_FILE` | Service-configured private replay-counter file; required with live credentials. It belongs in the protected state directory. |
 | `STOCK_DASHBOARD_API_TOKEN` | Optional read-only bearer token for non-browser automation |
 | `STOCK_DASHBOARD_ALLOW_LOOPBACK` | Permit tightly validated read-only `127.0.0.1` automation without a browser login; defaults to `1` |
 | `STOCK_DASHBOARD_SIMULATOR_TOKENS` | JSON array of distinct `{account_id, token, manage_limits?}` credentials; tokens must contain at least 32 characters. Simulator trades are scoped to one sleeve; optional limit management does not grant operator powers. |
@@ -369,6 +373,35 @@ To run one backend file, use `npm test -- test/portfolio_ledger.test.js` from
 the suite. CI runs the backend, frontend, and Portfolio Lab checks on pull requests.
 
 ## Long-Term Live investing
+
+Live credentials require a dedicated, unprivileged service installation. The
+generic [systemd templates](deploy/oakline.service) and
+[manifest example](deploy/security-manifest.example.json) use root-managed code,
+private state and systemd credentials. Set real service/agent identities privately;
+the example IDs are illustrative. Local agent accounts must have neither the
+service identity nor administrator-capable group membership. An empty agent list
+is appropriate only on a dedicated host with no local agent processes. The
+preflight verifies declared identities, permissions and mounts before broker credentials can be used. The public
+examples contain no deployment-specific settings and do not install themselves.
+List every unit's original `LoadCredential` source in `credentialSources`; each
+source must be a root-owned regular file with mode `0600` or `0400`. The example
+configuration directory is root-owned `0755` and its nonsecret manifest is `0644`,
+allowing the service to check source metadata without reading its contents.
+Host administrators must also verify that agents have no other privilege path,
+such as sudo rules, container control sockets or remote administrator credentials.
+
+Authenticator verification lasts five minutes for live policy edits, order
+confirmation and ownership changes. Pause and cancel remain available to a signed-in
+operator without fresh verification. Agent decisions use the already approved
+policy; agents cannot expand that authority. Live dispatch rechecks authorization
+and evidence under the same database fence used by policy changes. A pause stops
+orders that have not begun dispatch; requests already in flight must be reconciled.
+
+The trusted reverse proxy must overwrite `X-Forwarded-For` with one verified client
+address. Forwarded chains and headers from untrusted peers do not establish client
+identity. Protected API responses are non-cacheable, and model-generated Markdown
+cannot load remote images. Stable security events are emitted to the private
+service journal for an operator-managed alert collector.
 
 The **Long-Term Live** tab can be configured before adding broker credentials.
 Use the blank settings in `backend/.env.example`; real values belong only in
