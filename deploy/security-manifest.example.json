@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "serviceUid": 991,
+  "serviceGid": 991,
+  "agentUids": [1001],
+  "releaseRoot": "/opt/oakline/app",
+  "stateDirectory": "/var/lib/oakline",
+  "credentialSources": ["/etc/oakline/app.env", "/etc/oakline/paper.env"]
+}

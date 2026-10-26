@@ -18,6 +18,7 @@ function request(port, method, path, { body, headers = {} } = {}) {
             method,
             path,
             headers: {
+                ...(path === '/api/auth/login' ? { Origin: `http://127.0.0.1:${port}` } : {}),
                 ...(payload ? {
                     'Content-Type': 'application/json',
                     'Content-Length': Buffer.byteLength(payload),
@@ -107,7 +108,7 @@ test('login issues a hardened cookie and authenticates subsequent requests', asy
             headers: { Cookie: sessionCookie(login) },
         });
         assert.equal(session.status, 200);
-        assert.deepEqual(session.body.data, { authenticated: true, username: 'dashboard-user' });
+        assert.deepEqual(session.body.data, { authenticated: true, username: 'dashboard-user', mfaConfigured: false, recentMfa: false, recentAuthUntil: null });
     });
 });
 

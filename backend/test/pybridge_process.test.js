@@ -20,6 +20,27 @@ function fakeChild() {
     return child;
 }
 
+test('python caller preserves database and sample configuration without forwarding credentials', async t => {
+    const settings = { DB_PATH_OVERRIDE: '/isolated/state/stocks.db', SAMPLE_DATA: '1',
+        ALPACA_LIVE_API_KEY: 'synthetic-not-a-key', STOCK_DASHBOARD_SESSION_SECRET: 'synthetic-not-a-secret' };
+    for (const [key, value] of Object.entries(settings)) {
+        const previous = process.env[key];
+        process.env[key] = value;
+        t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; });
+    }
+    const child = fakeChild();
+    let received;
+    const callPython = createPythonCaller({ spawnImpl: (_binary, _args, options) => { received = options.env; return child; } });
+    const result = callPython({ action: 'info', symbol: 'SPY' });
+    child.stdout.emit('data', Buffer.from('{"status":"success"}'));
+    child.emit('close', 0);
+    await result;
+    assert.equal(received.DB_PATH_OVERRIDE, settings.DB_PATH_OVERRIDE);
+    assert.equal(received.SAMPLE_DATA, '1');
+    assert.equal(received.ALPACA_LIVE_API_KEY, undefined);
+    assert.equal(received.STOCK_DASHBOARD_SESSION_SECRET, undefined);
+});
+
 test('python caller terminates and rejects a process that exceeds its deadline', async () => {
     const child = fakeChild();
     const callPython = createPythonCaller({

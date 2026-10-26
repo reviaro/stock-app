@@ -1,8 +1,13 @@
 const crypto = require('node:crypto');
+const net = require('node:net');
 const express = require('express');
+const { decodeSecret, matchCounter } = require('./totp');
+const { emitSecurityEvent } = require('./security_events');
+const { createMfaState } = require('./mfa_state');
 
 const COOKIE_NAME = 'stock_dashboard_session';
-const SESSION_TTL_SECONDS = 12 * 60 * 60;
+const SESSION_TTL_SECONDS = 4 * 60 * 60;
+const RECENT_MFA_SECONDS = 5 * 60;
 const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 function safeEqualText(left, right) {
@@ -37,8 +42,36 @@ function parseCookies(header = '') {
     return Object.fromEntries(header.split(';').map((part) => {
         const index = part.indexOf('=');
         if (index < 0) return ['', ''];
-        return [part.slice(0, index).trim(), decodeURIComponent(part.slice(index + 1).trim())];
+        try { return [part.slice(0, index).trim(), decodeURIComponent(part.slice(index + 1).trim())]; }
+        catch { return ['', '']; }
     }).filter(([key]) => key));
+}
+
+function normalizedIp(address = '') {
+    const value = address.startsWith('::ffff:') && net.isIP(address.slice(7)) === 4 ? address.slice(7) : address;
+    if (!net.isIP(value)) return null;
+    // Canonicalize IPv6 text so alternate spellings cannot create new buckets.
+    try { return net.isIP(value) === 6 ? new URL(`http://[${value}]`).hostname.slice(1, -1) : value; }
+    catch { return null; }
+}
+
+function loginClient(req, trustedProxyIp = '') {
+    const peer = normalizedIp(req.socket.remoteAddress || '');
+    if (peer && peer === normalizedIp(trustedProxyIp)) {
+        // The one configured proxy must overwrite X-Forwarded-For, not append
+        // client-controlled chains. Never enable blanket Express trust proxy.
+        const forwarded = req.get('x-forwarded-for');
+        if (typeof forwarded !== 'string') return null;
+        return normalizedIp(forwarded.trim());
+    }
+    return peer;
+}
+
+function requireRecentMfa(req, res, next) {
+    if (req.auth?.type === 'session' && req.auth.role === 'operator' && req.auth.recentMfa === true) return next();
+    emitSecurityEvent('mfa_required', { outcome: 'refused', code: 'AUTH_RECENT_MFA_REQUIRED' });
+    return res.status(403).json({ status: 'error', code: 'AUTH_RECENT_MFA_REQUIRED',
+        error: 'Verify your password and authenticator code before changing live settings or submitting an order.' });
 }
 
 function isLoopback(address = '') {
@@ -62,6 +95,11 @@ function createAuth({
     publicOrigin = '',
     sampleData = false,
     cookieName = COOKIE_NAME,
+    totpSecret = '',
+    trustedProxyIp = '',
+    maxAttemptClients = 1024,
+    onSecurityEvent = emitSecurityEvent,
+    mfaStateFile = '',
 } = {}) {
     if (!username || !passwordHash || !sessionSecret || String(sessionSecret).length < 32) {
         throw new Error('Dashboard auth requires username, password hash, and a session secret of at least 32 characters');
@@ -87,6 +125,30 @@ function createAuth({
     const attempts = new Map();
     const sessions = new Map();
     const router = express.Router();
+    const totpKey = totpSecret ? decodeSecret(totpSecret) : null;
+    const mfaState = totpKey && mfaStateFile ? createMfaState(mfaStateFile, totpKey) : null;
+    let lastTotpCounter = -1;
+    let workTokens = 20, lastWorkRefill = now();
+    const audit = (event, detail = {}) => { try { onSecurityEvent(event, detail); } catch { /* Logs must not alter authorization. */ } };
+
+    function acceptOtp(code) {
+        if (!totpKey) return false;
+        const counter = matchCounter(totpKey, code, now(), lastTotpCounter);
+        if (counter === null) return false;
+        if (mfaState && !mfaState.consume(counter)) return false;
+        lastTotpCounter = counter;
+        return true;
+    }
+
+    function recentMfa(session) {
+        const seconds = Math.floor(now() / 1000);
+        return Boolean(totpKey && session?.mfaAt != null && seconds >= session.mfaAt && seconds < session.mfaAt + RECENT_MFA_SECONDS);
+    }
+
+    function authDetails(session) {
+        return { mfaConfigured: Boolean(totpKey), recentMfa: recentMfa(session),
+            recentAuthUntil: session?.mfaAt == null ? null : new Date((session.mfaAt + RECENT_MFA_SECONDS) * 1000).toISOString() };
+    }
 
     function sessionKey(token) {
         return crypto.createHmac('sha256', sessionSecret).update(String(token)).digest('hex');
@@ -106,6 +168,7 @@ function createAuth({
             sub: username,
             iat: Math.floor(now() / 1000),
             exp: Math.floor(now() / 1000) + sessionTtlSeconds,
+            mfaAt: totpKey ? Math.floor(now() / 1000) : null,
         });
         return token;
     }
@@ -144,14 +207,34 @@ function createAuth({
     }
 
     function currentAttemptRecord(req) {
-        const key = req.ip || req.socket.remoteAddress || 'unknown';
+        const key = loginClient(req, trustedProxyIp);
+        if (!key) return null;
+        for (const [client, record] of attempts) if (record.resetAt <= now()) attempts.delete(client);
         const existing = attempts.get(key);
         if (!existing || existing.resetAt <= now()) {
+            // Refuse new buckets rather than evicting a blocked client and
+            // making their brute-force limit resettable through IP churn.
+            if (attempts.size >= maxAttemptClients) return null;
             const fresh = { count: 0, resetAt: now() + attemptWindowMs };
             attempts.set(key, fresh);
             return [key, fresh];
         }
         return [key, existing];
+    }
+
+    function permitAttempt(req, res, event) {
+        const entry = currentAttemptRecord(req);
+        const elapsed = Math.max(0, now() - lastWorkRefill);
+        workTokens = Math.min(20, workTokens + elapsed / 500);
+        lastWorkRefill = now();
+        if (!entry || entry[1].count >= maxAttempts || workTokens < 1) {
+            res.setHeader('Retry-After', entry?.[1].count >= maxAttempts ? String(Math.max(1, Math.ceil((entry[1].resetAt - now()) / 1000))) : '1');
+            audit(event, { outcome: 'refused' });
+            res.status(429).json({ status: 'error', error: 'Too many login attempts. Try again later.' });
+            return null;
+        }
+        workTokens -= 1;
+        return entry;
     }
 
     function sameOrigin(req) {
@@ -214,7 +297,7 @@ function createAuth({
             if (UNSAFE_METHODS.has(req.method) && !sameOrigin(req)) {
                 return res.status(403).json({ status: 'error', error: 'Request origin is not allowed' });
             }
-            req.auth = { type: 'session', role: 'operator', username: session.sub };
+            req.auth = { type: 'session', role: 'operator', username: session.sub, ...authDetails(session) };
             return next();
         }
         if (isTrustedLoopbackAutomation(req)) {
@@ -230,30 +313,69 @@ function createAuth({
         res.json({
             status: 'success',
             data: session
-                ? { authenticated: true, username: session.sub, ...(sampleData ? { sampleData: true } : {}) }
-                : { authenticated: false },
+                ? { authenticated: true, username: session.sub, ...authDetails(session), ...(sampleData ? { sampleData: true } : {}) }
+                : { authenticated: false, mfaConfigured: Boolean(totpKey) },
         });
     });
 
     router.post('/login', (req, res) => {
         res.setHeader('Cache-Control', 'no-store');
-        const [key, record] = currentAttemptRecord(req);
-        if (record.count >= maxAttempts) {
-            return res.status(429).json({ status: 'error', error: 'Too many login attempts. Try again later.' });
+        // A cross-origin simple POST must not consume the victim's shared
+        // login/reauthentication quota or a one-time authenticator code.
+        if (!sameOrigin(req)) {
+            return res.status(403).json({ status: 'error', error: 'Request origin is not allowed' });
         }
+        const attempt = permitAttempt(req, res, 'login_rate_limited');
+        if (!attempt) return;
+        const [key, record] = attempt;
 
         const suppliedUsername = typeof req.body?.username === 'string' ? req.body.username : '';
         const suppliedPassword = typeof req.body?.password === 'string' ? req.body.password : '';
         const passwordMatches = verifyPassword(suppliedPassword, passwordHash);
         const usernameMatches = safeEqualText(suppliedUsername, username);
-        if (!passwordMatches || !usernameMatches) {
+        let otpMatches = !totpKey;
+        try { if (passwordMatches && usernameMatches && totpKey) otpMatches = acceptOtp(req.body?.otp); }
+        catch {
+            audit('login_failed', { outcome: 'failure', code: 'AUTH_MFA_UNAVAILABLE' });
+            return res.status(503).json({ status: 'error', code: 'AUTH_MFA_UNAVAILABLE', error: 'Authenticator verification is temporarily unavailable. Contact the operator.' });
+        }
+        if (!passwordMatches || !usernameMatches || !otpMatches) {
             record.count += 1;
-            return res.status(401).json({ status: 'error', error: 'Invalid username or password' });
+            audit('login_failed', { outcome: 'refused' });
+            return res.status(401).json({ status: 'error', error: 'Invalid sign-in details' });
         }
 
         attempts.delete(key);
-        res.setHeader('Set-Cookie', cookieHeader(issueToken()));
-        return res.json({ status: 'success', data: { authenticated: true, username, ...(sampleData ? { sampleData: true } : {}) } });
+        const token = issueToken();
+        res.setHeader('Set-Cookie', cookieHeader(token));
+        audit('login_success', { outcome: 'success' });
+        return res.json({ status: 'success', data: { authenticated: true, username, ...authDetails(verifyToken(token)), ...(sampleData ? { sampleData: true } : {}) } });
+    });
+
+    router.post('/reauthenticate', (req, res) => {
+        res.setHeader('Cache-Control', 'no-store');
+        const session = sessionFromRequest(req);
+        if (!session || req.get('authorization')) return res.status(401).json({ status: 'error', error: 'Sign in again before verifying.' });
+        if (!sameOrigin(req)) return res.status(403).json({ status: 'error', error: 'Request origin is not allowed' });
+        if (!totpKey) return res.status(409).json({ status: 'error', code: 'AUTH_MFA_NOT_CONFIGURED', error: 'An authenticator must be configured on the server before live investing can be authorized.' });
+        const attempt = permitAttempt(req, res, 'reauth_rate_limited');
+        if (!attempt) return;
+        const [key, record] = attempt;
+        let verified = false;
+        try { verified = verifyPassword(req.body?.password, passwordHash) && acceptOtp(req.body?.otp); }
+        catch {
+            audit('reauth_failed', { outcome: 'failure', code: 'AUTH_MFA_UNAVAILABLE' });
+            return res.status(503).json({ status: 'error', code: 'AUTH_MFA_UNAVAILABLE', error: 'Authenticator verification is temporarily unavailable. Contact the operator.' });
+        }
+        if (!verified) {
+            record.count += 1;
+            audit('reauth_failed', { outcome: 'refused' });
+            return res.status(401).json({ status: 'error', error: 'Invalid verification details. Use a new authenticator code.' });
+        }
+        attempts.delete(key);
+        session.mfaAt = Math.floor(now() / 1000);
+        audit('reauth_success', { outcome: 'success' });
+        return res.json({ status: 'success', data: authDetails(session) });
     });
 
     router.post('/logout', (req, res) => {
@@ -262,16 +384,18 @@ function createAuth({
             return res.status(403).json({ status: 'error', error: 'Request origin rejected' });
         }
         revokeToken(parseCookies(req.headers.cookie)[cookieName]);
+        audit('logout', { outcome: 'success' });
         res.setHeader('Set-Cookie', cookieHeader('', 0));
         return res.json({ status: 'success', data: { authenticated: false } });
     });
 
     function securityHeaders(_req, res, next) {
+        if (secureCookie && /^https:\/\//.test(publicOrigin)) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
         res.setHeader('X-Content-Type-Options', 'nosniff');
         res.setHeader('X-Frame-Options', 'DENY');
         res.setHeader('Referrer-Policy', 'no-referrer');
         res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-        res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
+        res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
         next();
     }
 
@@ -295,6 +419,9 @@ function createAuthFromEnv(env = process.env) {
         publicOrigin: env.STOCK_DASHBOARD_PUBLIC_ORIGIN || '',
         sampleData: env.SAMPLE_DATA === '1',
         cookieName: env.SAMPLE_DATA === '1' ? 'stock_dashboard_sample_session' : COOKIE_NAME,
+        totpSecret: env.STOCK_DASHBOARD_TOTP_SECRET || '',
+        trustedProxyIp: env.STOCK_DASHBOARD_TRUSTED_PROXY_IP || '',
+        mfaStateFile: env.STOCK_DASHBOARD_MFA_STATE_FILE || '',
     });
 }
 
@@ -304,4 +431,7 @@ module.exports = {
     createAuthFromEnv,
     hashPassword,
     verifyPassword,
+    loginClient,
+    requireRecentMfa,
+    RECENT_MFA_SECONDS,
 };

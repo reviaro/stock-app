@@ -4,6 +4,7 @@ const http = require('node:http');
 
 const { createAuth, hashPassword } = require('../services/auth');
 const { createApp } = require('../server');
+const { codeAt } = require('../services/totp');
 
 function request(port, path, { method = 'GET', body, headers = {} } = {}) {
     return new Promise((resolve, reject) => {
@@ -20,7 +21,7 @@ function request(port, path, { method = 'GET', body, headers = {} } = {}) {
             res.on('end', () => {
                 let parsed;
                 try { parsed = JSON.parse(responseBody); } catch (_error) { parsed = responseBody; }
-                resolve({ status: res.statusCode, body: parsed });
+                resolve({ status: res.statusCode, body: parsed, headers: res.headers });
             });
         });
         req.on('error', reject);
@@ -32,6 +33,59 @@ function request(port, path, { method = 'GET', body, headers = {} } = {}) {
 function get(port, path) {
     return request(port, path);
 }
+
+test('login rejects foreign or missing origins before consuming quotas or an authenticator code', async () => {
+    const secret = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'; // RFC 6238 fixture key.
+    let now = 1800000000000;
+    const credentials = { username: 'test-operator', password: 'synthetic-test-password' };
+    const auth = createAuth({
+        username: credentials.username,
+        passwordHash: hashPassword(credentials.password),
+        sessionSecret: 'synthetic-session-secret-at-least-32-characters',
+        allowLoopback: false,
+        maxAttempts: 2,
+        totpSecret: secret,
+        now: () => now,
+        onSecurityEvent: () => {},
+    });
+    const server = createApp({ auth }).listen(0, '127.0.0.1');
+    await new Promise(resolve => server.once('listening', resolve));
+    const port = server.address().port;
+    const origin = `http://127.0.0.1:${port}`;
+    const otp = codeAt(secret, Math.floor(now / 30000));
+    try {
+        for (const invalidOrigin of [undefined, 'null', 'https://unrelated.example', `https://127.0.0.1:${port}`]) {
+            // Simple POSTs do not need a CORS preflight. An absent JSON body
+            // used to count as a failed password attempt against the victim IP.
+            const response = await request(port, '/api/auth/login', {
+                method: 'POST', headers: invalidOrigin === undefined ? {} : { Origin: invalidOrigin },
+            });
+            assert.equal(response.status, 403);
+            assert.equal(response.headers['set-cookie'], undefined);
+        }
+        const foreignCredentials = await request(port, '/api/auth/login', {
+            method: 'POST', headers: { Origin: 'https://unrelated.example' }, body: { ...credentials, otp },
+        });
+        assert.equal(foreignCredentials.status, 403);
+        const login = await request(port, '/api/auth/login', {
+            method: 'POST', headers: { Origin: origin }, body: { ...credentials, otp },
+        });
+        assert.equal(login.status, 200, 'foreign origins must not consume the client quota or OTP');
+        now += 300000;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            assert.equal((await request(port, '/api/auth/login', {
+                method: 'POST', headers: { Origin: 'https://unrelated.example' },
+            })).status, 403);
+        }
+        const reauth = await request(port, '/api/auth/reauthenticate', {
+            method: 'POST', headers: { Origin: origin, Cookie: login.headers['set-cookie'][0].split(';')[0] },
+            body: { password: credentials.password, otp: codeAt(secret, Math.floor(now / 30000)) },
+        });
+        assert.equal(reauth.status, 200, 'foreign login attempts must not block sensitive-action verification');
+    } finally {
+        await new Promise(resolve => server.close(resolve));
+    }
+});
 
 test('server leaves auth session public while protecting dashboard APIs', async () => {
     const auth = createAuth({
@@ -51,6 +105,9 @@ test('server leaves auth session public while protecting dashboard APIs', async 
         const portfolio = await get(server.address().port, '/api/portfolio');
         assert.equal(portfolio.status, 401);
         assert.equal(portfolio.body.error, 'Authentication required');
+        assert.equal(portfolio.headers['cache-control'], 'no-store');
+        assert.match(portfolio.headers['content-security-policy'], /img-src 'self' data:;/);
+        assert.doesNotMatch(portfolio.headers['content-security-policy'], /img-src[^;]*https:/);
 
         const alpaca = await get(server.address().port, '/api/alpaca-paper/status');
         assert.equal(alpaca.status, 401);

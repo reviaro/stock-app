@@ -278,7 +278,7 @@ export function HistoryPanel() {
                 setRangeDays(Number(e.target.value) as (typeof HISTORY_RANGE_OPTIONS)[number]['value'])
                 setDateFilter('')
               }}
-              className="data-hover text-xs px-2 py-1 rounded-md border bg-transparent text-muted-foreground border-border focus:border-primary focus:outline-none"
+              className="data-hover text-xs px-2 py-1 rounded-md border bg-transparent text-muted-foreground border-border focus:border-primary focus:outline-hidden"
             >
               {HISTORY_RANGE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
@@ -288,7 +288,7 @@ export function HistoryPanel() {
               aria-label="History date"
               value={dateFilter}
               onChange={(e) => setDateFilter(e.target.value)}
-              className="data-hover text-xs px-2 py-1 rounded-md border bg-transparent text-muted-foreground border-border focus:border-primary focus:outline-none"
+              className="data-hover text-xs px-2 py-1 rounded-md border bg-transparent text-muted-foreground border-border focus:border-primary focus:outline-hidden"
             >
               <option value="">All dates</option>
               {availableDates.map((date) => (
@@ -299,7 +299,7 @@ export function HistoryPanel() {
               aria-label="History snapshot time"
               value={slotFilter}
               onChange={(e) => setSlotFilter(e.target.value as 'all' | 'openish' | 'midday' | 'closeish' | 'manual-open')}
-              className="data-hover text-xs px-2 py-1 rounded-md border bg-transparent text-muted-foreground border-border focus:border-primary focus:outline-none"
+              className="data-hover text-xs px-2 py-1 rounded-md border bg-transparent text-muted-foreground border-border focus:border-primary focus:outline-hidden"
             >
               <option value="all">All slots</option>
               <option value="openish">Morning</option>

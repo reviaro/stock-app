@@ -118,22 +118,26 @@ function createV2MonitorWorker({
     return { start, stop, maxConcurrentTicks: () => maxRunning };
 }
 
-module.exports = { createV2MonitorWorker, acquireSingletonLock, nextDelayMs, DEFAULT_LOCK_PATH };
-
-if (require.main === module) {
+async function startMonitor() {
     const { createPaperClient, getPaperCredentials } = require('../services/alpaca_paper_service');
     const credentials = getPaperCredentials();
     const worker = createV2MonitorWorker({
+        lockPath: process.env.ALPACA_V2_MONITOR_LOCK_PATH || DEFAULT_LOCK_PATH,
         createClient: createPaperClient, wsApiKey: credentials.key, wsApiSecret: credentials.secret,
         // eslint-disable-next-line no-console
         log: (entry) => console.log(JSON.stringify({ at: new Date().toISOString(), ...entry })),
     });
-    require('../database/db').initDb().then(() => worker.start()).catch((error) => {
-        // eslint-disable-next-line no-console
-        console.error('Alpaca Day Trading v2 monitor failed to start:', error.code || 'error');
-        process.exit(1);
-    });
     const shutdown = () => { worker.stop().then(() => process.exit(0)); };
     process.on('SIGTERM', shutdown);
     process.on('SIGINT', shutdown);
+    await require('../database/db').initDb();
+    await worker.start();
+    return worker;
 }
+
+module.exports = { createV2MonitorWorker, acquireSingletonLock, nextDelayMs, DEFAULT_LOCK_PATH, startMonitor };
+
+if (require.main === module) startMonitor().catch((error) => {
+    console.error('Alpaca Day Trading v2 monitor failed to start:', error.code || 'error');
+    process.exit(1);
+});

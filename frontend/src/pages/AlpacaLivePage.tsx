@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Button } from '@/components/ui/button'
+import { LiveActionVerification } from '@/components/LiveActionVerification'
 import { useAlpacaLive } from '@/hooks/useAlpacaLive'
 import type { LiveOverview, LivePolicy } from '@/types/alpacaLive'
 
@@ -9,7 +10,7 @@ const inputClass = 'mt-1 w-full min-w-0 rounded-md border border-border bg-backg
 const terminal = new Set(['filled', 'canceled', 'expired', 'rejected'])
 type LiveHooks = ReturnType<typeof useAlpacaLive>
 
-function PolicyEditor({ data, hooks }: { data: LiveOverview; hooks: LiveHooks }) {
+function PolicyEditor({ data, hooks, verified }: { data: LiveOverview; hooks: LiveHooks; verified: boolean }) {
   const [policy, setPolicy] = useState<LivePolicy>(() => structuredClone(data.policy))
   const [confirmation, setConfirmation] = useState('')
   const [importNote, setImportNote] = useState('')
@@ -33,6 +34,7 @@ function PolicyEditor({ data, hooks }: { data: LiveOverview; hooks: LiveHooks })
   }
   function submit(event: FormEvent) {
     event.preventDefault()
+    if (!verified) return
     hooks.policy.mutate({ policy, expectedVersion: data.version, confirmation })
   }
   return <section aria-labelledby="live-policy-heading" className="rounded-xl border border-border bg-card p-4 sm:p-6">
@@ -72,12 +74,12 @@ function PolicyEditor({ data, hooks }: { data: LiveOverview; hooks: LiveHooks })
       {!policy.paused && <label className="block text-sm">Type {phrase}<input className={inputClass} autoComplete="off" value={confirmation} onChange={e => setConfirmation(e.target.value)} /></label>}
       {hooks.policy.error && <p role="alert" className="text-sm text-destructive">{hooks.policy.error.message}</p>}
       {hooks.draft.error && <p role="alert" className="text-sm text-destructive">{hooks.draft.error.message}</p>}
-      <Button type="submit" disabled={hooks.policy.isPending || (!policy.paused && (confirmation !== phrase || !(policy.budget > 0) || !policy.targets.length))}>{hooks.policy.isPending ? 'Saving…' : 'Save live policy'}</Button>
+      <Button type="submit" disabled={!verified || hooks.policy.isPending || (!policy.paused && (confirmation !== phrase || !(policy.budget > 0) || !policy.targets.length))}>{hooks.policy.isPending ? 'Saving…' : 'Save live policy'}</Button>
     </form>
   </section>
 }
 
-function OwnershipReview({ data, hooks }: { data: LiveOverview; hooks: LiveHooks }) {
+function OwnershipReview({ data, hooks, verified }: { data: LiveOverview; hooks: LiveHooks; verified: boolean }) {
   const [symbol, setSymbol] = useState('')
   const [reason, setReason] = useState('')
   const [confirmation, setConfirmation] = useState('')
@@ -87,12 +89,12 @@ function OwnershipReview({ data, hooks }: { data: LiveOverview; hooks: LiveHooks
   return <details className="rounded-lg border border-border bg-card p-4">
     <summary className="cursor-pointer text-sm font-medium">Review ownership of existing holdings or corporate-action changes</summary>
     <p className="mt-3 text-sm text-muted-foreground">Pause new orders first. This records your approval to manage the currently verified broker quantity; it does not place an order or create a fill. Review the asset and any external trades or corporate actions at Alpaca.</p>
-    <form className="mt-3 grid gap-3 sm:grid-cols-2" onSubmit={e => { e.preventDefault(); hooks.ownership.mutate({ symbol, qty, reason, confirmation }) }}>
+    <form className="mt-3 grid gap-3 sm:grid-cols-2" onSubmit={e => { e.preventDefault(); if (verified) hooks.ownership.mutate({ symbol, qty, reason, confirmation }) }}>
       <label className="text-sm">Symbol to review<input className={inputClass} value={symbol} maxLength={10} onChange={e => { setSymbol(e.target.value.toUpperCase().trim()); setConfirmation('') }} required /></label>
       <div className="text-sm"><p>Verified broker quantity</p><p className="mt-3 font-semibold tabular-nums">{qty} shares</p></div>
       <label className="text-sm sm:col-span-2">Reason for ownership review<input className={inputClass} value={reason} minLength={10} maxLength={500} onChange={e => setReason(e.target.value)} required /></label>
       <label className="text-sm sm:col-span-2">Type {phrase}<input className={inputClass} autoComplete="off" value={confirmation} onChange={e => setConfirmation(e.target.value)} /></label>
-      <div className="sm:col-span-2"><Button type="submit" variant="outline" disabled={!symbol || !data.connected || !data.policy.paused || confirmation !== phrase || reason.trim().length < 10 || hooks.ownership.isPending}>Confirm reviewed ownership</Button></div>
+      <div className="sm:col-span-2"><Button type="submit" variant="outline" disabled={!verified || !symbol || !data.connected || !data.policy.paused || confirmation !== phrase || reason.trim().length < 10 || hooks.ownership.isPending}>Confirm reviewed ownership</Button></div>
     </form>
     {hooks.ownership.error && <p role="alert" className="mt-3 text-sm text-destructive">{hooks.ownership.error.message}</p>}
     {hooks.ownership.isSuccess && <p role="status" className="mt-3 text-sm">Ownership review recorded. Build a new preview after checking the policy.</p>}
@@ -105,6 +107,14 @@ export function AlpacaLivePage() {
   const [confirmation, setConfirmation] = useState('')
   const plan = hooks.preview.data
   const [expired, setExpired] = useState(true)
+  const [clock, setClock] = useState(Date.now)
+  const security = hooks.security.data
+  const verified = security?.authenticated === true && security.mfaConfigured === true && security.recentMfa === true
+    && typeof security.recentAuthUntil === 'string' && Date.parse(security.recentAuthUntil) > clock
+  useEffect(() => {
+    const timer = setInterval(() => setClock(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
   useEffect(() => {
     const tick = () => setExpired(!plan || Date.parse(plan.expiresAt) <= Date.now())
     tick()
@@ -128,6 +138,7 @@ export function AlpacaLivePage() {
       {isLoading && <p role="status">Loading live investing…</p>}
       {error && <p role="alert" className="text-destructive">{error.message}</p>}
       {data && <>
+        <LiveActionVerification security={security} verified={verified} error={hooks.security.error} onVerified={() => hooks.security.refetch()} />
         <section aria-label="Live account readiness" className="border-y border-border py-4">
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm"><strong>{data.connected ? `Live account ${data.accountLabel}` : 'Live account not connected'}</strong><span>{data.policy.paused ? 'New orders paused' : data.policy.executionMode === 'automatic' ? 'Automatic execution enabled' : 'Confirmation required'}</span></div>
           <ol className="mt-3 space-y-1 text-sm text-muted-foreground">
@@ -137,8 +148,10 @@ export function AlpacaLivePage() {
             {data.blockers.map((blocker, i) => <li key={i}>{blocker}</li>)}
           </ol>
           <dl className="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-4">{[['Broker account equity', money(data.equity)], ['Broker cash', money(data.cash)], ['Capital ceiling', money(data.policy.budget)], ['Cash reserve', data.policy.reservePct + '%']].map(([label, value]) => <div key={label}><dt className="text-xs text-muted-foreground">{label}</dt><dd className="mt-1 text-lg font-semibold tabular-nums">{value}</dd></div>)}</dl>
+          <Button className="mt-4" variant="destructive" disabled={data.policy.paused || hooks.pause.isPending} onClick={() => hooks.pause.mutate(data.version)}>{hooks.pause.isPending ? 'Pausing…' : 'Pause new orders now'}</Button>
+          {hooks.pause.error && <p role="alert" className="mt-3 text-sm text-destructive">{hooks.pause.error.message}</p>}
         </section>
-        <PolicyEditor key={data.version} data={data} hooks={hooks} />
+        <PolicyEditor key={data.version} data={data} hooks={hooks} verified={verified} />
         <section aria-labelledby="live-decisions-heading" className="space-y-3">
           <h2 id="live-decisions-heading" className="text-lg font-semibold">Investment agent decisions</h2>
           {!data.decisions.length && <p className="text-sm text-muted-foreground">No live decisions yet. Give your investment agent the dedicated live-investing credential after deployment. Its requests need a saved research packet, strategy version, dated analysis and matched factual claims, and follow the saved allocation limits and execution mode.</p>}
@@ -156,14 +169,14 @@ export function AlpacaLivePage() {
             {plan.blockers.length > 0 && <ul role="status" className="list-disc space-y-1 pl-5 text-sm text-amber-700 dark:text-amber-300">{plan.blockers.map(b => <li key={b}>{b}</li>)}</ul>}
             <div className="overflow-x-auto"><table className="w-full text-left text-sm"><caption className="sr-only">Target allocation and proposed adjustments</caption><thead className="border-b border-border text-muted-foreground"><tr>{['Symbol', 'Owned shares', 'Target', 'Adjustment', 'Limit', 'Value'].map(t => <th key={t} className="whitespace-nowrap px-2 py-2 font-medium">{t}</th>)}</tr></thead><tbody>{plan.rows.map(r => <tr key={r.symbol} className="border-b border-border/60"><td className="px-2 py-3 font-medium">{r.symbol}</td><td className="px-2 py-3 tabular-nums">{r.currentQty}</td><td className="px-2 py-3 tabular-nums">{r.targetWeightPct}%</td><td className="whitespace-nowrap px-2 py-3">{r.actionable ? `${r.side.toUpperCase()} ${r.qty}` : 'Within threshold'}</td><td className="px-2 py-3">{money(r.limitPrice)}</td><td className="px-2 py-3">{money(r.notional)}</td></tr>)}</tbody></table></div>
             {!next && <p role="status" className="text-sm text-muted-foreground">No actionable order under the current allocation and thresholds.</p>}
-            {next && <div className="space-y-3 border-t border-border pt-4"><p className="font-medium">Next: {next.side.toUpperCase()} {next.qty} {next.symbol} · DAY limit {money(next.limitPrice)} · up to {money(next.notional)}</p><label className="block max-w-md text-sm">Type {phrase}<input className={inputClass} autoComplete="off" value={confirmation} onChange={e => setConfirmation(e.target.value)} /></label><Button variant="destructive" disabled={confirmation !== phrase || plan.blockers.length > 0 || expired || hooks.execute.isPending || hooks.execute.isSuccess || Boolean(error)} onClick={() => hooks.execute.mutate({ planId: plan.id, confirmation })}>{hooks.execute.isPending ? 'Submitting once…' : 'Submit live limit order'}</Button></div>}
+            {next && <div className="space-y-3 border-t border-border pt-4"><p className="font-medium">Next: {next.side.toUpperCase()} {next.qty} {next.symbol} · DAY limit {money(next.limitPrice)} · up to {money(next.notional)}</p><label className="block max-w-md text-sm">Type {phrase}<input className={inputClass} autoComplete="off" value={confirmation} onChange={e => setConfirmation(e.target.value)} /></label><Button variant="destructive" disabled={!verified || confirmation !== phrase || plan.blockers.length > 0 || expired || hooks.execute.isPending || hooks.execute.isSuccess || Boolean(error)} onClick={() => hooks.execute.mutate({ planId: plan.id, confirmation })}>{hooks.execute.isPending ? 'Submitting once…' : 'Submit live limit order'}</Button></div>}
             {expired && <p role="status" className="text-sm text-muted-foreground">Preview expired. Build a fresh preview before confirming.</p>}
           </div>}
           {hooks.execute.error && <p role="alert" className="mt-3 text-sm text-destructive">{hooks.execute.error.message}</p>}
           {hooks.execute.isSuccess && <p role="status" className="mt-3 text-sm">Order recorded. Accepted is not the same as filled; refresh to reconcile before the next trade.</p>}
         </section>
         <section aria-labelledby="live-holdings-heading"><h2 id="live-holdings-heading" className="text-lg font-semibold">Broker holdings</h2><p className="mt-1 text-sm text-muted-foreground">Confirmed app fills and explicit ownership reviews establish managed quantities. External holdings and corporate-action discrepancies require review.</p><div className="mt-3 space-y-2">{!data.positions.length && <p className="text-sm text-muted-foreground">No verified broker positions to display.</p>}{data.positions.map(p => <div key={p.symbol} className="flex flex-wrap justify-between gap-2 border-b border-border py-3 text-sm"><strong>{p.symbol}</strong><span>{p.qty} shares · {money(p.value)}</span><span className="text-muted-foreground">{p.managedQty > 0 ? `${p.managedQty} managed shares` : 'Protected external holding'}</span></div>)}</div></section>
-        <OwnershipReview data={data} hooks={hooks} />
+        <OwnershipReview data={data} hooks={hooks} verified={verified} />
         <section aria-labelledby="live-orders-heading"><h2 id="live-orders-heading" className="text-lg font-semibold">Broker order evidence</h2>{!data.orders.length && <p className="mt-2 text-sm text-muted-foreground">No live orders have been submitted.</p>}<div className="mt-3 space-y-3">{data.orders.slice(0, 100).map(o => <article key={o.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-4"><div><strong className="text-sm">{o.side.toUpperCase()} {o.qty} {o.symbol}</strong><p className="mt-1 text-xs text-muted-foreground">{o.status} · filled {o.filledQty} · average {o.filledAvgPrice == null ? 'Pending' : money(o.filledAvgPrice)}</p></div>{!terminal.has(o.status) && <Button variant="outline" disabled={hooks.cancel.isPending} onClick={() => hooks.cancel.mutate(o.id)}>Cancel remaining {o.symbol}</Button>}</article>)}</div>{hooks.cancel.error && <p role="alert" className="mt-3 text-sm text-destructive">{hooks.cancel.error.message}</p>}</section>
       </>}
     </div>
