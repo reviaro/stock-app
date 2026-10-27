@@ -76,6 +76,8 @@ const ERRORS = {
     ALPACA_V2_TOTAL_OPEN_RISK_EXCEEDED: [422, 'total open risk would exceed the account cap'],
     ALPACA_V2_MIN_CASH_RESERVE_BREACHED: [422, 'the entry would breach the cash reserve'],
     ALPACA_V2_QUOTE_UNAVAILABLE: [503, 'market data for this symbol is unavailable'],
+    // Raised before plan admission, so it is a definite refusal, not an unknown outcome.
+    ALPACA_V2_QUOTE_SPREAD_TOO_WIDE: [409, 'the quoted bid/ask spread is too wide; request a fresh preview'],
     ALPACA_V2_BROKER_UNAVAILABLE: [503, 'the broker could not be read'],
     ALPACA_NOT_CONFIGURED: [503, 'the Alpaca paper account is unavailable'],
 };

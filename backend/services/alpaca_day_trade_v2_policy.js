@@ -14,6 +14,12 @@ const DEFAULT_V2_POLICY = Object.freeze({
     feed: 'iex',
     maxQuoteAgeMs: 10_000,
     maxSlippagePct: 0.005,
+    // IEX is one venue: its top of book is sometimes far wider than the consolidated market.
+    // A wide quote cannot price an entry, so it is refused as a quote problem, not a geometry one.
+    maxSpreadPct: 0.01,
+    // Preview sizes qty at this much above the entry bound and returns that as the submission's
+    // max_entry_price, so a small uptick between preview and submission still fits the budgets.
+    entryHeadroomPct: 0.003,
     cutoffMinutesBeforeClose: 15,
     maxPositionPct: 0.25,
     minCashPct: 0.10,
@@ -145,6 +151,17 @@ function entryQuote({ quote, symbol, policy, now }) {
     return { proven, entryPrice: floorToTick(proven.askPrice * (1 + policy.maxSlippagePct)) };
 }
 
+function assertQuoteSpread(proven, policy) {
+    const mid = (proven.askPrice + proven.bidPrice) / 2;
+    if ((proven.askPrice - proven.bidPrice) / mid > policy.maxSpreadPct + 1e-12) {
+        throw policyError('ALPACA_V2_QUOTE_SPREAD_TOO_WIDE', 'the bid/ask spread is too wide to price an entry');
+    }
+}
+
+function validSpreadPolicy(policy) {
+    return Number.isFinite(policy.maxSpreadPct) && policy.maxSpreadPct > 0 && policy.maxSpreadPct <= 0.05;
+}
+
 // Dollar budgets can have arbitrary decimal precision. Compare whole-share amounts
 // in exact 1/10000-dollar units, flooring the budget rather than rounding it upward.
 function dollarUnits(value) {
@@ -165,13 +182,16 @@ function entryAmounts(qty, entryPrice, stop) {
         rawRiskDollars: Number(riskUnits) / 10_000, riskDollars: Number((riskUnits + 50n) / 100n) / 100 };
 }
 
+// sizingCeiling is preview-only: budgets and account caps are checked as if the entry filled
+// at that higher price, while the order itself stays bounded at the current entry price.
 function buildV2EntryOrder({
     intent, account, clock, asset, quote, quoteRetrievedAt, openOrders = [], context = {}, policy = DEFAULT_V2_POLICY, now = new Date(),
+    sizingCeiling = null,
 }) {
     policy = { ...DEFAULT_V2_POLICY, ...policy };
     if (!Number.isFinite(policy.minRewardRiskRatio) || policy.minRewardRiskRatio < 1
         || !Number.isFinite(policy.maxDailyLossPct) || policy.maxDailyLossPct <= 0 || policy.maxDailyLossPct > 0.02
-        || !Number.isFinite(policy.maxCandidateAgeMs) || policy.maxCandidateAgeMs < 0) {
+        || !Number.isFinite(policy.maxCandidateAgeMs) || policy.maxCandidateAgeMs < 0 || !validSpreadPolicy(policy)) {
         throw policyError('ALPACA_V2_POLICY_INVALID', 'entry risk policy is invalid');
     }
     assertIntentShape(intent);
@@ -190,7 +210,8 @@ function buildV2EntryOrder({
     }
     if (context.hasActivePlanForSymbol) throw policyError('ALPACA_V2_DUPLICATE_SYMBOL_PLAN', 'a v2 plan is already active for this symbol');
 
-    const { entryPrice } = entryQuote({ quote, symbol, policy, now });
+    const { proven, entryPrice } = entryQuote({ quote, symbol, policy, now });
+    assertQuoteSpread(proven, policy);
     // A marketable limit bounded above the ask: this, not the raw ask, is the worst price the
     // entry may pay, so geometry, risk, and affordability are all measured against it.
     if (intent.max_entry_price !== undefined && entryPrice > intent.max_entry_price) {
@@ -208,7 +229,7 @@ function buildV2EntryOrder({
     }
 
     const qty = intent.qty;
-    const amounts = entryAmounts(qty, entryPrice, stop);
+    const amounts = entryAmounts(qty, Math.max(entryPrice, sizingCeiling ?? entryPrice), stop);
     const { cost, riskDollars } = amounts;
     if (intent.max_notional_dollars !== undefined && amounts.notionalUnits > dollarUnits(intent.max_notional_dollars)) {
         throw policyError('ALPACA_V2_NOTIONAL_BUDGET_EXCEEDED', 'entry cost exceeds the declared dollar budget');
@@ -297,6 +318,9 @@ function previewConstraints({ intent, account, openOrders, context, policy }) {
 function buildV2EntryPreview({ intent, policy = DEFAULT_V2_POLICY, now = new Date(), openOrders = [], context = {}, ...facts } = {}) {
     assertV2PreviewIntent(intent);
     policy = { ...DEFAULT_V2_POLICY, ...policy };
+    if (!Number.isFinite(policy.entryHeadroomPct) || policy.entryHeadroomPct < 0 || policy.entryHeadroomPct > 0.01) {
+        throw policyError('ALPACA_V2_POLICY_INVALID', 'entry risk policy is invalid');
+    }
     // Validate caller metadata even when an unrelated market gate would block entry.
     normalizeEntryMetadata(intent, { now, maxAgeMs: policy.maxCandidateAgeMs });
     let quote = null; let entryPrice = null;
@@ -311,7 +335,8 @@ function buildV2EntryPreview({ intent, policy = DEFAULT_V2_POLICY, now = new Dat
     const blocked = (code) => ({ eligible: false, qty: 0, entryPrice, quote, notionalDollars: null, riskDollars: null,
         rewardRiskRatio: null, constraints, blockerCodes: [code], submission: null });
     const { max_qty: maxQty, ...entryIntent } = intent;
-    const build = (qty) => buildV2EntryOrder({ ...facts, intent: { ...entryIntent, qty }, policy, now, openOrders, context });
+    const sizingCeiling = entryPrice === null ? null : floorToTick(entryPrice * (1 + policy.entryHeadroomPct));
+    const build = (qty) => buildV2EntryOrder({ ...facts, intent: { ...entryIntent, qty }, policy, now, openOrders, context, sizingCeiling });
     try { build(1); } catch (error) {
         if (INPUT_ERRORS.has(error.code) || !String(error.code || '').startsWith('ALPACA_V2_')) throw error;
         return blocked(error.code);
@@ -333,7 +358,7 @@ function buildV2EntryPreview({ intent, policy = DEFAULT_V2_POLICY, now = new Dat
     const amounts = entryAmounts(qty, best.order.limit_price, intent.stop);
     return { eligible: true, qty, entryPrice: best.order.limit_price, quote, notionalDollars: amounts.cost,
         riskDollars: amounts.rawRiskDollars, rewardRiskRatio: best.plan.entry_evidence.planned_reward_risk,
-        constraints, blockerCodes: [], submission: { qty, max_entry_price: best.order.limit_price,
+        constraints, blockerCodes: [], submission: { qty, max_entry_price: Math.max(best.order.limit_price, sizingCeiling),
             max_notional_dollars: intent.max_notional_dollars, max_risk_dollars: intent.max_risk_dollars } };
 }
 

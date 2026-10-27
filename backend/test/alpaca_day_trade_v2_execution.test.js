@@ -113,7 +113,8 @@ test('preview then submit re-reads the quote and refuses a move above the review
     assert.deepStrictEqual(await store.listPlans(), []);
     const refused = (await store.listEvents()).find((event) => event.event_type === 'entry_refused');
     assert.strictEqual(refused.reason_code, 'ALPACA_V2_ENTRY_PRICE_MOVED');
-    assert.strictEqual(JSON.parse(refused.detail_json).max_entry_price, 100.5);
+    // The reviewed ceiling is the preview's 0.3% headroom cap above the 100.50 entry bound.
+    assert.strictEqual(JSON.parse(refused.detail_json).max_entry_price, 100.8);
 });
 
 test('preview never authorizes stale account headroom; final submission rechecks cash reserve', async () => {
@@ -141,7 +142,7 @@ test('eligible preview can be submitted once with its budgets and ceiling retain
     const evidence = JSON.parse(result.plan.entry_evidence_json);
     assert.strictEqual(evidence.max_notional_dollars, 2000);
     assert.strictEqual(evidence.max_risk_dollars, 100);
-    assert.strictEqual(evidence.max_entry_price, preview.entryPrice);
+    assert.strictEqual(evidence.max_entry_price, preview.submission.max_entry_price);
     assert.strictEqual((await execution.submitEntry(body)).outcome, 'replayed');
     assert.strictEqual(calls.submit.length, 1);
 });
