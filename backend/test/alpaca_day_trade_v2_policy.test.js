@@ -118,6 +118,39 @@ test('rejects a stale, future, mismatched, or crossed quote', () => {
     rejectsWith('ALPACA_V2_QUOTE_UNAVAILABLE', { quote: { quote: { t: '2026-09-23T14:59:58.000Z', bp: 101, bs: 3, ap: 100, as: 2 } } });
 });
 
+test('rejects a quote whose bid/ask spread is too wide to price an entry', () => {
+    // A thin single-venue quote (8.8% of mid) would price the entry above the target.
+    const thin = { symbol: 'NVDA', quote: { t: '2026-09-23T14:59:58.000Z', bp: 1000, bs: 1, ap: 1092, as: 1 } };
+    rejectsWith('ALPACA_V2_QUOTE_SPREAD_TOO_WIDE', { quote: thin, intent: { stop: 1040, target: 1080 } });
+    rejectsWith('ALPACA_V2_QUOTE_SPREAD_TOO_WIDE', { quote: { quote: { t: '2026-09-23T14:59:58.000Z', bp: 98.9, bs: 3, ap: 100, as: 2 } } });
+    // Exactly 1.0% of the mid is still accepted.
+    assert.strictEqual(buildV2EntryOrder(inputs({ quote: { quote: { t: '2026-09-23T14:59:58.000Z', bp: 99.5, bs: 3, ap: 100.5, as: 2 } } })).order.qty, 10);
+    assert.strictEqual(DEFAULT_V2_POLICY.maxSpreadPct, 0.01);
+    for (const maxSpreadPct of [0, -0.01, NaN, Infinity, 0.06]) {
+        rejectsWith('ALPACA_V2_POLICY_INVALID', { policy: { maxSpreadPct } });
+    }
+});
+
+test('preview reports a too-wide spread as its own blocker and keeps the quote as evidence', () => {
+    const result = buildV2EntryPreview(previewInputs({ quote: { quote: { t: '2026-09-23T14:59:58.000Z', bp: 91, bs: 3, ap: 100, as: 2 } } }));
+    assert.strictEqual(result.eligible, false);
+    assert.deepStrictEqual(result.blockerCodes, ['ALPACA_V2_QUOTE_SPREAD_TOO_WIDE']);
+    assert.strictEqual(result.quote.bidPrice, 91);
+    assert.strictEqual(result.quote.askPrice, 100);
+    assert.strictEqual(result.submission, null);
+});
+
+test('preview headroom policy is bounded', () => {
+    assert.strictEqual(DEFAULT_V2_POLICY.entryHeadroomPct, 0.003);
+    for (const entryHeadroomPct of [-0.001, NaN, Infinity, 0.011]) {
+        assert.throws(() => buildV2EntryPreview({ ...previewInputs(), policy: { entryHeadroomPct } }),
+            (error) => error.code === 'ALPACA_V2_POLICY_INVALID');
+    }
+    const exact = buildV2EntryPreview({ ...previewInputs(), policy: { entryHeadroomPct: 0 } });
+    assert.strictEqual(exact.submission.max_entry_price, 100.5);
+    assert.strictEqual(exact.qty, 40);
+});
+
 test('rejects invalid price geometry and off-tick prices', () => {
     rejectsWith('ALPACA_V2_GEOMETRY_INVALID', { intent: { stop: 101 } });
     rejectsWith('ALPACA_V2_GEOMETRY_INVALID', { intent: { target: 100.4 } });
@@ -224,6 +257,12 @@ function previewInputs(overrides = {}) {
     return args;
 }
 
+// Exact sizing arithmetic without the preview headroom; sub-penny fixtures also need a wider
+// spread allowance (a 0.0099/0.01 quote is a 1% spread).
+function exactPreviewInputs(overrides = {}) {
+    return previewInputs({ policy: { entryHeadroomPct: 0, maxSpreadPct: 0.05 }, ...overrides });
+}
+
 function submissionArgs(args, preview) {
     const { max_qty: _maxQty, ...intent } = args.intent;
     return { ...args, intent: { ...intent, ...preview.submission } };
@@ -234,26 +273,28 @@ test('preview returns the largest risk-budgeted whole quantity, exact quote prov
     const original = structuredClone(args);
     const preview = buildV2EntryPreview(args);
     assert.strictEqual(preview.eligible, true);
-    assert.strictEqual(preview.qty, 40);
+    // Sized at the 0.3% headroom ceiling (100.80), so a small uptick before submission
+    // still fits the dollar budgets: risk 100 / (100.80 - 98) floors to 35 shares.
+    assert.strictEqual(preview.qty, 35);
     assert.strictEqual(preview.entryPrice, 100.5);
-    assert.strictEqual(preview.notionalDollars, 4020);
-    assert.strictEqual(preview.riskDollars, 100);
+    assert.strictEqual(preview.notionalDollars, 3517.5);
+    assert.strictEqual(preview.riskDollars, 87.5);
     assert.strictEqual(preview.rewardRiskRatio, 1.4);
     assert.deepStrictEqual(preview.quote, { bidPrice: 99.98, askPrice: 100, feed: 'iex',
         sourceTimestamp: '2026-09-23T14:59:58.000Z', retrievedAt: '2026-09-23T14:59:59.000Z' });
-    assert.deepStrictEqual(preview.submission, { qty: 40, max_entry_price: 100.5, max_notional_dollars: 5000, max_risk_dollars: 100 });
+    assert.deepStrictEqual(preview.submission, { qty: 35, max_entry_price: 100.8, max_notional_dollars: 5000, max_risk_dollars: 100 });
     assert.deepStrictEqual(preview.blockerCodes, []);
     assert.deepStrictEqual(args, original, 'preview must not mutate caller facts or intent');
-    assert.strictEqual(buildV2EntryOrder(submissionArgs(args, preview)).order.qty, 40);
+    assert.strictEqual(buildV2EntryOrder(submissionArgs(args, preview)).order.qty, 35);
     assert.throws(() => buildV2EntryOrder({ ...submissionArgs(args, preview), intent: { ...submissionArgs(args, preview).intent, qty: 41 } }),
         (error) => error.code === 'ALPACA_V2_RISK_BUDGET_EXCEEDED');
 });
 
 test('preview respects notional dollars and an optional caller quantity ceiling', () => {
-    assert.strictEqual(buildV2EntryPreview(previewInputs({ intent: { max_notional_dollars: 2010 } })).qty, 20);
-    assert.strictEqual(buildV2EntryPreview(previewInputs({ intent: { max_notional_dollars: 2009.9999 } })).qty, 19);
-    assert.strictEqual(buildV2EntryPreview(previewInputs({ intent: { max_qty: 7 } })).qty, 7);
-    assert.strictEqual(buildV2EntryPreview(previewInputs({ intent: { max_qty: Number.MAX_SAFE_INTEGER } })).qty, 40);
+    assert.strictEqual(buildV2EntryPreview(exactPreviewInputs({ intent: { max_notional_dollars: 2010 } })).qty, 20);
+    assert.strictEqual(buildV2EntryPreview(exactPreviewInputs({ intent: { max_notional_dollars: 2009.9999 } })).qty, 19);
+    assert.strictEqual(buildV2EntryPreview(exactPreviewInputs({ intent: { max_qty: 7 } })).qty, 7);
+    assert.strictEqual(buildV2EntryPreview(exactPreviewInputs({ intent: { max_qty: Number.MAX_SAFE_INTEGER } })).qty, 40);
 });
 
 test('preview preserves position, per-trade, aggregate-risk, reserve, and working-order caps', () => {
@@ -266,7 +307,7 @@ test('preview preserves position, per-trade, aggregate-risk, reserve, and workin
         [{ intent: generous, account: { cash: '11000' }, openOrders: [{ side: 'buy', qty: '8', filled_qty: '3', limit_price: '100' }] }, 4, 'ALPACA_V2_MIN_CASH_RESERVE_BREACHED'],
     ];
     for (const [overrides, expectedQty, expectedCode] of cases) {
-        const args = previewInputs(overrides);
+        const args = exactPreviewInputs(overrides);
         const preview = buildV2EntryPreview(args);
         assert.strictEqual(preview.qty, expectedQty);
         const submission = submissionArgs(args, preview);
@@ -295,7 +336,7 @@ test('preview never rounds a sub-share budget up into an order', () => {
 });
 
 test('four-decimal prices and sub-cent loss budgets remain exact before policy rounding', () => {
-    const args = previewInputs({ intent: { stop: 0.0099, target: 0.0102, max_notional_dollars: 0.03, max_risk_dollars: 0.0003 },
+    const args = exactPreviewInputs({ intent: { stop: 0.0099, target: 0.0102, max_notional_dollars: 0.03, max_risk_dollars: 0.0003 },
         quote: { quote: { t: NOW.toISOString(), bp: 0.0099, bs: 1, ap: 0.01, as: 1 } } });
     const result = buildV2EntryPreview(args);
     assert.strictEqual(result.qty, 3);
@@ -324,7 +365,7 @@ test('preview handles a bounded entry crossing the one-dollar tick boundary', ()
 
 test('preview rejects geometry that collapses at broker tick precision or overflows reward/risk', () => {
     for (const intent of [{ stop: 100.4999999999 }, { stop: 0.0099, target: 1e306 }]) {
-        const args = previewInputs({ intent, ...(intent.target === 1e306
+        const args = exactPreviewInputs({ intent, ...(intent.target === 1e306
             ? { quote: { quote: { t: NOW.toISOString(), bp: 0.0099, bs: 1, ap: 0.01, as: 1 } } } : {}) });
         const result = buildV2EntryPreview(args);
         assert.strictEqual(result.eligible, false);
@@ -434,16 +475,23 @@ test('actual submission rechecks preview price and caller budgets, while legacy 
     const args = previewInputs({ intent: { max_notional_dollars: 2010, max_risk_dollars: 50 } });
     const preview = buildV2EntryPreview(args);
     const submission = submissionArgs(args, preview);
-    assert.strictEqual(buildV2EntryOrder(submission).order.qty, 20);
-    const higherQuote = { ...submission.quote, quote: { ...submission.quote.quote, ap: 100.01 } };
+    assert.strictEqual(submission.intent.max_entry_price, 100.8);
+    assert.strictEqual(buildV2EntryOrder(submission).order.qty, 17);
+    // An uptick inside the headroom still submits within every dollar budget.
+    for (const ap of [100.01, 100.3]) {
+        const moved = buildV2EntryOrder({ ...submission, quote: { ...submission.quote, quote: { ...submission.quote.quote, ap } } });
+        assert.strictEqual(moved.order.qty, 17);
+        assert.ok(moved.order.limit_price <= 100.8);
+    }
+    const higherQuote = { ...submission.quote, quote: { ...submission.quote.quote, ap: 100.31 } };
     assert.throws(() => buildV2EntryOrder({ ...submission, quote: higherQuote }), (error) => error.code === 'ALPACA_V2_ENTRY_PRICE_MOVED');
-    const withoutPriceCap = { ...submission.intent };
+    const withoutPriceCap = { ...submission.intent, qty: 20 };
     delete withoutPriceCap.max_entry_price;
     assert.throws(() => buildV2EntryOrder({ ...submission, quote: higherQuote, intent: withoutPriceCap }),
         (error) => error.code === 'ALPACA_V2_NOTIONAL_BUDGET_EXCEEDED');
     assert.throws(() => buildV2EntryOrder({ ...submission, quote: higherQuote, intent: { ...withoutPriceCap, max_notional_dollars: 10000 } }),
         (error) => error.code === 'ALPACA_V2_RISK_BUDGET_EXCEEDED');
-    assert.strictEqual(buildV2EntryOrder({ ...submission, quote: { ...submission.quote, quote: { ...submission.quote.quote, ap: 99.99 } } }).order.qty, 20);
+    assert.strictEqual(buildV2EntryOrder({ ...submission, quote: { ...submission.quote, quote: { ...submission.quote.quote, ap: 99.99 } } }).order.qty, 17);
 });
 
 test('optional submission ceilings reject explicit malformed values and cannot be forwarded as broker fields', () => {

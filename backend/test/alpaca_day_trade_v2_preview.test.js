@@ -57,7 +57,7 @@ test('preview sizes at the authoritative entry bound and makes no persistent or 
     assert.equal(result.quoteExpiresAt, '2026-09-23T15:00:09.000Z');
     assert.equal(result.asOf, NOW.toISOString());
     assert.equal(result.indicative, true);
-    assert.deepEqual(result.submission, { qty: 19, max_entry_price: 100.5, max_notional_dollars: 2000, max_risk_dollars: 100 });
+    assert.deepEqual(result.submission, { qty: 19, max_entry_price: 100.8, max_notional_dollars: 2000, max_risk_dollars: 100 });
     assert.equal(f.calls.reads, 1);
     assert.equal(f.calls.writes, 0);
     assert.deepEqual(f.data, before);
@@ -147,7 +147,7 @@ function workingPlan(patch = {}) {
 test('preview uses broker-verified existing risk and refuses missing risk amounts', async () => {
     const f = fixture(); f.data.plans.push(workingPlan());
     const result = await f.execution.previewEntry(intent());
-    assert.equal(result.qty, 4, 'remaining account risk is ten dollars at 2.50 per share');
+    assert.equal(result.qty, 3, 'remaining account risk is ten dollars at 2.80 per share at the 100.80 headroom cap');
     f.data.plans[0].planned_risk_dollars = null;
     await assert.rejects(f.execution.previewEntry(intent()), { code: 'ALPACA_V2_OPEN_RISK_UNAVAILABLE' });
     assert.equal(f.calls.writes, 0);

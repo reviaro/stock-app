@@ -160,7 +160,9 @@ test('entry preview calculates a sanitized indicative result for scoped agents a
         assert.deepStrictEqual(result.blockers, []);
         assert.deepStrictEqual(Object.keys(result.submission).sort(), ['max_entry_price', 'max_notional_dollars', 'max_risk_dollars', 'qty']);
         assert.strictEqual(result.submission.qty, result.qty);
-        assert.strictEqual(result.submission.max_entry_price, result.entryPrice);
+        // qty is sized at a small headroom cap above the current entry bound.
+        assert.ok(result.submission.max_entry_price >= result.entryPrice);
+        assert.ok(result.submission.max_entry_price <= Math.floor(result.entryPrice * 1.003 * 100) / 100);
         assert.strictEqual(result.asOf, PREVIEW_NOW);
         assert.ok(Date.parse(result.quoteExpiresAt) > Date.parse(result.asOf));
         assert.deepStrictEqual(Object.keys(result.quote).sort(), ['askPrice', 'bidPrice', 'feed', 'retrievedAt', 'sourceTimestamp']);
@@ -265,6 +267,18 @@ test('preview response allowlist strips private fields and unknown blockers fail
         { code: 'ALPACA_V2_ERROR', message: 'the preview could not be verified' },
     ]);
     assert.doesNotMatch(JSON.stringify(result), PRIVATE);
+});
+
+test('a too-wide quote spread is a named public preview blocker', () => {
+    const result = sanitizeEntryPreview({
+        eligible: false, qty: 0, entryPrice: 1097.46, blockerCodes: ['ALPACA_V2_QUOTE_SPREAD_TOO_WIDE'],
+        quote: { bidPrice: 1000, askPrice: 1092, feed: 'iex', sourceTimestamp: PREVIEW_NOW, retrievedAt: PREVIEW_NOW },
+        asOf: PREVIEW_NOW, quoteExpiresAt: '2026-10-22T14:15:10.000Z',
+    });
+    assert.deepStrictEqual(result.blockers, [
+        { code: 'ALPACA_V2_QUOTE_SPREAD_TOO_WIDE', message: 'the quoted bid/ask spread is too wide; request a fresh preview' },
+    ]);
+    assert.strictEqual(result.quote.askPrice, 1092);
 });
 
 test('scoped agent entry in paper_execute submits one bracket and the response carries no broker/client ids', async () => {
