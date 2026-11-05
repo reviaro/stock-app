@@ -38,13 +38,13 @@ function ResolveControl({ plan }: { plan: AlpacaV2Plan }) {
   )
 }
 
-export function V2ActivePlansCard() {
+export function V2ActivePlansCard({ recovery = false, transferredPlanIds = [] }: { recovery?: boolean; transferredPlanIds?: number[] }) {
   const { data, isLoading, isError } = useV2Plans()
   const active = (data ?? []).filter((plan) => !TERMINAL.has(plan.state))
   return (
     <section aria-label="Active plans">
       <Card>
-        <CardHeader className="pb-2"><CardTitle>Active plans ({active.length})</CardTitle></CardHeader>
+        <CardHeader className="pb-2"><CardTitle>{recovery ? `Legacy plans (${active.filter(plan => !transferredPlanIds.includes(plan.id)).length} unresolved)` : `Active plans (${active.length})`}</CardTitle></CardHeader>
         <CardContent className="space-y-2 px-3 pb-4 text-xs">
           {isLoading && <p className="text-muted-foreground">Loading plans…</p>}
           {isError && <p className="text-destructive">Unable to load plans.</p>}
@@ -53,7 +53,7 @@ export function V2ActivePlansCard() {
             <article key={plan.id} className="rounded-md border border-border p-3">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm font-semibold">{plan.symbol}</span>
-                {stateBadge(plan.state)}
+                {transferredPlanIds.includes(plan.id) ? <><Badge variant="outline">Transferred to long-term</Badge><span className="text-muted-foreground">Historical state: {plan.state.replace(/_/g, ' ')}</span></> : stateBadge(plan.state)}
                 {plan.attentionCode && <span className="font-mono text-destructive">{plan.attentionCode}</span>}
                 <span className="ml-auto text-muted-foreground">Plan #{plan.id} · exit by {time(plan.exitDeadline)} ET</span>
               </div>
@@ -68,7 +68,7 @@ export function V2ActivePlansCard() {
                 <div><dt className="text-muted-foreground">Risk</dt><dd className="font-mono">{usd(plan.plannedRiskDollars)}</dd></div>
                 <div><dt className="text-muted-foreground">Exited</dt><dd className="font-mono">{plan.filledExitQty}</dd></div>
               </dl>
-              {plan.state === 'attention_required' && <ResolveControl plan={plan} />}
+              {!transferredPlanIds.includes(plan.id) && (recovery || plan.state === 'attention_required') && <ResolveControl plan={plan} />}
             </article>
           ))}
         </CardContent>

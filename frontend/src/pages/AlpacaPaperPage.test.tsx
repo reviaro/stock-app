@@ -1,190 +1,104 @@
+import '@testing-library/jest-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { AlpacaPaperPage } from './AlpacaPaperPage'
+import type { InvestingOverview } from '@/components/investing/LongTermInvestingWorkspace'
 
-const { v2, setMode, clearKill, resolvePlan } = vi.hoisted(() => ({
-  v2: {
-    risk: { complete: true, sessionDate: '2026-09-23', realizedPnl: 0, fillCount: 0, reasonCodes: [] as string[], maxDailyLossPct: 0.02, minRewardRiskRatio: 1, scope: 'v2_realized' },
-    status: {
-      mode: 'shadow', killSwitch: false, attentionRequired: false, attentionCode: null as string | null,
-      lastReconciledAt: '2026-09-23T14:59:00.000Z', lastWebsocketAt: null, sessionDate: '2026-09-23',
-      heartbeatFresh: true, openPlanCount: 1, attentionPlanCount: 0,
-    },
-  },
-  setMode: { mutate: vi.fn(), reset: vi.fn(), isPending: false, isError: false, isSuccess: false, error: null as Error | null },
-  clearKill: { mutate: vi.fn(), reset: vi.fn(), isPending: false, isError: false, isSuccess: false, error: null as Error | null },
-  resolvePlan: { mutate: vi.fn(), reset: vi.fn(), isPending: false, isError: false, isSuccess: false, error: null as Error | null },
-}))
-
-vi.mock('@/hooks/useAlpacaPaper', () => ({
-  useAlpacaPaperStatus: () => ({
-    data: { configured: true, environment: 'paper', baseUrl: 'https://paper-api.alpaca.markets', connection: 'verified', accountStatus: 'ACTIVE', cash: '100000.00', equity: '100000.00' },
-    isLoading: false, isError: false,
-  }),
-}))
-
-vi.mock('@/hooks/useAlpacaDayTradingV2', () => ({
-  useV2Status: () => ({ data: v2.status, isLoading: false, isError: false }),
-  useV2DailyRisk: () => ({ data: v2.risk, isLoading: false, isError: false }),
-  useV2Snapshot: () => ({
-    data: {
-      account: { cash: 48995, equity: 100012, status: 'ACTIVE' },
-      clock: { isOpen: true, nextOpen: '2026-09-24T13:30:00Z', nextClose: '2026-09-23T20:00:00Z' },
-      positions: [{ symbol: 'NVDA', qty: 10, side: 'long', avgEntryPrice: 100.4, currentPrice: 101.6, marketValue: 1016, unrealizedPnl: 12, planId: 7 }],
-      openOrders: [{ symbol: 'NVDA', side: 'sell', type: 'stop', qty: 10, filledQty: 0, status: 'new', limitPrice: null, stopPrice: 98, planOwned: true }],
-      limits: { maxPositionPct: 0.25, minCashPct: 0.1, maxRiskPerTradePct: 0.01, maxTotalOpenRiskPct: 0.02 },
-    },
-    isLoading: false, isError: false,
-  }),
-  useV2Plans: () => ({
-    data: [{
-      id: 7, symbol: 'NVDA', setup: 'opening-range breakout', catalyst: 'earnings', thesis: 'holds range', invalidation: 'loses VWAP',
-      plannedQty: 10, plannedEntryPrice: 100.5, plannedStop: 98, plannedTarget: 104, plannedRiskDollars: 25, exitDeadline: '2026-09-23T19:30:00.000Z',
-      state: 'active', attentionCode: null, filledEntryQty: 10, avgEntryPrice: 100.4, filledExitQty: 0, avgExitPrice: null,
-      exitReason: null, realizedPnl: null, realizedR: null, createdAt: '2026-09-23T13:40:00.000Z', openedAt: '2026-09-23T13:45:00.000Z', closedAt: null,
-    }],
-    isLoading: false, isError: false,
-  }),
-  useV2Journal: () => ({
-    data: {
-      analytics: {
-        closedTradeCount: 3, wins: 1, losses: 2, winRate: 0.3333, grossProfit: 36, grossLoss: 35, profitFactor: 1.0286,
-        averageWin: 36, averageLoss: -17.5, expectancyDollars: 0.33, expectancyR: 0.0133, realizedPnl: 1, maxConsecutiveLosses: 2, averageHoldMinutes: 40,
-        bySetup: { 'opening-range breakout': { count: 3, winRate: 0.3333, realizedPnl: 1, expectancyDollars: 0.33, expectancyR: 0.0133 } },
-        byCatalyst: { earnings: { count: 3, winRate: 0.3333, realizedPnl: 1, expectancyDollars: 0.33, expectancyR: 0.0133 } },
-        byWindow: { open: { count: 3, winRate: 0.3333, realizedPnl: 1, expectancyDollars: 0.33, expectancyR: 0.0133 } },
-        bySessionDate: { '2026-09-23': { count: 3, winRate: 0.3333, realizedPnl: 1, expectancyDollars: 0.33, expectancyR: 0.0133 } },
-        noTrade: { count: 4, byReason: { NO_SETUP: 4 } }, attention: { count: 1, byCode: { CANCEL_TIMEOUT: 1 } }, excludedOperatorResolved: 0,
-        sample: { size: 3, preliminary: true, note: 'Preliminary: 3 closed trades is below the 30-trade minimum; these figures are not evidence of profitability.' },
-      },
-      trades: [],
-      events: [
-        { planId: null, type: 'decision', action: 'no_trade', outcome: 'skipped', reasonCode: 'NO_SETUP', detail: { symbol: 'AMD', notes: 'no volume' }, occurredAt: '2026-09-23T13:35:00.000Z' },
-        { planId: 7, type: 'fill', action: 'entry', outcome: 'buy', reasonCode: null, detail: { symbol: 'NVDA', qty: 10, price: 100.4 }, occurredAt: '2026-09-23T13:45:00.000Z' },
-      ],
-    },
-    isLoading: false, isError: false,
-  }),
-  useSetV2Mode: () => setMode,
-  useClearV2KillSwitch: () => clearKill,
-  useResolveV2Plan: () => resolvePlan,
-  useV2Experiments: () => ({ data: { experiments: [] }, isLoading: false, isError: false }),
-  useCreateV2Experiment: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, isError: false, isSuccess: false }),
-}))
-
-vi.mock('@/hooks/useAlpacaDayTrading', () => ({
-  useAlpacaDayTradingJournal: () => ({
-    data: {
-      analytics: { closed_trade_count: 9, win_rate_pct: 77.7, expectancy: 999, profit_factor: 4.2, average_r: 2.2, total_pnl: 8991, by_setup: {} },
-      trades: [], events: [],
-    },
-    isLoading: false, isError: false,
-  }),
-}))
-
-beforeEach(() => {
-  v2.risk = { ...v2.risk, complete: true, realizedPnl: 0, reasonCodes: [] }
-  v2.status = { ...v2.status, mode: 'shadow', killSwitch: false, attentionRequired: false, attentionCode: null }
-  for (const m of [setMode, clearKill, resolvePlan]) {
-    m.mutate.mockReset(); m.isPending = false; m.isError = false; m.isSuccess = false; m.error = null
-  }
+const { hooks } = vi.hoisted(() => {
+  const mutation = () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), reset: vi.fn(), isPending: false, isSuccess: false, data: undefined, error: null })
+  return { hooks: { overview: { data: undefined as InvestingOverview | undefined, isLoading: false, isFetching: false, error: null, refetch: vi.fn() },
+    security: { data: { authenticated: true, mfaConfigured: true, recentMfa: true, recentAuthUntil: new Date(Date.now() + 300000).toISOString() }, error: null, refetch: vi.fn() },
+    policy: mutation(), pause: mutation(), preview: mutation(), execute: mutation(), cancel: mutation(), draft: mutation(), ownership: mutation() } }
 })
-
-describe('AlpacaPaperPage (v2 strategy lab)', () => {
-  it('shows daily entry limits and never treats incomplete realized evidence as a zero loss', () => {
-    v2.risk = { ...v2.risk, complete: false, realizedPnl: 999, reasonCodes: ['INCOMPLETE_CLOSED_PLAN'] }
+vi.mock('@/hooks/useAlpacaPaperInvesting', () => ({ useAlpacaPaperInvesting: () => hooks }))
+vi.mock('@/components/investing/LegacyPaperArchive', () => ({ LegacyPaperArchive: () => <div>Legacy recovery</div> }))
+const baseline = (): InvestingOverview => ({ configuration: { configured: false, accountBound: false, tradingEnabled: false, environment: 'paper' },
+  version: 0, policy: { budget: 0, reservePct: 10, maxPositionPct: 25, maxOrderValue: 500, minTradeValue: 25, driftPct: 2,
+    maxSpreadBps: 50, fractional: true, paused: true, executionMode: 'confirm', targets: [] },
+  connected: false, blockers: ['Add separate paper credentials on the server.'], positions: [], orders: [], decisions: [] })
+describe('Long-term paper workspace', () => {
+  beforeEach(() => {
+    vi.clearAllMocks(); hooks.overview.data = baseline()
+    hooks.security.data = { authenticated: true, mfaConfigured: true, recentMfa: true, recentAuthUntil: new Date(Date.now() + 300000).toISOString() }
+    for (const key of ['policy', 'pause', 'preview', 'execute', 'cancel', 'draft', 'ownership'] as const) Object.assign(hooks[key], { isPending: false, isSuccess: false, data: undefined, error: null })
+  })
+  it('shows disconnected setup and keeps order preview disabled before credentials', () => {
     render(<AlpacaPaperPage />)
-    const risk = screen.getByRole('region', { name: 'Daily entry guard' })
-    expect(risk).toHaveTextContent('2.0% of equity')
-    expect(risk).toHaveTextContent('1.00:1')
-    expect(risk).toHaveTextContent('Unavailable')
-    expect(risk).toHaveTextContent('New entries remain blocked')
-    expect(risk).not.toHaveTextContent('$999')
-    expect(risk).not.toHaveTextContent('$0.00')
+    expect(screen.getByRole('heading', { name: 'Alpaca long-term investing' })).toBeVisible()
+    expect(screen.getByText('Paper account not connected')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Build fresh preview' })).toBeDisabled()
+    expect(screen.getByRole('checkbox', { name: 'Pause new paper orders' })).toBeChecked()
+    expect(screen.queryByLabelText(/secret/i)).not.toBeInTheDocument()
   })
-  it('keeps the existing page and title, and labels it as the v2 paper strategy lab with monitor state', () => {
+  it('makes automatic mode a deliberate policy choice with exact activation confirmation', () => {
+    hooks.overview.data = { ...baseline(), policy: { ...baseline().policy, budget: 1000, targets: [{ symbol: 'AAPL', weightPct: 20 }] } }
     render(<AlpacaPaperPage />)
-    expect(screen.getByRole('heading', { level: 1, name: 'Alpaca Day Trading' })).toBeInTheDocument()
-    expect(screen.getByText('Paper strategy lab — v2')).toBeInTheDocument()
-    const monitor = screen.getByRole('region', { name: 'Monitor status' })
-    expect(within(monitor).getByText('Current mode: Shadow')).toBeInTheDocument()
-    for (const name of ['Broker snapshot', 'Active plans', 'Current positions', 'Decision journal', 'Setup analytics']) {
-      expect(screen.getByRole('region', { name })).toBeInTheDocument()
-    }
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('radio', { name: /Automatic execution/ }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Pause new paper orders' }))
+    expect(screen.getByRole('button', { name: 'Save paper policy' })).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Type ENABLE AUTOMATIC PAPER INVESTING'), { target: { value: 'ENABLE PAPER INVESTING' } })
+    expect(screen.getByRole('button', { name: 'Save paper policy' })).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Type ENABLE AUTOMATIC PAPER INVESTING'), { target: { value: 'ENABLE AUTOMATIC PAPER INVESTING' } })
+    expect(screen.getByRole('button', { name: 'Save paper policy' })).toBeEnabled()
+    expect(hooks.policy.mutate).not.toHaveBeenCalled()
   })
-
-  it('shows an attention-required banner that says entries are blocked', () => {
-    v2.status = { ...v2.status, attentionRequired: true, attentionCode: 'CANCEL_TIMEOUT' }
+  it('requires the exact paper-order phrase before submitting the immutable preview ID', () => {
+    hooks.overview.data = { ...baseline(), connected: true }
+    Object.assign(hooks.preview, { data: { id: 'synthetic-plan', expiresAt: new Date(Date.now() + 60000).toISOString(), blockers: [], rows: [],
+      managedValue: 0, spendableCash: 1000, unmanagedValue: 0, nextOrder: { side: 'buy', symbol: 'AAPL', qty: 1, limitPrice: 100, notional: 100 } } })
     render(<AlpacaPaperPage />)
-    const banner = screen.getByRole('alert')
-    expect(banner).toHaveTextContent(/attention required/i)
-    expect(banner).toHaveTextContent(/new entries are blocked/i)
-    expect(banner).toHaveTextContent('CANCEL_TIMEOUT')
+    const submit = screen.getByRole('button', { name: 'Submit paper limit order' })
+    expect(submit).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Type BUY AAPL PAPER'), { target: { value: 'BUY AAPL' } })
+    expect(submit).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Type BUY AAPL PAPER'), { target: { value: 'BUY AAPL PAPER' } })
+    fireEvent.click(submit)
+    expect(hooks.execute.mutate).toHaveBeenCalledWith({ planId: 'synthetic-plan', confirmation: 'BUY AAPL PAPER' })
   })
-
-  it('offers Execution disabled / Shadow / Paper execute, and Paper execute cannot submit without the exact confirmation', () => {
+  it('does not submit an expired preview or an already-recorded decision', () => {
+    hooks.overview.data = { ...baseline(), connected: true }
+    Object.assign(hooks.preview, { data: { id: 'expired-plan', expiresAt: new Date(Date.now() - 1).toISOString(), blockers: [], rows: [],
+      managedValue: 0, spendableCash: 1000, unmanagedValue: 0, nextOrder: { side: 'buy', symbol: 'AAPL', qty: 1, limitPrice: 100, notional: 100 } } })
     render(<AlpacaPaperPage />)
-    const monitor = screen.getByRole('region', { name: 'Monitor status' })
-    for (const label of ['Execution disabled', 'Shadow', 'Paper execute']) {
-      expect(within(monitor).getByRole('radio', { name: label })).toBeInTheDocument()
-    }
-    fireEvent.click(within(monitor).getByRole('radio', { name: 'Paper execute' }))
-    const apply = within(monitor).getByRole('button', { name: 'Apply mode' })
-    expect(apply).toBeDisabled()
-    const confirm = within(monitor).getByLabelText(/type paper_execute to confirm/i)
-    fireEvent.change(confirm, { target: { value: 'PAPER_EXECUTE' } })
-    expect(apply).toBeDisabled()
-    fireEvent.change(confirm, { target: { value: 'paper_execute' } })
-    expect(apply).toBeEnabled()
-    fireEvent.click(apply)
-    expect(setMode.mutate).toHaveBeenCalledTimes(1)
-    expect(setMode.mutate.mock.calls[0][0]).toEqual({ mode: 'paper_execute', confirm: 'paper_execute' })
+    fireEvent.change(screen.getByLabelText('Type BUY AAPL PAPER'), { target: { value: 'BUY AAPL PAPER' } })
+    expect(screen.getByRole('button', { name: 'Submit paper limit order' })).toBeDisabled()
+    expect(screen.getByText('Preview expired. Build a fresh preview before confirming.')).toBeVisible()
   })
-
-  it('locks every mode control while a mode change is pending', () => {
-    setMode.isPending = true
+  it('imports simulator symbols as an editable draft without saving or substituting a fund', async () => {
+    hooks.draft.mutateAsync.mockResolvedValue({ targets: [{ symbol: 'FXAIX', weightPct: 20 }], note: 'Review this draft.' })
     render(<AlpacaPaperPage />)
-    const monitor = screen.getByRole('region', { name: 'Monitor status' })
-    for (const radio of within(monitor).getAllByRole('radio')) expect(radio).toBeDisabled()
-    expect(within(monitor).getByRole('button', { name: /applying/i })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Import Long-Term simulator draft' }))
+    expect(await screen.findByDisplayValue('FXAIX')).toBeVisible()
+    fireEvent.change(screen.getByLabelText('Broker symbol 1'), { target: { value: 'SPY' } })
+    expect(screen.getByDisplayValue('SPY')).toBeVisible()
+    expect(hooks.policy.mutate).not.toHaveBeenCalled()
+    expect(hooks.execute.mutate).not.toHaveBeenCalled()
   })
-
-  it('never shows raw broker identifiers or raw error text, even when a control request fails', () => {
-    setMode.isError = true
-    setMode.error = Object.assign(new Error('Alpaca paper request failed (503) https://paper-api.alpaca.markets/v2/orders 9f1c2d3e-1111-4222-8333-444455556666'), { code: 'ALPACA_V2_BROKER_UNAVAILABLE' })
-    const { container } = render(<AlpacaPaperPage />)
-    const text = container.textContent || ''
-    expect(text).not.toMatch(/9f1c2d3e|paper-api\.alpaca\.markets\/v2|request failed/)
-    expect(screen.getByText(/the broker could not be read/i)).toBeInTheDocument()
-  })
-
-  it('keeps v1 history read-only and visibly segregated from v2 results', () => {
+  it('keeps saved ownership reviews disabled while orders are unpaused', () => {
+    hooks.overview.data = { ...baseline(), connected: true, policy: { ...baseline().policy, paused: false }, positions: [{ symbol: 'AAPL', qty: 2, price: 100, value: 200, managedQty: 0, unrealizedPnl: 0 }] }
     render(<AlpacaPaperPage />)
-    const history = screen.getByRole('region', { name: 'Historical v1 (read-only)' })
-    const analytics = screen.getByRole('region', { name: 'Setup analytics' })
-    expect(within(analytics).queryByText(/8,991/)).not.toBeInTheDocument()
-    expect(within(analytics).getByText(/Preliminary/)).toBeInTheDocument()
-    expect(within(history).queryAllByRole('button').filter((b) => !/show|hide/i.test(b.textContent || ''))).toHaveLength(0)
-    expect(history).toHaveTextContent(/not included in v2/i)
+    const details = screen.getByText('Review ownership of existing holdings or corporate-action changes').closest('details')!
+    details.open = true
+    fireEvent.change(within(details).getByLabelText('Symbol to review'), { target: { value: 'AAPL' } })
+    fireEvent.change(within(details).getByLabelText('Reason for ownership review'), { target: { value: 'Explicit review of existing holdings.' } })
+    fireEvent.change(within(details).getByLabelText('Type MANAGE AAPL 2 PAPER'), { target: { value: 'MANAGE AAPL 2 PAPER' } })
+    expect(within(details).getByRole('button', { name: 'Confirm reviewed ownership' })).toBeDisabled()
+    expect(hooks.ownership.mutate).not.toHaveBeenCalled()
   })
-
-  it('has no token or password inputs anywhere on the page', () => {
-    const { container } = render(<AlpacaPaperPage />)
-    expect(container.querySelector('input[type="password"]')).toBeNull()
-    expect(screen.queryByLabelText(/token/i)).not.toBeInTheDocument()
-  })
-
-  it('requires the exact CLEAR confirmation to clear a latch', () => {
-    v2.status = { ...v2.status, killSwitch: true, attentionRequired: true, attentionCode: 'BROKER_UNREADABLE' }
+  it('shows strategy-agent analysis and requires a fresh preview before an order can be approved', () => {
+    hooks.overview.data = { ...baseline(), connected: true, decisions: [{ decision_key: 'synthetic-decision', symbol: 'AAPL', side: 'buy', reason: 'Synthetic approved strategy analysis.', created_at: new Date().toISOString() }] }
     render(<AlpacaPaperPage />)
-    const monitor = screen.getByRole('region', { name: 'Monitor status' })
-    const button = within(monitor).getByRole('button', { name: /clear kill switch and attention/i })
-    expect(button).toBeDisabled()
-    fireEvent.change(within(monitor).getByLabelText(/type CLEAR to confirm/i), { target: { value: 'clear' } })
-    expect(button).toBeDisabled()
-    fireEvent.change(within(monitor).getByLabelText(/type CLEAR to confirm/i), { target: { value: 'CLEAR' } })
-    fireEvent.click(button)
-    expect(clearKill.mutate).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('Synthetic approved strategy analysis.')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Review current order' }))
+    expect(hooks.preview.mutate).toHaveBeenCalledWith({ decisionKey: 'synthetic-decision' })
+    expect(hooks.execute.mutate).not.toHaveBeenCalled()
+  })
+  it('keeps paper controls available without live authenticator verification', () => {
+    hooks.security.data = { authenticated: false, mfaConfigured: false, recentMfa: false, recentAuthUntil: '' }
+    render(<AlpacaPaperPage />)
+    expect(screen.getByRole('button', { name: 'Save paper policy' })).toBeEnabled()
+    expect(screen.queryByLabelText('Verify password')).not.toBeInTheDocument()
+    expect(screen.getByText('Legacy recovery')).toBeVisible()
+    expect(screen.queryByRole('heading', { name: 'Alpaca Day Trading' })).not.toBeInTheDocument()
   })
 })

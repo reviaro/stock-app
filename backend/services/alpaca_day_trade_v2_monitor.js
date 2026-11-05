@@ -1,12 +1,13 @@
 'use strict';
 
 // Deterministic v2 monitor: no LLM, no repair engine. Each tick reads broker truth for every
-// nonterminal v2 plan and either (a) keeps a healthy plan as is, (b) records completed broker
-// evidence and closes the plan, (c) performs the one narrow time-exit sequence, or (d) latches
-// attention and stops. Alpaca's native bracket legs remain the only normal stop/target.
+// nonterminal historical plan, records completed broker evidence, or latches attention.
+// Day-trading execution is retired: no cancel, replacement, or time-exit submission
+// exists here, including when an old database still contains paper_execute mode.
+// Existing native bracket orders remain at the broker for operator review.
 const { reconcileRestFills } = require('./alpaca_day_trade_v2_reconciliation');
-const { resolvePlanByClientOrderId, linkPatchFromBrokerOrder, isDefiniteRejection } = require('./alpaca_day_trade_v2_execution');
-const { buildTimeExitOrder, timeExitClientOrderId } = require('./alpaca_day_trade_v2_policy');
+const { resolvePlanByClientOrderId, linkPatchFromBrokerOrder } = require('./alpaca_day_trade_v2_execution');
+const { timeExitClientOrderId } = require('./alpaca_day_trade_v2_policy');
 const { observeActivePlans } = require('./alpaca_day_trade_v2_research');
 
 const NON_EXECUTABLE = ['filled', 'canceled', 'expired', 'rejected'];
@@ -33,8 +34,7 @@ const qtyOf = (value) => Number(value || 0);
 const round2 = (value) => Math.round(value * 100) / 100;
 
 function createV2Monitor({
-    store, client, now = () => new Date(), sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
-    cancelPollAttempts = 15, exitPollAttempts = 15, pollIntervalMs = 2_000, notify = () => {},
+    store, client, now = () => new Date(), notify = () => {},
 }) {
     async function read(fn) {
         try { return await fn(); } catch (_error) { throw new BrokerUnreadable('broker read failed'); }
@@ -99,71 +99,7 @@ function createV2Monitor({
         return true;
     }
 
-    async function pollUntil(check, attempts) {
-        for (let attempt = 0; attempt < attempts; attempt += 1) {
-            if (await check()) return true;
-            if (attempt < attempts - 1) await sleep(pollIntervalMs);
-        }
-        return false;
-    }
-
-    // The one automatic risk action. Every step re-derives from broker truth, so a restart in
-    // time_exit_pending resumes safely; the exit is found by its client id before any submit.
-    async function timeExit(plan) {
-        if (plan.state !== 'time_exit_pending') {
-            plan = await store.updatePlan(plan.id, { state: 'time_exit_pending' }, {
-                events: [{ event_key: `plan:${plan.id}:time_exit_started`, event_type: 'time_exit', action: 'time_exit_started', outcome: 'pending', detail: { symbol: plan.symbol, exit_deadline: plan.exit_deadline } }],
-            });
-        }
-        const parent = await read(() => client.getOrder(plan.parent_order_id, { nested: true }));
-        // A filled parent is not cancellable (Alpaca 422s); its open legs are.
-        const targets = isExecutable(parent) ? [parent] : legsOf(parent).filter(isExecutable);
-        for (const order of targets) {
-            try { await client.cancelOrder(order.id); } catch (_error) { /* the poll below is the authority */ }
-        }
-        let settled = null;
-        const cancelled = await pollUntil(async () => {
-            settled = await read(() => client.getOrder(plan.parent_order_id, { nested: true }));
-            return !isExecutable(settled) && legsOf(settled).every((leg) => !isExecutable(leg));
-        }, cancelPollAttempts);
-        if (!cancelled) return latch('CANCEL_TIMEOUT', { plan });
-
-        const position = await readPosition(plan.symbol);
-        const entered = qtyOf(settled.filled_qty);
-        if (!position.valid || position.qty > entered) return latch('POSITION_MISMATCH', { plan });
-
-        if (position.qty > 0) {
-            let exitOrder = plan.exit_order_id ? await read(() => client.getOrder(plan.exit_order_id)) : null;
-            if (!exitOrder) {
-                const lookup = await read(() => client.getOrderByClientOrderId(timeExitClientOrderId(plan)));
-                exitOrder = lookup?.found ? lookup.order : null;
-            }
-            if (!exitOrder) {
-                try {
-                    exitOrder = await client.submitOrder(buildTimeExitOrder({ plan, qty: position.qty }));
-                } catch (error) {
-                    return latch(isDefiniteRejection(error) ? 'TIME_EXIT_REJECTED' : 'TIME_EXIT_UNKNOWN', { plan });
-                }
-                if (!exitOrder?.id) return latch('TIME_EXIT_UNKNOWN', { plan });
-                await store.appendEvent({
-                    event_key: `plan:${plan.id}:time_exit_submitted`, plan_id: plan.id, event_type: 'time_exit', action: 'time_exit_submitted', outcome: 'submitted',
-                    detail: { symbol: plan.symbol, qty: position.qty }, occurred_at: now().toISOString(),
-                });
-            }
-            if (plan.exit_order_id !== String(exitOrder.id)) plan = await store.updatePlan(plan.id, { exit_order_id: String(exitOrder.id) });
-            if (['canceled', 'expired', 'rejected'].includes(exitOrder.status)) return latch('TIME_EXIT_REJECTED', { plan });
-            const flat = await pollUntil(async () => {
-                const order = await read(() => client.getOrder(plan.exit_order_id));
-                const now2 = await readPosition(plan.symbol);
-                return order?.status === 'filled' && now2.valid && now2.qty === 0;
-            }, exitPollAttempts);
-            if (!flat) return latch('TIME_EXIT_UNCONFIRMED', { plan });
-        }
-        await read(() => reconcileRestFills({ store, client, now }));
-        return closeIfComplete(plan, settled);
-    }
-
-    async function managePlan(plan, state) {
+    async function managePlan(plan) {
         if (!plan.parent_order_id) {
             if (!RESOLVABLE_UNLINKED.includes(plan.state)) return latch('UNKNOWN_PLAN_LINKAGE', { plan });
             if (submissionInFlight(plan)) return undefined;
@@ -175,9 +111,8 @@ function createV2Monitor({
         if (plan.state === 'attention_required') return; // observed, never acted on
 
         const pastDeadline = now().getTime() >= new Date(plan.exit_deadline).getTime();
-        const mayAct = state.mode === 'paper_execute' && !state.kill_switch;
         if (plan.state === 'time_exit_pending') {
-            return mayAct ? timeExit(plan) : latch('TIME_EXIT_SUPPRESSED', { plan });
+            return latch('TIME_EXIT_SUPPRESSED', { plan });
         }
 
         const parent = await read(() => client.getOrder(plan.parent_order_id, { nested: true }));
@@ -210,7 +145,7 @@ function createV2Monitor({
             const stamps = [parent, ...legs].map((order) => new Date(order.filled_at || order.updated_at || order.canceled_at || 0).getTime()).filter(Number.isFinite);
             return closeIfComplete(plan, parent, { lagSince: stamps.length ? Math.max(...stamps) || null : null });
         }
-        if (pastDeadline) return mayAct ? timeExit(plan) : latch('TIME_EXIT_SUPPRESSED', { plan });
+        if (pastDeadline) return latch('TIME_EXIT_SUPPRESSED', { plan });
         return undefined; // healthy
     }
 
@@ -240,7 +175,7 @@ function createV2Monitor({
             await read(() => client.getClock());
             await read(() => reconcileRestFills({ store, client, now }));
             for (const plan of await store.listNonterminalPlans()) {
-                await managePlan(await store.getPlan(plan.id), state);
+                await managePlan(await store.getPlan(plan.id));
             }
             const { exposure } = await checkAccountExposure();
             await store.updateMonitorState({ last_reconciled_at: now().toISOString(), session_date: easternDate(now()) });

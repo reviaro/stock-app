@@ -29,7 +29,7 @@ function request(server, method, requestPath, body, headers = {}) {
     });
 }
 
-test('real authentication permits only the account2 day credential and operator session to preview', async () => {
+test('retired day credentials have no API authority and cannot inherit operator access', async () => {
     const auth = createAuth({ username: 'test-operator', passwordHash: hashPassword('synthetic password'),
         sessionSecret: 'synthetic-preview-session-secret-32-characters', allowLoopback: false,
         apiToken: TOKENS.reader, alpacaDayTradingToken: TOKENS.day, alpacaLiveInvestingToken: TOKENS.live,
@@ -47,10 +47,10 @@ test('real authentication permits only the account2 day credential and operator 
     await new Promise((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
     const bearer = token => ({ Authorization: `Bearer ${token}` });
     try {
-        const allowed = await request(server, 'POST', PREVIEW, { account_id: 2 }, bearer(TOKENS.day));
-        assert.equal(allowed.status, 200);
-        assert.equal(allowed.body.role, 'alpaca-day-trading-agent');
-        assert.equal(reached, 1);
+        const retired = await request(server, 'POST', PREVIEW, { account_id: 2 }, bearer(TOKENS.day));
+        assert.equal(retired.status, 403);
+        assert.equal(retired.body.code, 'CAPABILITY_DENIED');
+        assert.equal(reached, 0);
 
         for (const account_id of [1, '2', null, undefined]) {
             const denied = await request(server, 'POST', PREVIEW, { account_id }, bearer(TOKENS.day));
@@ -64,7 +64,7 @@ test('real authentication permits only the account2 day credential and operator 
         }
         assert.equal((await request(server, 'POST', PREVIEW, { account_id: 2 })).status, 401);
         assert.equal((await request(server, 'POST', PREVIEW, { account_id: 2 }, bearer('invalid-token'))).status, 401);
-        assert.equal(reached, 1, 'denied credentials never reach the preview handler');
+        assert.equal(reached, 0, 'denied credentials never reach the preview handler');
 
         for (const [method, target] of [
             ['GET', PREVIEW], ['HEAD', PREVIEW], ['PUT', PREVIEW], ['DELETE', PREVIEW],
@@ -78,7 +78,7 @@ test('real authentication permits only the account2 day credential and operator 
             const response = await request(server, method, target, method === 'GET' || method === 'HEAD' ? undefined : { account_id: 2 }, bearer(TOKENS.day));
             assert.equal(response.status, 403, `${method} ${target}`);
         }
-        assert.equal(reached, 1, 'the exact POST permission does not grant additional reads or paths');
+        assert.equal(reached, 0, 'retired credentials cannot read data or change controls');
 
         const origin = `http://127.0.0.1:${server.address().port}`;
         const login = await request(server, 'POST', '/api/auth/login', { username: 'test-operator', password: 'synthetic password' }, { Origin: origin });
@@ -87,9 +87,9 @@ test('real authentication permits only the account2 day credential and operator 
         const operator = await request(server, 'POST', PREVIEW, { account_id: 2 }, { Cookie: cookie, Origin: origin });
         assert.equal(operator.status, 200);
         assert.equal(operator.body.role, 'operator');
-        assert.equal(reached, 2);
+        assert.equal(reached, 1);
         assert.equal((await request(server, 'POST', PREVIEW, { account_id: 2 }, { Cookie: cookie, Origin: 'https://untrusted.example' })).status, 403);
-        assert.equal(reached, 2);
+        assert.equal(reached, 1);
     } finally {
         await new Promise(resolve => server.close(resolve));
     }

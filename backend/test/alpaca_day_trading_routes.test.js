@@ -179,18 +179,7 @@ function fullSectionSevenIntent(overrides = {}) {
     };
 }
 
-// The worker already refuses to act on existing plans while the switch is tripped (Task 13);
-// the switch's actual purpose -- stop trading for the rest of the session -- only holds if the
-// one route that starts *new* trades honors it too. Previously it only checked `mode`.
-// Unlike kill_switch (a one-way trip, checked regardless of mode), block_entries and the
-// monitor-liveness check only mean anything once entries could otherwise succeed at all --
-// mode !== 'paper_execute' already refuses via the existing policy path (ALPACA_ENTRIES_DISABLED)
-// with nothing new to add.
-// If the monitor isn't actively ticking, block_entries can't be trusted -- a worker that
-// crashed while block_entries happened to read false would otherwise let entries through with
-// nothing watching the resulting position. Failing closed on staleness, not just on the literal
-// flag, is what actually makes the flag meaningful.
-test('POST /orders (the generic order route) is refused once Day Trading owns the account (mode paper_execute), without any broker request', async () => {
+test('retired raw orders cannot bypass a historical day-trading account', async () => {
     const store = require('../services/alpaca_day_trade_store');
     await store.updateMonitorState({ mode: 'paper_execute' });
     const broker = mockAlpacaBroker();
@@ -208,11 +197,12 @@ test('POST /orders (the generic order route) is refused once Day Trading owns th
     delete process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED;
     delete process.env.ALPACA_PAPER_ORDER_ENTRY_TOKEN;
 
-    assert.strictEqual(result.status, 403);
-    assert.strictEqual(broker.requests.length, 0, 'the generic order route must not reach the broker once Day Trading owns the account');
+    assert.strictEqual(result.status, 410);
+    assert.strictEqual(result.body.code, 'ALPACA_RAW_ORDER_ENTRY_RETIRED');
+    assert.strictEqual(broker.requests.length, 0);
 });
 
-test('POST /orders stays available while Day Trading has not taken over the account (mode not paper_execute), even if its own HTTP gate is enabled', async () => {
+test('retired raw orders stay disabled even without historical day-trading ownership', async () => {
     const gate = enableDayTradingGate(); // enables the DT route's own token gate, not `mode`
     mockAlpacaBroker();
     process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED = 'true';
@@ -230,7 +220,8 @@ test('POST /orders stays available while Day Trading has not taken over the acco
     delete process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED;
     delete process.env.ALPACA_PAPER_ORDER_ENTRY_TOKEN;
 
-    assert.notStrictEqual(result.status, 403, 'the DT route\'s own access gate must not, by itself, disable the unrelated generic order route');
+    assert.strictEqual(result.status, 410);
+    assert.strictEqual(result.body.code, 'ALPACA_RAW_ORDER_ENTRY_RETIRED');
 });
 
 function mockKillSwitchClearBroker({ positionQty = 0, legsCovered = true, activities = [] } = {}) {

@@ -54,10 +54,20 @@ test('GET status reports unconfigured paper integration without secrets', async 
     assert.doesNotMatch(JSON.stringify(result.body), /API-SECRET|paper-key/i);
 });
 
-test('GET status verifies the configured paper account without exposing account identifiers', async () => {
+test('GET status verifies the account but keeps retired raw entry disabled even with legacy gates set', async (t) => {
     const savedKey = process.env.ALPACA_API_KEY;
     const savedSecret = process.env.ALPACA_API_SECRET;
     const savedFetch = httpRuntime.fetch;
+    const savedEntry = process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED;
+    const savedToken = process.env.ALPACA_PAPER_ORDER_ENTRY_TOKEN;
+    process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED = 'true';
+    process.env.ALPACA_PAPER_ORDER_ENTRY_TOKEN = 'synthetic-retired-order-token';
+    t.after(() => {
+        if (savedEntry === undefined) delete process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED;
+        else process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED = savedEntry;
+        if (savedToken === undefined) delete process.env.ALPACA_PAPER_ORDER_ENTRY_TOKEN;
+        else process.env.ALPACA_PAPER_ORDER_ENTRY_TOKEN = savedToken;
+    });
     process.env.ALPACA_API_KEY = 'paper-key';
     process.env.ALPACA_API_SECRET = 'paper-secret';
     httpRuntime.fetch = async () => ({

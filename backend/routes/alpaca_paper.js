@@ -1,9 +1,20 @@
 const { createAsyncRouter } = require('../services/http_errors');
-const { getPaperConfiguration, getPaperAccountSummary, getPaperReconciliationSnapshot, submitPaperOrder, reconcilePaperOrderAudits, resolveMissingPaperOrderAudit } = require('../services/alpaca_paper_service');
-const dayTradeStore = require('../services/alpaca_day_trade_store');
-const dayTradeV2Store = require('../services/alpaca_day_trade_v2_store');
+const { getPaperConfiguration, getPaperAccountSummary, getPaperReconciliationSnapshot, reconcilePaperOrderAudits, resolveMissingPaperOrderAudit } = require('../services/alpaca_paper_service');
 
 const router = createAsyncRouter();
+
+router.post('/retire-day-trading', async (req, res) => {
+    if (req.auth?.type !== 'session' || req.auth?.role !== 'operator') {
+        return res.status(403).json({ status: 'error', code: 'CAPABILITY_DENIED', error: 'Operator login is required to retire day trading.' });
+    }
+    try {
+        const { retireDayTrading } = require('../services/alpaca_day_trading_retirement');
+        return res.json({ status: 'success', data: await retireDayTrading(req.body?.confirmation) });
+    } catch (err) {
+        const known = ['PAPER_RETIREMENT_CONFIRMATION_REQUIRED', 'PAPER_LEGACY_SUBMISSION_IN_PROGRESS'].includes(err.code);
+        return res.status(known ? err.status : 503).json({ status: 'error', code: known ? err.code : 'PAPER_RETIREMENT_UNAVAILABLE', error: known ? err.message : 'Historical monitors could not be disabled.' });
+    }
+});
 
 router.get('/status', async (_req, res) => {
     try {
@@ -14,8 +25,9 @@ router.get('/status', async (_req, res) => {
             data: {
                 ...config,
                 ...account,
-                orderEntryEnabled: process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED === 'true'
-                    && Boolean(process.env.ALPACA_PAPER_ORDER_ENTRY_TOKEN),
+                // This status describes the retired raw-order endpoint. The
+                // long-term overview reports its own allocation submission gate.
+                orderEntryEnabled: false,
             },
         });
     } catch (err) {
@@ -69,57 +81,11 @@ router.post('/resolve-missing', async (req, res) => {
     }
 });
 
-router.post('/orders', async (req, res) => {
-    // Guards on the same alpaca_monitor_state.mode the Day Trading entries route reads, not on
-    // whether that route's own HTTP gate/token happens to be enabled — those are independent
-    // decisions (an operator testing DT auth wiring with mode still 'shadow' shouldn't disable
-    // this path for no reason, and 'paper_execute' with the DT route gate off must still close
-    // it). Once the account is Day-Trading-only, a raw simple order here would create broker
-    // exposure with no plan, no risk tracking, and no native bracket protection (Safety
-    // Invariant #2) — refused before any other check, including the token check below, and
-    // before any broker request.
-    const [monitorState, v2State] = await Promise.all([dayTradeStore.getMonitorState(), dayTradeV2Store.getMonitorState()]);
-    if (monitorState?.mode === 'paper_execute' || v2State?.mode === 'paper_execute') {
-        return res.status(403).json({ status: 'error', error: 'raw Alpaca paper order entry is disabled while Day Trading owns this account' });
-    }
-    const orderEntryToken = process.env.ALPACA_PAPER_ORDER_ENTRY_TOKEN;
-    if (process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED !== 'true'
-        || !orderEntryToken
-        || req.get('X-Alpaca-Paper-Order-Token') !== orderEntryToken) {
-        return res.status(403).json({ status: 'error', error: 'Alpaca paper order entry is disabled' });
-    }
-    try {
-        const order = await submitPaperOrder({ order: req.body, idempotencyKey: req.body?.idempotency_key });
-        return res.status(201).json({
-            status: 'success',
-            data: {
-                symbol: order.symbol,
-                side: order.side,
-                qty: order.qty,
-                type: order.type,
-                timeInForce: order.time_in_force,
-                ...(order.limit_price != null ? { limitPrice: order.limit_price } : {}),
-                status: order.status,
-            },
-        });
-    } catch (err) {
-        if (/duplicate Alpaca paper-order idempotency key/i.test(err.message)) {
-            return res.status(409).json({ status: 'error', error: 'duplicate idempotency key' });
-        }
-        if (err.code === 'ALPACA_BROKER_REJECTED') {
-            return res.status(502).json({ status: 'error', error: 'Alpaca paper order submission failed' });
-        }
-        if (err.code === 'ALPACA_SUBMISSION_UNKNOWN') {
-            return res.status(503).json({ status: 'error', error: 'Alpaca paper order outcome is unknown; reconcile before retrying' });
-        }
-        if (err.code === 'ALPACA_RECONCILIATION_REQUIRED') {
-            return res.status(409).json({ status: 'error', error: 'Alpaca paper reconciliation is required before another order' });
-        }
-        if (err.code === 'ALPACA_NOT_CONFIGURED') {
-            return res.status(503).json({ status: 'error', error: 'Alpaca paper account is unavailable' });
-        }
-        return res.status(400).json({ status: 'error', error: 'invalid Alpaca paper order' });
-    }
-});
+// Allocation-reviewed long-term orders have their own endpoint and durable intents.
+// Keep this retired URL as a hard refusal for older clients and agent scripts.
+router.post('/orders', (_req, res) => res.status(410).json({
+    status: 'error', code: 'ALPACA_RAW_ORDER_ENTRY_RETIRED',
+    error: 'Raw paper orders are retired; use long-term paper investing previews and confirmation.',
+}));
 
 module.exports = router;

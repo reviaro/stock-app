@@ -54,8 +54,8 @@ flowchart LR
 |---|---|---|
 | The paper broker client rejects the live Alpaca endpoint. | [Paper client](backend/services/alpaca_paper_service.js) | [Non-paper endpoint rejection](backend/test/alpaca_paper_service.test.js) |
 | Live investing uses separate credentials, account binding, reviewed allocation limits, durable order intents and operator-controlled execution mode. | [Live service](backend/services/alpaca_live_investing.js), [capabilities](backend/services/api_capabilities.js) | [Order safety](backend/test/alpaca_live_investing.test.js), [HTTP authorization](backend/test/alpaca_live_routes.test.js) |
-| Manual paper-order entry is disabled by default. | [Order route](backend/routes/alpaca_paper.js) | [No broker request while disabled](backend/test/alpaca_paper_order_submission.test.js) |
-| The v2 entry gate checks the kill switch, reconciliation, and monitor health; raw orders cannot bypass v2 account ownership. | [Entry gate](backend/services/alpaca_day_trade_v2_execution.js), [raw order gate](backend/routes/alpaca_paper.js) | [Entry refusals](backend/test/alpaca_day_trade_v2_execution.test.js), [account-wide route gate](backend/test/alpaca_day_trading_v2_routes.test.js) |
+| Raw paper orders and new day-trading entries are retired. | [Order route](backend/routes/alpaca_paper.js), [day-trading routes](backend/routes/alpaca_day_trading_v2.js) | [Raw order refusal](backend/test/alpaca_paper_order_submission.test.js), [retired entries](backend/test/alpaca_day_trading_v2_routes.test.js) |
+| Long-term paper investing uses independent allocation limits, ownership records and reconciled broker fills. | [Shared investing engine](backend/services/alpaca_long_term_investing.js), [paper store](backend/services/alpaca_paper_long_term_store.js) | [Paper credential isolation](backend/test/paper_investing_capabilities.test.js) |
 | Simulator API tokens are scoped to one sleeve and its allowed operations. | [Capabilities](backend/services/api_capabilities.js) | [Cross-sleeve and operation denials](backend/test/simulator_capabilities.test.js) |
 | Chat receives an explicit tool allowlist; simulator trades still require the shared execution checks. | [AI tools](backend/services/ai_service.js) | [Tool scope, schemas and trade checks](backend/test/ai_simulator_tools.test.js) |
 | Single-user login, capability-checked API access, and loopback binding by default. | [Authentication](backend/services/auth.js), [server](backend/server.js) | [Login and access tests](backend/test/auth.test.js), [listen configuration](backend/test/server_config.test.js) |
@@ -68,9 +68,9 @@ they change as the app evolves.
 
 | Measure | Count |
 |---|---:|
-| Backend JavaScript tests / test files | 919 / 95 |
-| Frontend tests / test files | 107 / 30 |
-| API route files | 21 |
+| Backend JavaScript tests / test files | 944 / 107 |
+| Frontend tests / test files | 123 / 35 |
+| API route files | 22 |
 | Standalone migration files | 2 |
 
 Schema initialization also lives in `backend/database/db.js`. See [Tests](#tests)
@@ -105,10 +105,13 @@ for the commands, including the separate Portfolio Lab Python checks.
   news, quality metrics, risk checks, and the simulator; plus five one-shot
   analyst modes (decision memo, bear case, compare, weekly review, monthly
   review). Supports Gemini, OpenAI API, Anthropic Claude API, and LM Studio.
-- **Paper-trading simulator** — two isolated sleeves (Long-Term Investing and
-  Day Trading), each with its own cash, holdings, trade history, FIFO tax
-  preview (short/long-term split by your bracket), performance review, and CSV
-  export. The AI agent can trade in either sleeve via `account_id`.
+- **Long-term paper investing** — one Simulator workspace for the local
+  long-term ledger and Alpaca paper account. Local simulation includes cash,
+  holdings, FIFO tax previews, reinvestment, performance reviews and CSV export.
+  Alpaca paper adds editable allocation imports, cash reserves, ownership review,
+  confirmed or scoped-agent execution, and reconciled broker orders. Holdings
+  carry across sessions without automatic day-trading exits. The accounts keep
+  separate cash, transactions and performance; importing weights never copies fills.
 - **Long-Term Live** — a separate Alpaca stocks/ETF workspace with an editable
   simulator-allocation import, protected external holdings, cash and position
   limits, individual order confirmation or scoped strategy-agent execution,
@@ -116,9 +119,9 @@ for the commands, including the separate Portfolio Lab Python checks.
 
 ## Safety and scope
 
-For scoped Paper Day Trading v2 automation, see the
-[entry preview API](docs/paper-entry-preview.md) for server-calculated sizing,
-reviewed dollar budgets, submission checks, and recovery rules.
+Alpaca paper now uses long-term allocation reviews in the **Simulator** tab.
+The former day-trading entry API is [retired](docs/paper-entry-preview.md);
+its history and recovery controls remain available in the paper account archive.
 
 This project is educational and research software, not financial advice. It
 does not guarantee returns. Paper and live broker integrations use separate
@@ -205,7 +208,9 @@ current environment variables.
 | `STOCK_DASHBOARD_LIVE_INVESTING_TOKEN` | Optional distinct 32+ character credential for a scoped long-term strategy agent |
 | `ALPACA_TRADING_BASE_URL` | Must remain `https://paper-api.alpaca.markets`; live endpoint is rejected |
 | `ALPACA_PAPER_ORDER_ENTRY_ENABLED` | Paper-order master switch; disabled unless explicitly set to `true` |
-| `ALPACA_PAPER_ORDER_ENTRY_TOKEN` | Independent token required by the paper-order and reconciliation routes |
+| `ALPACA_PAPER_ORDER_ENTRY_TOKEN` | Legacy raw-order reconciliation token; never send it to the browser |
+| `ALPACA_PAPER_ACCOUNT_ID` | Optional expected paper account ID; first order or ownership review also binds the account |
+| `STOCK_DASHBOARD_PAPER_INVESTING_TOKEN` | Optional distinct 32+ character credential for guarded long-term paper decisions |
 | `DB_PATH_OVERRIDE` | Override the database used by Node and the Python cache reader/updater; unset keeps `backend/database/stocks.db` |
 | `ENABLE_LEDGER_MIGRATION` | One-time legacy portfolio→ledger migration gate; leave unset for new installations and back up before migration |
 
@@ -372,6 +377,62 @@ To run one backend file, use `npm test -- test/portfolio_ledger.test.js` from
 `backend/`. The launcher allows two minutes per test file and twenty minutes for
 the suite. CI runs the backend, frontend, and Portfolio Lab checks on pull requests.
 
+## Long-term paper investing
+
+Open **Simulator → Alpaca paper** to configure a capital ceiling, cash reserve,
+target weights and order limits. **Local simulator** remains account 1, with its
+own ledger and reinvestment controls. Importing its allocation changes an editable
+weights draft only. Review symbols and limits before saving; mutual funds are not
+automatically substituted with ETFs.
+
+Paper investing keeps the existing `ALPACA_API_KEY`, `ALPACA_API_SECRET` and fixed
+paper endpoint. `ALPACA_PAPER_ORDER_ENTRY_ENABLED=true` is the server submission
+gate. Policies start paused with a zero budget. Unpausing requires
+`ENABLE PAPER INVESTING`, or `ENABLE AUTOMATIC PAPER INVESTING` for scoped-agent
+execution. Manual orders require an exact confirmation such as `BUY AAPL PAPER`.
+The browser uses the existing operator session and never receives broker keys or
+agent tokens. Live investing retains its separate credentials and MFA controls.
+
+The API is rooted at `/api/alpaca-paper/long-term`: `GET /overview`,
+`GET /simulator-draft`, `PUT /policy`, and `POST /preview`, `/execute`, `/pause`,
+`/ownership`, `/decisions`, and `/orders/:id/cancel`. A dedicated
+`STOCK_DASHBOARD_PAPER_INVESTING_TOKEN` may read research, simulator account 1 and
+the paper overview, and submit account-1 decisions. Use the same research-backed
+decision shape documented for live investing below, with the paper policy version
+and paper endpoint. The credential cannot change policy, adopt holdings, cancel
+orders, or access live trading. Automatic execution acts on eligible decisions;
+it does not schedule trades on its own.
+
+Orders are cash-funded, long-only stock/ETF DAY limit orders. DAY controls how
+long an unfilled order is active; it does not close a filled holding at the end
+of the session. Paper holdings remain until an allocation adjustment is explicitly
+submitted. Accepted and partial orders must reconcile before another order.
+Unknown outcomes retain their original client order ID and block new submissions.
+Broker dividends remain broker cash; simulator dividend credits and tax estimates
+never become paper fills.
+
+For an existing installation, restart the app and any paper monitor with this
+version before using the new workspace. New day-trading entries, reactivation and
+raw paper orders are refused. The monitor only reconciles retained history and
+cannot create automatic exits. Existing broker bracket orders remain at Alpaca;
+review their orders and positions there. The paper archive keeps monitor-disable,
+history and recovery controls available. Unresolved legacy records block long-term
+execution. Use **Reconcile legacy paper orders** to refresh old raw-order records
+without enabling submissions. Settled day-trading holdings can be kept through
+**Transfer settled legacy holdings**: retire both monitor modes, pause paper
+investing, settle all broker orders, give a reason and confirm the exact quantity
+(for example, `TRANSFER AAPL 2 PAPER`). The server checks broker orders and legacy
+fills, then atomically records ownership and an immutable transfer marker. It
+retains the original plans, fills and realized P&L; it never fabricates an exit.
+Later changes to legacy fill evidence block further trading for review.
+
+These operator-only recovery actions use `POST /legacy-reconcile` and
+`POST /legacy-handover` under the long-term paper API. The latter accepts
+`symbol`, `qty`, `reason` and `confirmation`. Unrelated existing positions use
+the regular ownership controls while trading is paused and all orders are settled.
+No migration deletes
+holdings, closes positions, or copies simulator transactions into broker history.
+
 ## Long-Term Live investing
 
 Live credentials require a dedicated, unprivileged service installation. The
@@ -472,9 +533,9 @@ The app keeps its existing patched HTTP transport and does not retry order POSTs
 
 ## Notes
 
-- The simulator's two sleeves live in `simulator_sleeves`; all simulator API
-  routes and AI tools accept `account_id` (1 = long-term, default; 2 = day
-  trading).
+- The simulator UI uses long-term account 1. The legacy account-2 ledger and
+  its API history remain intact; it is no longer a tab in the Simulator.
+  Alpaca paper uses separate broker records, never either simulator ledger.
 - Tax preview uses FIFO lot matching and your configured US bracket; long-term
   rates apply to lots held ≥ 365 days.
 - Runtime databases and their backups may contain sensitive portfolio and

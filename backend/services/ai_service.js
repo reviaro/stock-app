@@ -14,7 +14,7 @@ const {
 } = require('./simulator_ledger');
 
 const simSleeveParam = z.number().int().positive().optional()
-  .describe('Simulator sleeve id: 1 = long-term investing (default), 2 = day trading');
+  .describe('Simulator sleeve id: 1 = long-term investing (default), 2 = legacy day-trading ledger');
 
 async function requireSimSleeve(accountId) {
   const account = await dbModule.getSimAccount(accountId);
@@ -29,11 +29,12 @@ const tools = {
     execute: async ({symbol}) => require('./research_service').summary(symbol),
   }),
   getPortfolioContext: tool({
-    description: 'Read an explicitly selected account. Watchlists are not holdings. Never combines manual, simulator and live account balances.',
-    inputSchema:z.object({account:z.enum(['manual','simulator-long-term','simulator-day-trading','alpaca-live'])}),
+    description: 'Read an explicitly selected account. Watchlists are not holdings. Never combines manual, simulator, Alpaca paper and live account balances.',
+    inputSchema:z.object({account:z.enum(['manual','simulator-long-term','simulator-day-trading','alpaca-paper','alpaca-live'])}),
     execute:async({account})=>{
       if(account==='manual')return require('./ai_context').aggregatePortfolioContext();
       if(account==='alpaca-live')return {account:{kind:'alpaca-live'},data:await require('./alpaca_live_investing').createLiveInvesting().overview()};
+      if(account==='alpaca-paper')return {account:{kind:'alpaca-paper'},data:await require('./alpaca_paper_long_term').createPaperLongTermInvesting().overview()};
       const account_id=account==='simulator-long-term'?1:2;
       return {account:{kind:account,account_id},data:await tools.simulator_get_holdings.execute({account_id})};
     },

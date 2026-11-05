@@ -8,8 +8,8 @@ vi.mock('@/components/Dashboard', () => ({
   default: () => <h1>Market overview</h1>,
 }))
 
-vi.mock('@/pages/AlpacaPaperPage', () => ({
-  AlpacaPaperPage: () => <div>Paper broker screen</div>,
+vi.mock('@/pages/SimulatorPage', () => ({
+  SimulatorPage: () => <div>Long-term paper workspace</div>,
 }))
 
 vi.mock('@/pages/StrategyLabPage', () => ({
@@ -154,9 +154,10 @@ describe('App', () => {
     expect(await screen.findByText('Portfolio allocation screen')).toBeInTheDocument()
   })
 
-  it('opens the separate Alpaca paper broker screen', async () => {
+  it('opens the combined paper workspace through Simulator without a separate Alpaca tab', async () => {
     renderWithProviders(<App />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Alpaca Paper' }))
-    expect(await screen.findByText('Paper broker screen')).toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: 'Simulator' }))
+    expect(await screen.findByText('Long-term paper workspace')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Alpaca Paper' })).not.toBeInTheDocument()
   })
 })

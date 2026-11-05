@@ -58,6 +58,7 @@ function createPaperClient({ env = process.env, fetchImpl = http.fetch, timeoutM
     async function doFetch(baseUrl, path, options = {}) {
         const response = await fetchImpl(`${baseUrl}${path}`, {
             method: options.method || 'GET',
+            redirect: 'error',
             headers: {
                 'APCA-API-KEY-ID': credentials.key,
                 'APCA-API-SECRET-KEY': credentials.secret,

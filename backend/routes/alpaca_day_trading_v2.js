@@ -1,14 +1,14 @@
 'use strict';
 
-// Alpaca Day Trading v2 strategy-lab API. Readers get sanitized status/reason codes and
+// Historical Alpaca Day Trading v2 recovery API. Readers get sanitized status/reason codes and
 // user-meaningful quantities and prices only -- never broker/client/order ids, raw broker
 // bodies, account ids, URLs, credentials, or exception text. Operator controls require an
-// authenticated operator session; the scoped automation principal may only preview or submit entries,
-// NO TRADE decisions, and reviews for account 2.
+// authenticated operator session. New entries, decisions, experiments, and execution
+// activation are permanently retired.
 const { createAsyncRouter } = require('../services/http_errors');
 const defaultStore = require('../services/alpaca_day_trade_v2_store');
 const { createPaperClient } = require('../services/alpaca_paper_service');
-const { createV2Execution, ENTRY_HEARTBEAT_MAX_AGE_MS } = require('../services/alpaca_day_trade_v2_execution');
+const { ENTRY_HEARTBEAT_MAX_AGE_MS } = require('../services/alpaca_day_trade_v2_execution');
 const { timeExitClientOrderId, DEFAULT_V2_POLICY } = require('../services/alpaca_day_trade_v2_policy');
 const { computeV2Analytics } = require('../services/alpaca_day_trade_v2_analytics');
 const { computeV2DailyRisk } = require('../services/alpaca_day_trade_v2_risk');
@@ -92,49 +92,6 @@ function respondError(res, err) {
     return fail(res, status, known ? err.code : 'ALPACA_V2_ERROR', message);
 }
 
-const PREVIEW_CONSTRAINT_KEYS = [
-    'maxNotionalDollars', 'maxRiskDollars', 'maxQty', 'availableCashDollars', 'minimumCashReserveDollars',
-    'maxPositionDollars', 'maxRiskPerTradeDollars', 'remainingOpenRiskDollars', 'minRewardRiskRatio',
-    'maxDailyLossDollars', 'dailyRealizedPnl',
-];
-
-function sanitizeEntryPreview(preview = {}) {
-    const finite = (value) => typeof value === 'number' && Number.isFinite(value) ? value : null;
-    const timestamp = (value) => typeof value === 'string'
-        && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
-        && Number.isFinite(Date.parse(value)) ? value : null;
-    const codes = Array.isArray(preview.blockerCodes) ? preview.blockerCodes : ['ALPACA_V2_ERROR'];
-    const blockers = [...new Set(codes.map((code) => typeof code === 'string' && Object.hasOwn(ERRORS, code) ? code : 'ALPACA_V2_ERROR'))]
-        .map((code) => ({ code, message: code === 'ALPACA_V2_ERROR' ? 'the preview could not be verified' : ERRORS[code][1] }));
-    const entryPrice = finite(preview.entryPrice);
-    const quote = preview.quote ? {
-        bidPrice: finite(preview.quote.bidPrice), askPrice: finite(preview.quote.askPrice),
-        feed: ['iex', 'sip'].includes(preview.quote.feed) ? preview.quote.feed : null,
-        sourceTimestamp: timestamp(preview.quote.sourceTimestamp), retrievedAt: timestamp(preview.quote.retrievedAt),
-    } : null;
-    const submission = preview.submission ? {
-        qty: finite(preview.submission.qty), max_entry_price: finite(preview.submission.max_entry_price),
-        max_notional_dollars: finite(preview.submission.max_notional_dollars), max_risk_dollars: finite(preview.submission.max_risk_dollars),
-    } : null;
-    const asOf = timestamp(preview.asOf);
-    const quoteExpiresAt = timestamp(preview.quoteExpiresAt);
-    const eligible = preview.eligible === true && blockers.length === 0
-        && Number.isSafeInteger(preview.qty) && preview.qty > 0 && entryPrice > 0
-        && submission?.qty === preview.qty && submission.max_entry_price >= entryPrice
-        && submission.max_notional_dollars > 0 && submission.max_risk_dollars > 0
-        && quote?.bidPrice > 0 && quote.askPrice >= quote.bidPrice && quote.feed !== null
-        && quote.sourceTimestamp !== null && quote.retrievedAt !== null && asOf !== null && quoteExpiresAt !== null;
-    if (!eligible && blockers.length === 0) blockers.push({ code: 'ALPACA_V2_ERROR', message: 'the preview could not be verified' });
-    return {
-        eligible, qty: eligible ? preview.qty : 0, entryPrice, quote,
-        notionalDollars: eligible ? finite(preview.notionalDollars) : null,
-        riskDollars: eligible ? finite(preview.riskDollars) : null,
-        rewardRiskRatio: eligible ? finite(preview.rewardRiskRatio) : null,
-        constraints: Object.fromEntries(PREVIEW_CONSTRAINT_KEYS.map((key) => [key, finite(preview.constraints?.[key])])),
-        blockers, submission: eligible ? submission : null, asOf, quoteExpiresAt, indicative: true,
-    };
-}
-
 const isOperator = (req) => req.auth?.type === 'session' && req.auth?.role === 'operator';
 const isScopedCaller = (req) => isOperator(req) || req.auth?.role === 'alpaca-day-trading-agent';
 const num = (value) => (value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value));
@@ -198,12 +155,6 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
     historyService = createHistoryAuditService({ now }) } = {}) {
     const router = createAsyncRouter();
     const historyPreviews = new Map();
-    let execution = null;
-    function getExecution() {
-        if (!execution) execution = createV2Execution({ store, client: createClient(), now, policy });
-        return execution;
-    }
-
     function requireOperator(req, res) {
         if (isOperator(req)) return true;
         fail(res, 403, 'ALPACA_V2_OPERATOR_REQUIRED', 'an authenticated operator session is required');
@@ -224,54 +175,8 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
 
     // ---- scoped automation ----
 
-    router.post('/entries/preview', async (req, res) => {
-        res.setHeader('Cache-Control', 'no-store');
-        if (!requireScope(req, res)) return undefined;
-        try {
-            const preview = await getExecution().previewEntry(req.body);
-            return res.json({ status: 'success', data: sanitizeEntryPreview(preview) });
-        } catch (err) {
-            return respondError(res, err);
-        }
-    });
-
-    router.post('/entries', async (req, res) => {
-        if (!requireScope(req, res)) return undefined;
-        try {
-            const result = await getExecution().submitEntry(req.body);
-            const data = { planId: result.plan.id, symbol: result.plan.symbol, state: result.plan.state, outcome: result.outcome };
-            if (result.outcome === 'acknowledged') return res.status(201).json({ status: 'success', data });
-            if (result.outcome === 'rejected') return res.status(422).json({ status: 'error', code: 'ALPACA_V2_BROKER_REJECTED', error: 'the broker rejected this entry', data });
-            if (result.outcome === 'submission_unknown') return res.status(503).json({ status: 'error', code: 'ALPACA_V2_SUBMISSION_UNKNOWN', error: 'the broker outcome is unknown; entries are blocked until an operator resolves it', data });
-            if (result.outcome === 'unresolved') return res.status(409).json({ status: 'error', code: 'ALPACA_V2_SUBMISSION_UNRESOLVED', error: 'this entry could not be matched at the broker; operator attention is required', data });
-            return res.status(200).json({ status: 'success', data });
-        } catch (err) {
-            return respondError(res, err);
-        }
-    });
-
-    router.post('/decisions', async (req, res) => {
-        if (!requireScope(req, res)) return undefined;
-        const decisionKey = req.body?.decision_key;
-        const reasonCode = req.body?.reason_code;
-        if (typeof decisionKey !== 'string' || !KEY.test(decisionKey) || typeof reasonCode !== 'string' || !/^[A-Z0-9_]{1,64}$/.test(reasonCode)) {
-            return fail(res, 400, 'ALPACA_V2_DECISION_INVALID', 'decision_key and an UPPER_SNAKE reason_code are required');
-        }
-        try {
-            const result = await store.appendEvent({
-                event_key: `decision:${decisionKey}`, event_type: 'decision', action: 'no_trade', outcome: 'skipped', reason_code: reasonCode,
-                detail: {
-                    symbol: typeof req.body.symbol === 'string' ? req.body.symbol.toUpperCase() : null,
-                    setup: req.body.setup, catalyst: req.body.catalyst, notes: req.body.notes,
-                },
-                occurred_at: now().toISOString(),
-            });
-            return res.status(result.inserted ? 201 : 200).json({ status: 'success', data: { recorded: result.inserted, replayed: !result.inserted } });
-        } catch (err) {
-            if (err.code === 'ALPACA_V2_EVENT_KEY_CONFLICT') return fail(res, 409, err.code, 'this decision key was already used for a different decision');
-            return respondError(res, err);
-        }
-    });
+    router.post(['/entries/preview', '/entries', '/decisions'], (_req, res) =>
+        fail(res, 410, 'ALPACA_DAY_TRADING_RETIRED', 'Alpaca paper day trading is retired; use long-term paper investing.'));
 
     router.post('/plans/:id/review', async (req, res) => {
         if (!requireScope(req, res)) return undefined;
@@ -301,7 +206,8 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
         if (!requireOperator(req, res)) return undefined;
         const { mode, confirm } = req.body || {};
         if (!MODES.includes(mode)) return fail(res, 400, 'ALPACA_V2_MODE_INVALID', `mode must be one of: ${MODES.join(', ')}`);
-        const confirmed = mode === 'paper_execute' ? confirm === 'paper_execute' : (confirm === mode || confirm === true);
+        if (mode !== 'disabled') return fail(res, 410, 'ALPACA_DAY_TRADING_RETIRED', 'Day-trading automation is retired. Only disabling the historical monitor is supported.');
+        const confirmed = confirm === mode || confirm === true;
         if (!confirmed) return fail(res, 400, 'ALPACA_V2_CONFIRMATION_REQUIRED', mode === 'paper_execute' ? 'type paper_execute exactly to confirm' : 'explicit confirmation is required');
         try {
             const occurredAt = now().toISOString();
@@ -446,12 +352,9 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
         } catch (err) { return respondError(res, err); }
     });
 
-    router.post('/experiments', async (req, res) => {
+    router.post('/experiments', (req, res) => {
         if (!requireOperator(req, res)) return undefined;
-        try {
-            const experiment = await store.createExperiment(req.body, now());
-            return res.status(201).json({ status: 'success', data: evaluateExperiment(experiment, { now: now() }) });
-        } catch (err) { return respondError(res, err); }
+        return fail(res, 410, 'ALPACA_DAY_TRADING_RETIRED', 'Day-trading experiments are retired; historical results remain readable.');
     });
 
     const historyError = (code) => Object.assign(new Error('historical evidence unavailable'), { code });
@@ -601,4 +504,4 @@ function createV2Router({ store = defaultStore, createClient = createPaperClient
     return router;
 }
 
-module.exports = { createV2Router, sanitizePlan, sanitizeEvent, sanitizeEntryPreview };
+module.exports = { createV2Router, sanitizePlan, sanitizeEvent };

@@ -122,27 +122,16 @@ test('history and experiment writes require an operator before any broker read o
     assert.equal((await legacy.listEvents()).length, 0);
 });
 
-test('experiments are forward registered, immutable, and readable without exposing private identifiers', async () => {
-    let definition;
+test('new day-trading experiments are retired while historical results remain readable', async () => {
     await serve(OPERATOR, async server => {
-        const invalid = await request(server, 'POST', '/v2/experiments', experiment({ created_at: ENTRY }));
-        assert.equal(invalid.status, 400);
-        const response = await request(server, 'POST', '/v2/experiments', experiment({ name: 'Study https://synthetic-private.example/api' }));
-        assert.equal(response.status, 201, response.text);
-        definition = response.body.data;
-        assert.equal(definition.createdAt, INITIAL_NOW);
-        assert.equal(definition.endsAt, '2025-01-24T16:00:00.000Z');
-        assert.equal(definition.results.eligibleCount, 0);
-        assert.equal(definition.results.status, 'collecting');
-        assert.doesNotMatch(response.text, PRIVATE);
-        assert.equal((await request(server, 'PATCH', `/v2/experiments/${definition.id}`, { costBps: 0 })).status, 404);
+        const response = await request(server, 'POST', '/v2/experiments', experiment());
+        assert.equal(response.status, 410);
+        assert.equal(response.body.code, 'ALPACA_DAY_TRADING_RETIRED');
     });
-    await assert.rejects(sql('UPDATE alpaca_dt_v2_experiments SET cost_bps = 0 WHERE id = ?', [definition.id]), /immutable/);
-    await assert.rejects(sql('DELETE FROM alpaca_dt_v2_experiments WHERE id = ?', [definition.id]), /immutable/);
+    assert.equal((await store.listExperiments()).length, 0);
     await serve(READER, async server => {
         const response = await request(server, 'GET', '/v2/experiments');
         assert.equal(response.status, 200);
-        assert.equal(response.body.data.experiments[0].costBps, 5);
         assert.doesNotMatch(response.text, PRIVATE);
     });
     assert.equal(broker.reads.length, 0);

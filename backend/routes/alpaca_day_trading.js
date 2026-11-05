@@ -11,11 +11,11 @@ const TERMINAL_PLAN_STATES = ['closed', 'cancelled', 'error'];
 const router = createAsyncRouter();
 
 // v1 is retired: this router is read-only historical visibility. Every former mutation is
-// refused before any store write or broker client construction; the v2 strategy lab lives
-// under /v2 and never shares a submit path with this module.
+// refused before any store write or broker client construction. Both generations
+// preserve historical visibility only.
 const V1_RETIRED_POSTS = ['/entries', '/decisions', '/mode', '/resolve-missing', '/kill-switch/clear', '/plans/:id/review'];
 router.post(V1_RETIRED_POSTS, (_req, res) => res.status(410).json({
-    status: 'error', code: 'ALPACA_V1_RETIRED', error: 'Alpaca Day Trading v1 is retired and read-only; use the v2 strategy lab',
+    status: 'error', code: 'ALPACA_V1_RETIRED', error: 'Alpaca Day Trading v1 is retired and read-only; use long-term paper investing',
 }));
 
 // Invariant #16 (private identifiers): readers get a generic phrase and the code only.
