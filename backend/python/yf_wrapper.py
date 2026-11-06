@@ -809,41 +809,79 @@ def get_market_indexes():
             return demo
         return {'status': 'error', 'error': str(e)}
 
+# Yahoo tags some share classes' news under the sibling ticker (Alphabet news is tagged GOOG).
+NEWS_TICKER_ALIASES = {
+    'GOOGL': {'GOOG'}, 'GOOG': {'GOOGL'},
+    'BRK-B': {'BRK-A'}, 'BRK-A': {'BRK-B'},
+}
+
+def _format_ticker_news(news):
+    formatted_news = []
+    for item in news[:10]:
+        n = item.get('content') or item
+
+        title = n.get('title', '')
+        pub_date = n.get('pubDate') or n.get('providerPublishTime', '')
+
+        provider_dict = n.get('provider') or {}
+        publisher = provider_dict.get('displayName') or n.get('publisher', '')
+
+        click_through = n.get('clickThroughUrl') or {}
+        canonical = n.get('canonicalUrl') or {}
+        link = click_through.get('url') or canonical.get('url') or n.get('link', '')
+
+        if not str(title).strip():
+            continue
+        formatted_news.append({
+            'title': title,
+            'publisher': publisher,
+            'link': link,
+            'providerPublishTime': pub_date
+        })
+    return formatted_news
+
+def _search_news(symbol):
+    """News from Yahoo's search API, keeping only items tagged with the symbol (or its share-class alias)."""
+    results = yf.Search(symbol, max_results=0, news_count=10, enable_fuzzy_query=False).news or []
+    wanted = {symbol} | NEWS_TICKER_ALIASES.get(symbol, set())
+    formatted_news = []
+    for n in results:
+        related = n.get('relatedTickers')
+        if isinstance(related, list) and related and not wanted.intersection(related):
+            continue
+        title = (n.get('title') or '').strip()
+        if not title:
+            continue
+        formatted_news.append({
+            'title': title,
+            'publisher': n.get('publisher', ''),
+            'link': n.get('link', ''),
+            'providerPublishTime': n.get('providerPublishTime', ''),
+        })
+    return formatted_news
+
 def get_news(symbol):
-    """Get latest news for a stock symbol"""
+    """Get latest news for a stock symbol.
+
+    yfinance's Ticker.news calls Yahoo's /xhr/ncp endpoint, which can fail on its own (yfinance
+    then reports "YAHOO! FINANCE IS CURRENTLY DOWN!") while the rest of Yahoo works. When it fails
+    or returns nothing, fall back to Yahoo's search API, which carries the same news feed.
+    """
+    ticker_error = None
     try:
-        stock = yf.Ticker(symbol)
-        news = stock.news
-        if not news:
-            return {'status': 'success', 'data': []}
-        
-        formatted_news = []
-        for item in news[:10]:
-            n = item.get('content') or item
-            
-            title = n.get('title', '')
-            pub_date = n.get('pubDate') or n.get('providerPublishTime', '')
-            
-            provider_dict = n.get('provider') or {}
-            publisher = provider_dict.get('displayName') or n.get('publisher', '')
-            
-            click_through = n.get('clickThroughUrl') or {}
-            canonical = n.get('canonicalUrl') or {}
-            link = click_through.get('url') or canonical.get('url') or n.get('link', '')
-            
-            formatted_news.append({
-                'title': title,
-                'publisher': publisher,
-                'link': link,
-                'providerPublishTime': pub_date
-            })
-            
-        return {
-            'status': 'success',
-            'data': formatted_news
-        }
+        formatted_news = _format_ticker_news(yf.Ticker(symbol).news or [])
+        if formatted_news:
+            return {'status': 'success', 'data': formatted_news, 'meta': {'endpoint': 'ticker_news'}}
     except Exception as e:
-        return {'status': 'error', 'error': str(e)}
+        ticker_error = str(e)
+
+    meta = {'endpoint': 'search'}
+    if ticker_error:
+        meta['tickerNewsError'] = ticker_error[:200]
+    try:
+        return {'status': 'success', 'data': _search_news(symbol), 'meta': meta}
+    except Exception as e:
+        return {'status': 'error', 'error': str(e), 'meta': meta}
 
 def calculate_rsi(prices, period=14):
     """Calculate Relative Strength Index"""
