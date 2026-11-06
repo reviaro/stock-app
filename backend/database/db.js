@@ -725,6 +725,8 @@ function initDb() {
 
                 try { await require('../services/alpaca_live_store').init(); }
                 catch (liveMigrationError) { reject(liveMigrationError); return; }
+                try { await require('../services/alpaca_paper_long_term_store').init(); }
+                catch (paperMigrationError) { reject(paperMigrationError); return; }
 
                 // Verify the schema this build actually needs before declaring success:
                 // serialized db.run fire-and-forget callbacks can swallow failures and

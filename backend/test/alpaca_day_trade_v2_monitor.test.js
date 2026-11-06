@@ -178,74 +178,6 @@ test('a filled stop closes as stop_loss with negative R', async () => {
     assert.ok(closed.realized_r < -0.99 && closed.realized_r > -1.01);
 });
 
-test('deadline: cancels the bracket, verifies non-executable, refreshes exact quantity, submits one market exit, verifies zero, closes', async () => {
-    const plan = await seedPlan();
-    const broker = fakeBroker();
-    await monitor(broker, AFTER_DEADLINE).tick();
-    const submits = broker.mutations.filter(([kind]) => kind === 'submit');
-    assert.strictEqual(submits.length, 1);
-    assert.deepStrictEqual(submits[0][1], { symbol: 'NVDA', qty: 10, side: 'sell', type: 'market', time_in_force: 'day', extended_hours: false, client_order_id: `${CID}-x` });
-    const firstSubmit = broker.mutations.findIndex(([kind]) => kind === 'submit');
-    const lastCancel = broker.mutations.map(([kind]) => kind).lastIndexOf('cancel');
-    assert.ok(lastCancel >= 0 && lastCancel < firstSubmit, 'the exit must never be sent before the bracket is cancelled');
-    assert.ok(!broker.mutations.some(([kind, id]) => kind === 'cancel' && id === 'parent-1'), 'a filled parent is not cancellable; its open legs are');
-    const closed = await store.getPlan(plan.id);
-    assert.strictEqual(closed.state, 'closed');
-    assert.strictEqual(closed.exit_reason, 'time_exit');
-    assert.strictEqual(closed.exit_order_id, 'exit-1');
-});
-
-test('deadline with a still-working parent cancels the parent itself and closes as cancelled when nothing filled', async () => {
-    const plan = await seedPlan();
-    const broker = fakeBroker({ parentStatus: 'new', filledQty: 0, legStatus: 'held', positionQty: 0 });
-    await monitor(broker, AFTER_DEADLINE).tick();
-    assert.deepStrictEqual(broker.mutations, [['cancel', 'parent-1']]);
-    assert.strictEqual((await store.getPlan(plan.id)).state, 'cancelled');
-});
-
-test('a leg that fills during the time-exit cancel leaves nothing to sell: no market order is sent', async () => {
-    const plan = await seedPlan();
-    const broker = fakeBroker();
-    broker.cancelBehavior = 'fill_stop';
-    await monitor(broker, AFTER_DEADLINE).tick();
-    assert.ok(!broker.mutations.some(([kind]) => kind === 'submit'));
-    const closed = await store.getPlan(plan.id);
-    assert.strictEqual(closed.state, 'closed');
-    assert.strictEqual(closed.exit_reason, 'stop_loss');
-});
-
-test('a cancellation that never becomes non-executable latches attention and sends no substitute order', async () => {
-    const plan = await seedPlan();
-    const broker = fakeBroker();
-    broker.cancelBehavior = 'stuck';
-    await monitor(broker, AFTER_DEADLINE).tick();
-    assert.ok(!broker.mutations.some(([kind]) => kind === 'submit'));
-    assert.strictEqual((await store.getPlan(plan.id)).attention_code, 'CANCEL_TIMEOUT');
-    assert.strictEqual((await store.getMonitorState()).attention_required, 1);
-});
-
-test('an exit that is not confirmed flat latches attention rather than retrying', async () => {
-    await seedPlan();
-    const broker = fakeBroker();
-    broker.exitFills = false;
-    await monitor(broker, AFTER_DEADLINE).tick();
-    assert.strictEqual(broker.mutations.filter(([kind]) => kind === 'submit').length, 1);
-    assert.strictEqual((await store.getMonitorState()).attention_code, 'TIME_EXIT_UNCONFIRMED');
-});
-
-test('restart during time_exit_pending finds the exit by client id and never submits a second one', async () => {
-    const plan = await seedPlan({ state: 'time_exit_pending' });
-    const broker = fakeBroker();
-    // The previous process cancelled the legs and sent the exit, then crashed before persisting it.
-    for (const l of broker.orders.get('parent-1').legs) l.status = 'canceled';
-    broker.exitFills = false;
-    await broker.client.submitOrder({ symbol: 'NVDA', qty: 10, side: 'sell', type: 'market', time_in_force: 'day', client_order_id: `${CID}-x` });
-    broker.mutations.length = 0;
-    await monitor(broker, AFTER_DEADLINE).tick();
-    assert.ok(!broker.mutations.some(([kind]) => kind === 'submit'), 'the exit already at the broker must be found by client id');
-    assert.strictEqual((await store.getPlan(plan.id)).exit_order_id, 'exit-1');
-});
-
 test('an unreadable broker latches attention, blocks entries, and does not advance the heartbeat', async () => {
     await seedPlan();
     const broker = fakeBroker();
@@ -417,4 +349,27 @@ test('the worker holds a singleton lock and runs ticks serially; a WebSocket dis
         await worker.stop();
     }
     assert.strictEqual(fs.existsSync(lockPath), false);
+});
+
+test('retired monitor preserves working brackets and positions after the intraday deadline', async () => {
+    const plan = await seedPlan();
+    const broker = fakeBroker();
+    const positions = structuredClone([...broker.positions]);
+    const orders = structuredClone([...broker.orders]);
+    await monitor(broker, AFTER_DEADLINE).tick();
+    assert.deepStrictEqual(broker.mutations, []);
+    assert.deepStrictEqual([...broker.positions], positions);
+    assert.deepStrictEqual([...broker.orders], orders);
+    const historical = await store.getPlan(plan.id);
+    assert.strictEqual(historical.attention_code, 'TIME_EXIT_SUPPRESSED');
+    assert.notStrictEqual(historical.state, 'closed');
+});
+
+test('retired monitor never resumes a pending time exit after restart', async () => {
+    const plan = await seedPlan({ state: 'time_exit_pending' });
+    const broker = fakeBroker();
+    await monitor(broker, AFTER_DEADLINE).startup();
+    assert.deepStrictEqual(broker.mutations, []);
+    assert.strictEqual(broker.positions.get('NVDA').qty, '10');
+    assert.strictEqual((await store.getPlan(plan.id)).attention_code, 'TIME_EXIT_SUPPRESSED');
 });

@@ -1,6 +1,6 @@
 'use strict';
 
-// The single v2 monitor process: owns reconciliation and time exits. One instance (PID lock,
+// The single historical v2 monitor process: reconciliation only; execution is retired. One instance (PID lock,
 // behind systemd's own single-unit guarantee), serial ticks, REST every 60s with exposure and
 // every 300s while flat. The WebSocket only speeds up fill ingestion; a disconnect never
 // triggers an order -- REST keeps reconciling on its normal cadence.

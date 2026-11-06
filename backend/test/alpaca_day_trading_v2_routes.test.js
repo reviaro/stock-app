@@ -1,18 +1,14 @@
-const httpRuntime = require('../services/http_runtime');
 const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const http = require('http');
-const path = require('path');
 const express = require('express');
 
 const { createTestDatabase } = require('../test-support/test_database');
 const TEST_DB = createTestDatabase();
 const db = require('../database/db');
 const store = require('../services/alpaca_day_trade_v2_store');
-const { createV2Router, sanitizeEntryPreview } = require('../routes/alpaca_day_trading_v2');
-const { createAuth, hashPassword } = require('../services/auth');
-const { createApp: createServerApp } = require('../server');
+const { createV2Router } = require('../routes/alpaca_day_trading_v2');
 
 const OPERATOR = { type: 'session', role: 'operator', username: 'op' };
 const AGENT = { type: 'bearer', role: 'alpaca-day-trading-agent', username: 'alpaca-day-trading-agent' };
@@ -122,238 +118,10 @@ async function seedClosedPlan() {
     });
 }
 
-// ---- entries ----
-
-const PREVIEW_NOW = '2026-10-22T14:15:00.000Z';
-const PREVIEW_OPTIONS = { now: () => new Date(PREVIEW_NOW) };
-
-function previewBody(overrides = {}) {
-    const { qty: _qty, ...intent } = entryBody();
-    return { ...intent, client_order_id: 'dt2-synthetic-preview', exit_deadline: '2026-10-22T19:30:00.000Z',
-        max_notional_dollars: 1500, max_risk_dollars: 50, ...overrides };
-}
-
-async function preparePreview(overrides = {}) {
-    await store.updateMonitorState({ mode: 'paper_execute', last_reconciled_at: PREVIEW_NOW });
-    broker = fakeClient({
-        getClock: async () => ({ is_open: true, next_close: '2026-10-22T20:00:00.000Z', next_open: '2026-10-23T13:30:00.000Z' }),
-        getLatestQuote: async (symbol) => ({ symbol, quote: { t: '2026-10-22T14:14:59.500Z', bp: 99.98, bs: 3, ap: 100, as: 2 } }),
-        ...overrides,
-    });
-}
 
 async function previewState() {
     return { plans: await store.listPlans(), fills: await store.listFills(), events: await store.listEvents(), state: await store.getMonitorState() };
 }
-
-test('entry preview calculates a sanitized indicative result for scoped agents and operators without writing state or orders', async () => {
-    await preparePreview();
-    const before = await previewState();
-    for (const auth of [AGENT, OPERATOR]) {
-        const response = await withServer(auth, server => request(server, 'POST', '/v2/entries/preview', previewBody()), PREVIEW_OPTIONS);
-        assert.strictEqual(response.status, 200, response.text);
-        assert.strictEqual(response.headers['cache-control'], 'no-store');
-        const result = response.body.data;
-        assert.strictEqual(result.eligible, true, response.text);
-        assert.strictEqual(result.indicative, true);
-        assert.ok(Number.isSafeInteger(result.qty) && result.qty > 0);
-        assert.deepStrictEqual(result.blockers, []);
-        assert.deepStrictEqual(Object.keys(result.submission).sort(), ['max_entry_price', 'max_notional_dollars', 'max_risk_dollars', 'qty']);
-        assert.strictEqual(result.submission.qty, result.qty);
-        // qty is sized at a small headroom cap above the current entry bound.
-        assert.ok(result.submission.max_entry_price >= result.entryPrice);
-        assert.ok(result.submission.max_entry_price <= Math.floor(result.entryPrice * 1.003 * 100) / 100);
-        assert.strictEqual(result.asOf, PREVIEW_NOW);
-        assert.ok(Date.parse(result.quoteExpiresAt) > Date.parse(result.asOf));
-        assert.deepStrictEqual(Object.keys(result.quote).sort(), ['askPrice', 'bidPrice', 'feed', 'retrievedAt', 'sourceTimestamp']);
-        assert.doesNotMatch(response.text, PRIVATE);
-    }
-    assert.deepStrictEqual(await previewState(), before);
-    assert.strictEqual(broker.calls.mutations, 0);
-});
-
-test('a policy-blocked preview returns fixed public blockers and cannot be submitted', async () => {
-    await preparePreview();
-    const before = await previewState();
-    const response = await withServer(AGENT, server => request(server, 'POST', '/v2/entries/preview', previewBody({ max_notional_dollars: 1 })), PREVIEW_OPTIONS);
-    assert.strictEqual(response.status, 200, response.text);
-    assert.strictEqual(response.headers['cache-control'], 'no-store');
-    assert.strictEqual(response.body.data.eligible, false);
-    assert.strictEqual(response.body.data.qty, 0);
-    assert.strictEqual(response.body.data.submission, null);
-    assert.ok(response.body.data.blockers.length > 0);
-    for (const blocker of response.body.data.blockers) {
-        assert.deepStrictEqual(Object.keys(blocker).sort(), ['code', 'message']);
-        assert.match(blocker.code, /^ALPACA_V2_/);
-        assert.doesNotMatch(blocker.message, /\d|secret|acct-|https?:/);
-    }
-    assert.doesNotMatch(response.text, PRIVATE);
-    assert.deepStrictEqual(await previewState(), before);
-    assert.strictEqual(broker.calls.mutations, 0);
-});
-
-test('entry preview requires scope and account2 before constructing a broker client', async () => {
-    let creations = 0;
-    const options = { ...PREVIEW_OPTIONS, createClient: () => { creations += 1; throw new Error('must not create a client'); } };
-    for (const auth of [undefined, READER, { type: 'bearer', role: 'simulator-agent', account_id: 2 }, { type: 'bearer', role: 'alpaca-long-term-agent' }]) {
-        const response = await withServer(auth, server => request(server, 'POST', '/v2/entries/preview', previewBody()), options);
-        assert.strictEqual(response.status, 403);
-        assert.strictEqual(response.body.code, 'ALPACA_V2_SCOPE_REQUIRED');
-        assert.strictEqual(response.headers['cache-control'], 'no-store');
-    }
-    for (const auth of [AGENT, OPERATOR]) {
-        const response = await withServer(auth, server => request(server, 'POST', '/v2/entries/preview', previewBody({ account_id: 1 })), options);
-        assert.strictEqual(response.status, 400);
-        assert.strictEqual(response.body.code, 'ALPACA_V2_ACCOUNT_SCOPE_REQUIRED');
-    }
-    assert.strictEqual(creations, 0);
-});
-
-test('preview rejects caller quantities, missing sizing budgets, and a caller entry-price cap without writes', async () => {
-    await preparePreview();
-    const before = await previewState();
-    for (const overrides of [{ qty: 10 }, { max_entry_price: 100 }, { max_notional_dollars: undefined }, { max_risk_dollars: undefined }, { max_qty: 1.5 }]) {
-        const response = await withServer(AGENT, server => request(server, 'POST', '/v2/entries/preview', previewBody(overrides)), PREVIEW_OPTIONS);
-        assert.strictEqual(response.status, 400, response.text);
-        assert.ok(['ALPACA_V2_FIELD_NOT_ALLOWED', 'ALPACA_V2_SIZING_INVALID'].includes(response.body.code), response.text);
-        assert.strictEqual(response.headers['cache-control'], 'no-store');
-        assert.doesNotMatch(response.text, PRIVATE);
-    }
-    assert.deepStrictEqual(await previewState(), before);
-    assert.strictEqual(broker.calls.mutations, 0);
-});
-
-test('preview broker failures and newly mapped safety failures never return raw error text', async () => {
-    const codes = [
-        ['ALPACA_V2_SIZING_INVALID', 400], ['ALPACA_V2_ENTRY_PRICE_MOVED', 409],
-        ['ALPACA_V2_NOTIONAL_BUDGET_EXCEEDED', 422], ['ALPACA_V2_RISK_BUDGET_EXCEEDED', 422],
-        ['ALPACA_V2_OPEN_RISK_UNAVAILABLE', 503], ['ALPACA_V2_BROKER_SNAPSHOT_STALE', 409],
-        ['ALPACA_V2_ENTRY_EXPIRED_BEFORE_SEND', 409],
-        ['toString', 500],
-    ];
-    for (const [code, status] of codes) {
-        const response = await withServer(AGENT, server => request(server, 'POST', '/v2/entries/preview', previewBody()), {
-            createClient: () => { throw Object.assign(new Error('secret broker https://private.invalid acct-private'), { code }); },
-        });
-        assert.strictEqual(response.status, status, response.text);
-        assert.strictEqual(response.body.code, code === 'toString' ? 'ALPACA_V2_ERROR' : code);
-        assert.strictEqual(response.headers['cache-control'], 'no-store');
-        assert.doesNotMatch(response.text, PRIVATE);
-    }
-    await preparePreview({ getAccount: async () => { throw new Error('secret broker https://private.invalid acct-private'); } });
-    const before = await previewState();
-    const response = await withServer(AGENT, server => request(server, 'POST', '/v2/entries/preview', previewBody()), PREVIEW_OPTIONS);
-    assert.strictEqual(response.status, 503, response.text);
-    assert.strictEqual(response.body.code, 'ALPACA_V2_BROKER_UNAVAILABLE');
-    assert.doesNotMatch(response.text, PRIVATE);
-    assert.deepStrictEqual(await previewState(), before);
-    assert.strictEqual(broker.calls.mutations, 0);
-});
-
-test('preview response allowlist strips private fields and unknown blockers fail closed', () => {
-    const result = sanitizeEntryPreview({
-        eligible: true, qty: 5, entryPrice: 100, blockerCodes: ['ALPACA_V2_MARKET_CLOSED', 'secret broker code', 'toString'],
-        account_number: 'acct-private', raw: { api_secret: 'secret' },
-        quote: { bidPrice: 99.98, askPrice: 100, feed: 'iex', sourceTimestamp: PREVIEW_NOW, retrievedAt: PREVIEW_NOW, secret: 'secret' },
-        constraints: { maxRiskDollars: 50, secret: 'secret' },
-        submission: { qty: 5, max_entry_price: 100, max_notional_dollars: 500, max_risk_dollars: 50, account_number: 'acct-private' },
-        asOf: PREVIEW_NOW, quoteExpiresAt: '2026-10-22T14:15:10.000Z',
-    });
-    assert.strictEqual(result.eligible, false);
-    assert.strictEqual(result.qty, 0);
-    assert.strictEqual(result.submission, null);
-    assert.deepStrictEqual(result.blockers, [
-        { code: 'ALPACA_V2_MARKET_CLOSED', message: 'the market is not open for new entries' },
-        { code: 'ALPACA_V2_ERROR', message: 'the preview could not be verified' },
-    ]);
-    assert.doesNotMatch(JSON.stringify(result), PRIVATE);
-});
-
-test('a too-wide quote spread is a named public preview blocker', () => {
-    const result = sanitizeEntryPreview({
-        eligible: false, qty: 0, entryPrice: 1097.46, blockerCodes: ['ALPACA_V2_QUOTE_SPREAD_TOO_WIDE'],
-        quote: { bidPrice: 1000, askPrice: 1092, feed: 'iex', sourceTimestamp: PREVIEW_NOW, retrievedAt: PREVIEW_NOW },
-        asOf: PREVIEW_NOW, quoteExpiresAt: '2026-10-22T14:15:10.000Z',
-    });
-    assert.deepStrictEqual(result.blockers, [
-        { code: 'ALPACA_V2_QUOTE_SPREAD_TOO_WIDE', message: 'the quoted bid/ask spread is too wide; request a fresh preview' },
-    ]);
-    assert.strictEqual(result.quote.askPrice, 1092);
-});
-
-test('scoped agent entry in paper_execute submits one bracket and the response carries no broker/client ids', async () => {
-    await store.updateMonitorState({ mode: 'paper_execute' });
-    const res = await withServer(AGENT, (server) => request(server, 'POST', '/v2/entries', entryBody()));
-    assert.strictEqual(res.status, 201, res.text);
-    assert.strictEqual(res.body.data.outcome, 'acknowledged');
-    assert.strictEqual(res.body.data.symbol, 'NVDA');
-    assert.strictEqual(broker.calls.submit, 1);
-    assert.doesNotMatch(res.text, PRIVATE);
-});
-
-test('an entry refused by policy returns a fixed generic message with no account figures', async () => {
-    await store.updateMonitorState({ mode: 'paper_execute' });
-    broker.client.getAccount = async () => ({ status: 'ACTIVE', cash: '1000', equity: '100000' });
-    const res = await withServer(AGENT, (server) => request(server, 'POST', '/v2/entries', entryBody()));
-    assert.strictEqual(res.status, 422);
-    assert.strictEqual(res.body.code, 'ALPACA_V2_INSUFFICIENT_CASH');
-    assert.doesNotMatch(res.body.error, /\d/);
-    assert.strictEqual(broker.calls.submit, 0);
-});
-
-test('entries require account_id 2 at the route even for an operator', async () => {
-    await store.updateMonitorState({ mode: 'paper_execute' });
-    const res = await withServer(OPERATOR, (server) => request(server, 'POST', '/v2/entries', entryBody({ account_id: 1 })));
-    assert.strictEqual(res.status, 400);
-    assert.strictEqual(res.body.code, 'ALPACA_V2_ACCOUNT_SCOPE_REQUIRED');
-    assert.strictEqual(broker.calls.submit, 0);
-});
-
-test('entries are refused outside paper_execute before any broker call', async () => {
-    const res = await withServer(AGENT, (server) => request(server, 'POST', '/v2/entries', entryBody()));
-    assert.strictEqual(res.status, 403);
-    assert.strictEqual(res.body.code, 'ALPACA_V2_EXECUTION_DISABLED');
-    assert.strictEqual(broker.calls.submit, 0);
-});
-
-test('an uncertain submission answers 503 SUBMISSION_UNKNOWN; a retry that cannot be resolved answers 409 unresolved', async () => {
-    await store.updateMonitorState({ mode: 'paper_execute' });
-    broker.client.submitOrder = async () => { throw Object.assign(new Error('timeout'), { name: 'TimeoutError' }); };
-    const first = await withServer(AGENT, (server) => request(server, 'POST', '/v2/entries', entryBody()));
-    assert.strictEqual(first.status, 503);
-    assert.strictEqual(first.body.code, 'ALPACA_V2_SUBMISSION_UNKNOWN');
-    const retry = await withServer(AGENT, (server) => request(server, 'POST', '/v2/entries', entryBody()));
-    assert.strictEqual(retry.status, 409);
-    assert.strictEqual(retry.body.code, 'ALPACA_V2_SUBMISSION_UNRESOLVED');
-    assert.doesNotMatch(first.text + retry.text, PRIVATE);
-});
-
-test('a reader principal cannot submit entries, decisions, or reviews', async () => {
-    for (const p of ['/v2/entries', '/v2/decisions', '/v2/plans/1/review']) {
-        const res = await withServer(READER, (server) => request(server, 'POST', p, { account_id: 2 }));
-        assert.strictEqual(res.status, 403, p);
-    }
-});
-
-// ---- decisions and reviews ----
-
-test('a NO TRADE decision is journaled idempotently with sanitized detail', async () => {
-    const body = { account_id: 2, decision_key: '2026-09-23:nvda:open', reason_code: 'NO_SETUP', symbol: 'NVDA', notes: 'no volume; see https://evil.example dt2-leak', api_secret: 'x' };
-    const first = await withServer(AGENT, (server) => request(server, 'POST', '/v2/decisions', body));
-    const replay = await withServer(AGENT, (server) => request(server, 'POST', '/v2/decisions', body));
-    assert.strictEqual(first.status, 201, first.text);
-    assert.strictEqual(replay.status, 200);
-    const decisions = (await store.listEvents()).filter((e) => e.event_type === 'decision');
-    assert.strictEqual(decisions.length, 1);
-    assert.doesNotMatch(decisions[0].detail_json, /https|dt2-leak|api_secret/);
-});
-
-test('decisions and reviews require account_id 2', async () => {
-    const decision = await withServer(AGENT, (server) => request(server, 'POST', '/v2/decisions', { account_id: 1, decision_key: 'k', reason_code: 'NO_SETUP' }));
-    assert.strictEqual(decision.status, 400);
-    const review = await withServer(AGENT, (server) => request(server, 'POST', '/v2/plans/1/review', { account_id: '2', revision_key: 'r1', thesis_valid: true }));
-    assert.strictEqual(review.status, 400);
-});
 
 test('a review of a terminal plan is journaled; a conflicting revision is refused', async () => {
     const plan = await seedClosedPlan();
@@ -375,29 +143,6 @@ test('agent and reader principals cannot change mode, clear the kill switch, or 
         }
     }
     assert.strictEqual((await store.getMonitorState()).mode, 'disabled');
-});
-
-test('paper_execute requires the exact typed confirmation', async () => {
-    for (const confirm of [true, 'PAPER_EXECUTE', 'paper_execute ', undefined]) {
-        const res = await withServer(OPERATOR, (server) => request(server, 'POST', '/v2/mode', { mode: 'paper_execute', confirm }));
-        assert.strictEqual(res.status, 400, String(confirm));
-        assert.strictEqual(res.body.code, 'ALPACA_V2_CONFIRMATION_REQUIRED');
-    }
-    assert.strictEqual((await store.getMonitorState()).mode, 'disabled');
-    const ok = await withServer(OPERATOR, (server) => request(server, 'POST', '/v2/mode', { mode: 'paper_execute', confirm: 'paper_execute' }));
-    assert.strictEqual(ok.status, 200);
-    assert.strictEqual((await store.getMonitorState()).mode, 'paper_execute');
-    const events = (await store.listEvents()).filter((e) => e.event_type === 'mode_change');
-    assert.strictEqual(events.length, 1);
-});
-
-test('shadow and disabled need an explicit confirmation too, and unknown modes are refused', async () => {
-    const missing = await withServer(OPERATOR, (server) => request(server, 'POST', '/v2/mode', { mode: 'shadow' }));
-    assert.strictEqual(missing.status, 400);
-    const bad = await withServer(OPERATOR, (server) => request(server, 'POST', '/v2/mode', { mode: 'live', confirm: 'live' }));
-    assert.strictEqual(bad.status, 400);
-    const ok = await withServer(OPERATOR, (server) => request(server, 'POST', '/v2/mode', { mode: 'shadow', confirm: 'shadow' }));
-    assert.strictEqual(ok.status, 200);
 });
 
 test('clearing the kill switch requires exactly CLEAR', async () => {
@@ -461,35 +206,6 @@ test('operator resolve needs the typed symbol and a flat broker; it never mutate
     assert.strictEqual(broker.calls.mutations, 0);
 });
 
-for (const reconciledState of ['attention_required', 'closed']) {
-    test(`operator resolve preserves concurrent reconciliation to ${reconciledState}`, async () => {
-        const { plan } = await store.createPlan({
-            client_order_id: 'dt2-20260923-nvda-orb', symbol: 'NVDA', setup: 'orb', catalyst: 'c', thesis: 't', invalidation: 'i',
-            planned_qty: 10, planned_entry_price: 100.5, planned_stop: 98, planned_target: 104, planned_risk_dollars: 25,
-            exit_deadline: '2026-09-23T19:30:00.000Z',
-        });
-        await store.latchAttention({ planId: plan.id, code: 'SUBMISSION_UNKNOWN', eventKey: 'resolve-race' });
-        let reconciled;
-        broker.client.getPosition = async () => {
-            reconciled = await store.updatePlan(plan.id, {
-                state: reconciledState, filled_entry_qty: 10, avg_entry_price: 100, filled_exit_qty: 10, avg_exit_price: 104,
-                exit_reason: 'take_profit', realized_pnl: 40, realized_r: 1.6,
-                ...(reconciledState === 'closed' ? { closed_at: '2026-09-23T18:00:00.000Z' } : {}),
-            });
-            return null;
-        };
-        broker.client.getOrderByClientOrderId = async () => ({ found: true, order: { status: 'filled', filled_qty: '10' } });
-
-        const response = await withServer(OPERATOR, (server) => request(server, 'POST', `/v2/plans/${plan.id}/resolve`, { confirm: 'NVDA' }));
-
-        assert.strictEqual(response.status, 409, response.text);
-        assert.strictEqual(response.body.code, 'ALPACA_V2_CONTROL_STATE_CHANGED');
-        assert.deepStrictEqual(await store.getPlan(plan.id), reconciled);
-        assert.strictEqual((await store.listEvents(plan.id)).some((event) => event.action === 'operator_resolved'), false);
-        assert.strictEqual(broker.calls.mutations, 0);
-    });
-}
-
 // ---- readers ----
 
 test('reader routes expose only sanitized status, quantities, and prices', async () => {
@@ -525,66 +241,32 @@ test('status reports mode, latch, and heartbeat freshness from local state only'
     assert.strictEqual(res.body.data.heartbeatFresh, true);
 });
 
-// ---- full server wiring ----
-
-function serverAuth(token) {
-    return createAuth({
-        username: 'dashboard-user', passwordHash: hashPassword('pw', Buffer.alloc(16, 9)),
-        sessionSecret: 'integration-test-session-secret-32-bytes', alpacaDayTradingToken: token, allowLoopback: false,
-    });
-}
-
-test('through the real server, the scoped agent reaches only v2 entries/decisions/reviews and only with account_id 2', async () => {
-    const token = 'day-trading-agent-token-at-least-32-characters';
-    const server = createServerApp({ auth: serverAuth(token) }).listen(0, '127.0.0.1');
-    await new Promise((resolve) => server.once('listening', resolve));
-    const auth = { Authorization: `Bearer ${token}` };
-    try {
-        const allowed = await request(server, 'POST', '/api/alpaca-paper/day-trading/v2/decisions', { account_id: 2, decision_key: 'wire-check', reason_code: 'NO_SETUP' }, auth);
-        assert.notStrictEqual(allowed.body?.code, 'CAPABILITY_DENIED', allowed.text);
-        for (const [method, p, body] of [
-            ['POST', '/api/alpaca-paper/day-trading/v2/entries', { account_id: 999 }],
-            ['POST', '/api/alpaca-paper/day-trading/v2/decisions', { account_id: '2' }],
-            ['POST', '/api/alpaca-paper/day-trading/v2/plans/1/review', {}],
-            ['POST', '/api/alpaca-paper/day-trading/v2/mode', { account_id: 2, mode: 'paper_execute', confirm: 'paper_execute' }],
-            ['POST', '/api/alpaca-paper/day-trading/v2/kill-switch/clear', { account_id: 2, confirm: 'CLEAR' }],
-            ['POST', '/api/alpaca-paper/day-trading/v2/plans/1/resolve', { account_id: 2, confirm: 'NVDA' }],
-            ['POST', '/api/alpaca-paper/day-trading/entries', { account_id: 2 }],
-            ['POST', '/api/alpaca-paper/orders', { account_id: 2 }],
-            ['POST', '/api/simulator/trade', { account_id: 2 }],
-            ['GET', '/api/alpaca-paper/day-trading/v2/snapshot', undefined],
-        ]) {
-            const res = await request(server, method, p, body, auth);
-            assert.strictEqual(res.status, 403, `${method} ${p}`);
-            assert.strictEqual(res.body.code, 'CAPABILITY_DENIED', `${method} ${p}`);
-        }
-    } finally {
-        await new Promise((resolve) => server.close(resolve));
+test('retired entry routes refuse every caller before broker or store writes', async () => {
+    const before = await previewState();
+    for (const principal of [undefined, OPERATOR, AGENT, READER]) {
+        await withServer(principal, async server => {
+            for (const endpoint of ['/entries', '/entries/preview', '/decisions']) {
+                const result = await request(server, 'POST', '/v2' + endpoint, entryBody());
+                assert.strictEqual(result.status, 410);
+                assert.strictEqual(result.body.code, 'ALPACA_DAY_TRADING_RETIRED');
+            }
+        }, { createClient: () => { throw new Error('retired entry accessed broker'); } });
     }
+    assert.deepStrictEqual(await previewState(), before);
 });
 
-test('the generic paper order route is refused while v2 owns the account in paper_execute', async () => {
+test('retired monitor mode cannot reactivate but operator can explicitly disable it', async () => {
     await store.updateMonitorState({ mode: 'paper_execute' });
-    process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED = 'true';
-    process.env.ALPACA_PAPER_ORDER_ENTRY_TOKEN = 'paper-order-token';
-    const savedFetch = httpRuntime.fetch;
-    let fetched = false;
-    httpRuntime.fetch = async () => { fetched = true; throw new Error('no'); };
-    const app = express();
-    app.use(express.json());
-    app.use('/api/alpaca-paper', require('../routes/alpaca_paper'));
-    const server = app.listen(0, '127.0.0.1');
-    await new Promise((resolve) => server.once('listening', resolve));
-    try {
-        const res = await request(server, 'POST', '/api/alpaca-paper/orders',
-            { idempotency_key: 'k', symbol: 'NVDA', side: 'buy', qty: 1, type: 'limit', limit_price: 100, time_in_force: 'day' },
-            { 'X-Alpaca-Paper-Order-Token': 'paper-order-token' });
-        assert.strictEqual(res.status, 403);
-        assert.strictEqual(fetched, false);
-    } finally {
-        await new Promise((resolve) => server.close(resolve));
-        httpRuntime.fetch = savedFetch;
-        delete process.env.ALPACA_PAPER_ORDER_ENTRY_ENABLED;
-        delete process.env.ALPACA_PAPER_ORDER_ENTRY_TOKEN;
-    }
+    await withServer(OPERATOR, async server => {
+        for (const mode of ['paper_execute', 'shadow']) {
+            const result = await request(server, 'POST', '/v2/mode', { mode, confirm: mode });
+            assert.strictEqual(result.status, 410);
+            assert.strictEqual(result.body.code, 'ALPACA_DAY_TRADING_RETIRED');
+        }
+        assert.strictEqual((await request(server, 'POST', '/v2/mode', { mode: 'disabled' })).status, 400);
+        const disabled = await request(server, 'POST', '/v2/mode', { mode: 'disabled', confirm: 'disabled' });
+        assert.strictEqual(disabled.status, 200);
+        assert.strictEqual((await store.getMonitorState()).mode, 'disabled');
+    });
+    assert.strictEqual(broker.calls.mutations, 0);
 });

@@ -57,12 +57,13 @@ test('sample path refuses stocks.db, arbitrary targets, relative paths and files
 
 test('sample launcher excludes inherited database, broker and operator credentials and uses its own login', () => {
     const env = buildSampleEnvironment({ PATH: process.env.PATH, DB_PATH_OVERRIDE: '/forbidden/stocks.db',
-        ALPACA_API_KEY: 'inherited', STOCK_DASHBOARD_API_TOKEN: 'inherited',
+        ALPACA_API_KEY: 'inherited', STOCK_DASHBOARD_API_TOKEN: 'inherited', STOCK_DASHBOARD_PAPER_INVESTING_TOKEN: 'inherited',
         GOOGLE_GENERATIVE_AI_API_KEY: 'inherited', STOCK_DASHBOARD_HOST: '0.0.0.0' },
     { ALPACA_API_KEY: 'file-value', DB_PATH_OVERRIDE: '/forbidden/stocks.db', GOOGLE_GENERATIVE_AI_API_KEY: 'sample-only' });
     assert.equal(env.DB_PATH_OVERRIDE, SAMPLE_DB_PATH);
     assert.equal(env.ALPACA_API_KEY, undefined);
     assert.equal(env.STOCK_DASHBOARD_API_TOKEN, undefined);
+    assert.equal(env.STOCK_DASHBOARD_PAPER_INVESTING_TOKEN, undefined);
     assert.equal(env.GOOGLE_GENERATIVE_AI_API_KEY, 'sample-only');
     assert.equal(env.STOCK_DASHBOARD_HOST, '127.0.0.1');
     assert.equal(env.STOCK_DASHBOARD_USERNAME, 'sample-investor');
@@ -77,7 +78,7 @@ test('normal mode keeps existing configuration; sample mode rejects missing path
     for (const patch of [{ DB_PATH_OVERRIDE: '' }, { DB_PATH_OVERRIDE: '/tmp/stocks.db' },
         { STOCK_DASHBOARD_HOST: '0.0.0.0' }, { ALPACA_API_KEY: 'credential' },
         { ALPACA_PAPER_ORDER_ENTRY_ENABLED: 'true' }, { STOCK_DASHBOARD_API_TOKEN: 'token' },
-        { STOCK_DASHBOARD_SIMULATOR_TOKENS: '[]' }, { ENABLE_LEDGER_MIGRATION: '1' }]) {
+        { STOCK_DASHBOARD_SIMULATOR_TOKENS: '[]' }, { STOCK_DASHBOARD_PAPER_INVESTING_TOKEN: 'token' }, { ENABLE_LEDGER_MIGRATION: '1' }]) {
         assert.throws(() => validateSampleEnvironment({ ...env, ...patch }));
     }
 });

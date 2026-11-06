@@ -24,6 +24,7 @@ const simulatorRoutes = require('./routes/simulator');
 const researchNotesRoutes = require('./routes/research_notes');
 const screenerRoutes = require('./routes/screener');
 const alpacaPaperRoutes = require('./routes/alpaca_paper');
+const { createPaperLongTermRouter } = require('./routes/alpaca_paper_long_term');
 const { createLiveRouter } = require('./routes/alpaca_live');
 const alpacaDayTradingRoutes = require('./routes/alpaca_day_trading');
 const { createV2Router: createAlpacaDayTradingV2Router } = require('./routes/alpaca_day_trading_v2');
@@ -104,6 +105,7 @@ function createApp({ auth = createAuthFromEnv(), env = process.env } = {}) {
     app.use('/api/research', require('./routes/research').createResearchRouter());
     app.use('/api/screener', screenerRoutes);
     app.use('/api/alpaca-paper', alpacaPaperRoutes);
+    app.use('/api/alpaca-paper/long-term', createPaperLongTermRouter());
     app.use('/api/alpaca-live', createLiveRouter());
     // v2 before the retired read-only v1 router so /v2 paths never fall through to it.
     app.use('/api/alpaca-paper/day-trading/v2', createAlpacaDayTradingV2Router());
