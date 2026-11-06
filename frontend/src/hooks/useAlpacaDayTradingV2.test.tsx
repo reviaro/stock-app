@@ -1,5 +1,5 @@
-import { act, renderHook } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { act, renderHook, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
 import { beforeEach, expect, test, vi } from 'vitest'
 import type { ReactNode } from 'react'
 import { useApplyAlpacaHistory, useClearV2KillSwitch, useCreateV2Experiment, useDisableLegacyAlpacaMonitor, usePreviewAlpacaHistory, useResolveV2Plan, useSetV2Mode } from './useAlpacaDayTradingV2'
@@ -79,4 +79,29 @@ test('a shadow experiment posts the future definition without execution controls
   expect(fetcher.mock.calls[0][0]).toBe('/api/alpaca-paper/day-trading/v2/experiments')
   expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toEqual(definition)
   expect(sentHeaders(fetcher.mock.calls[0][1])).toEqual(['content-type'])
+})
+
+test.each(['resolve', 'history', 'disable-v1', 'disable-v2'] as const)('%s recovery refreshes the mounted long-term overview instead of leaving stale blockers', async recovery => {
+  let blocked = true
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+    blocked = false
+    return ok({ plan: {}, mode: 'disabled', applied: true })
+  })
+  const overviewFetch = vi.fn(async () => ({ blockers: blocked ? ['Legacy recovery required.'] : [] }))
+  const hook = mount(() => ({
+    overview: useQuery({ queryKey: ['alpaca-paper', 'long-term', 'overview'], queryFn: overviewFetch, staleTime: Infinity }),
+    resolve: useResolveV2Plan(),
+    history: useApplyAlpacaHistory(),
+    disableV1: useDisableLegacyAlpacaMonitor(),
+    disableV2: useSetV2Mode(),
+  }))
+  await waitFor(() => expect(hook.result.current.overview.data?.blockers).toEqual(['Legacy recovery required.']))
+  await act(async () => {
+    if (recovery === 'resolve') await hook.result.current.resolve.mutateAsync({ planId: 7, symbol: 'SPY' })
+    else if (recovery === 'history') await hook.result.current.history.mutateAsync({ reviewToken: 'synthetic-review', selectedPlanIds: [7], attributionPlanIds: [], confirm: 'APPLY_HISTORY_REPAIR' })
+    else if (recovery === 'disable-v1') await hook.result.current.disableV1.mutateAsync()
+    else await hook.result.current.disableV2.mutateAsync({ mode: 'disabled', confirm: 'disabled' })
+  })
+  await waitFor(() => expect(hook.result.current.overview.data?.blockers).toEqual([]))
+  expect(overviewFetch).toHaveBeenCalledTimes(2)
 })

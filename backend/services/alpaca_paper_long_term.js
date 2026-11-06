@@ -4,6 +4,7 @@ const { createLongTermInvesting } = require('./alpaca_long_term_investing');
 const store = require('./alpaca_paper_long_term_store');
 const { createPaperClient, getPaperConfiguration, reconcilePaperOrderAudits } = require('./alpaca_paper_service');
 const handover = require('./alpaca_paper_handover');
+const {reconcileLegacyV1Plans} = require('./alpaca_paper_legacy_reconciliation');
 const db = require('../database/db');
 const v1 = require('./alpaca_day_trade_store');
 const v2 = require('./alpaca_day_trade_v2_store');
@@ -80,10 +81,16 @@ function createPaperLongTermInvesting(options = {}) {
     service.savePolicy = async (...args) => { if (args[0]?.paused === false) await requireTransition(); return savePolicy(...args); };
     const adopt = service.adopt;
     service.adopt = async (...args) => { await requireTransition(); return adopt(...args); };
-    service.legacyReconcile = async () => {
-        const client=clientFactory(),state=await paperStore.settings(),account=await client.getAccount();
+    const reconcileLegacyAudits = async client => {
+        const state=await paperStore.settings(),account=await client.getAccount();
         if (!account?.id || (env.ALPACA_PAPER_ACCOUNT_ID && account.id!==env.ALPACA_PAPER_ACCOUNT_ID) || (state.accountKey && state.accountKey!==paperStore.hash(account.id))) throw fail('PAPER_ACCOUNT_MISMATCH','The paper account must match its configured or previously bound account before reconciling history.');
         return reconcilePaperOrderAudits({client,auditStore:options.auditStore || db});
+    };
+    service.legacyReconcile = async () => {
+        const client=clientFactory();
+        const auditResult=await reconcileLegacyAudits(client);
+        const plans=await (options.reconcileLegacyPlans || reconcileLegacyV1Plans)({client,env,now});
+        return {...auditResult,plans};
     };
     service.legacyHandover = async input => {
         if (typeof input?.symbol !== 'string' || !/^[A-Z][A-Z0-9.\-]{0,9}$/.test(input.symbol) || typeof input.qty !== 'number' || !Number.isFinite(input.qty) || input.qty <= 0
@@ -92,7 +99,7 @@ function createPaperLongTermInvesting(options = {}) {
         }
         const state = await paperStore.settings();
         if (!state.policy.paused) throw fail('PAPER_HANDOVER_BLOCKED','Pause long-term paper investing before transferring legacy holdings.');
-        await service.legacyReconcile();
+        await reconcileLegacyAudits(clientFactory());
         const readStarted = now().getTime();
         const client = clientFactory();
         const [account,positions,openOrders,asset,plans] = await Promise.all([client.getAccount(),client.getPositions(),client.getOrders(),client.getAsset(input.symbol),handover.getEvidence(input.symbol)]);

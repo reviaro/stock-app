@@ -75,7 +75,10 @@ export function useDisableLegacyAlpacaMonitor() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: () => post<{ disabled: true; alreadyDisabled: boolean; mode: 'disabled' }>('/history/disable-legacy', { confirm: 'DISABLE_LEGACY' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['alpaca-dt-v2'] }),
+    onSuccess: () => Promise.all([
+      qc.invalidateQueries({ queryKey: ['alpaca-dt-v2'] }),
+      qc.invalidateQueries({ queryKey: ['alpaca-paper', 'long-term'] }),
+    ]),
   })
 }
 
@@ -83,10 +86,11 @@ export function useApplyAlpacaHistory() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (input: AlpacaHistoryApplyInput) => post<AlpacaHistoryApplyResult>('/history/apply', input),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ['alpaca-dt-v2'] })
-      void qc.invalidateQueries({ queryKey: ['alpaca-day-trading'] })
-    },
+    onSuccess: () => Promise.all([
+      qc.invalidateQueries({ queryKey: ['alpaca-dt-v2'] }),
+      qc.invalidateQueries({ queryKey: ['alpaca-day-trading'] }),
+      qc.invalidateQueries({ queryKey: ['alpaca-paper', 'long-term'] }),
+    ]),
   })
 }
 
@@ -95,7 +99,10 @@ export function useSetV2Mode() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ mode, confirm }: { mode: AlpacaV2Mode; confirm: string | true }) => post<{ mode: AlpacaV2Mode }>('/mode', { mode, confirm }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['alpaca-dt-v2'] }),
+    onSuccess: () => Promise.all([
+      qc.invalidateQueries({ queryKey: ['alpaca-dt-v2'] }),
+      qc.invalidateQueries({ queryKey: ['alpaca-paper', 'long-term'] }),
+    ]),
   })
 }
 
@@ -111,6 +118,9 @@ export function useResolveV2Plan() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ planId, symbol }: { planId: number; symbol: string }) => post<{ plan: AlpacaV2Plan }>(`/plans/${planId}/resolve`, { confirm: symbol }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['alpaca-dt-v2'] }),
+    onSuccess: () => Promise.all([
+      qc.invalidateQueries({ queryKey: ['alpaca-dt-v2'] }),
+      qc.invalidateQueries({ queryKey: ['alpaca-paper', 'long-term'] }),
+    ]),
   })
 }

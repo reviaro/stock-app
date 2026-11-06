@@ -417,8 +417,11 @@ raw paper orders are refused. The monitor only reconciles retained history and
 cannot create automatic exits. Existing broker bracket orders remain at Alpaca;
 review their orders and positions there. The paper archive keeps monitor-disable,
 history and recovery controls available. Unresolved legacy records block long-term
-execution. Use **Reconcile legacy paper orders** to refresh old raw-order records
-without enabling submissions. Settled day-trading holdings can be kept through
+execution. Use **Reconcile legacy paper orders & plans** to refresh old order records
+and resolve stale v1 plans after the broker confirms their symbol has no position
+or working order. Recovery preserves fills and records an audit event without
+inferring realized results. It cannot sell holdings or enable submissions.
+Settled day-trading holdings can be kept through
 **Transfer settled legacy holdings**: retire both monitor modes, pause paper
 investing, settle all broker orders, give a reason and confirm the exact quantity
 (for example, `TRANSFER AAPL 2 PAPER`). The server checks broker orders and legacy
