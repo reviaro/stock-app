@@ -9,6 +9,21 @@ import type { InvestingOverview } from './LongTermInvestingWorkspace'
 import { useRetirePaperDayTrading, useTransferLegacyPaperHolding, useReconcileLegacyPaperOrders } from '@/hooks/useAlpacaPaperInvesting'
 import { v2ErrorMessage } from '@/lib/alpacaV2Errors'
 
+const PLAN_RECOVERY_MESSAGES: Record<string, string> = {
+  LEGACY_PAUSE_REQUIRED: 'Pause new long-term paper orders before reconciling legacy plans.',
+  LEGACY_MONITORS_ENABLED: 'Retire both day-trading monitors below before reconciling plans.',
+  LEGACY_SUBMISSION_PENDING: 'A legacy submission is unresolved. Verify its outcome before retrying.',
+  LEGACY_ACCOUNT_MISMATCH: 'The broker account does not match the configured paper account. Review the server configuration.',
+  LEGACY_BROKER_UNAVAILABLE: 'The broker is unavailable. Retry reconciliation when the connection recovers.',
+  LEGACY_BROKER_DATA_INVALID: 'Broker account evidence could not be verified. Refresh before retrying.',
+  LEGACY_ORDERS_OPEN: 'Working broker orders remain. Let them settle or review their cancellation at Alpaca.',
+  LEGACY_HISTORY_UNVERIFIED: 'Complete broker order history is required to resolve this plan.',
+  LEGACY_POSITION_OPEN: 'A broker position is still open. Review it at Alpaca or use the holdings transfer below.',
+  LEGACY_ORDER_UNVERIFIED: 'A legacy order could not be verified. Reconcile its broker evidence before retrying.',
+  LEGACY_STATE_CHANGED: 'The legacy plan changed during reconciliation. Refresh and try again.',
+  LEGACY_EVIDENCE_STALE: 'Broker evidence expired during reconciliation. Refresh and try again.',
+}
+
 function LegacyHoldingTransfer({ overview }: { overview?: InvestingOverview }) {
   const transfer = useTransferLegacyPaperHolding()
   const [symbol, setSymbol] = useState('')
@@ -52,13 +67,22 @@ function LegacyRecovery({ overview }: { overview?: InvestingOverview }) {
       </li>)}
     </ul>}
     <div className="space-y-2 text-sm">
-      <p className="text-muted-foreground">Refresh retained order records after fills or cancellations at Alpaca. Reconciliation does not submit or cancel broker orders.</p>
-      <Button variant="outline" disabled={reconcile.isPending} onClick={() => reconcile.mutate()}>{reconcile.isPending ? 'Reconciling legacy orders…' : 'Reconcile legacy paper orders'}</Button>
+      <p className="text-muted-foreground">Refresh retained orders and reconcile legacy v1 plans whose broker orders are settled and positions are flat. Plans stay blocked when broker status cannot be verified. Reconciliation does not submit or cancel broker orders.</p>
+      <Button variant="outline" className="h-auto min-h-9 whitespace-normal text-left" disabled={reconcile.isPending} onClick={() => reconcile.mutate()}>{reconcile.isPending ? 'Reconciling legacy orders & plans…' : 'Reconcile legacy paper orders & plans'}</Button>
       {reconcile.error && <p role="alert" className="text-destructive">{reconcile.error.message}</p>}
       {reconcile.data && <p role={reconcile.data.failures ? 'alert' : 'status'}>
         Checked {reconcile.data.checked} orders; updated {reconcile.data.updated}, unchanged {reconcile.data.unchanged}.
         {reconcile.data.failures > 0 && ` ${reconcile.data.failures} could not be verified. Reconciliation is still required.`}
       </p>}
+      {reconcile.data?.plans && <div role={reconcile.data.plans.blocked ? 'alert' : 'status'} aria-label="Legacy plan reconciliation" className="space-y-2">
+        <p>Checked {reconcile.data.plans.checked} legacy v1 plans; reconciled {reconcile.data.plans.reconciled} ({reconcile.data.plans.closed} closed, {reconcile.data.plans.cancelled} canceled); {reconcile.data.plans.blocked} still blocked.</p>
+        {reconcile.data.plans.skipped > 0 && <p>Transferred plans retained as history: {reconcile.data.plans.skipped}.</p>}
+        {reconcile.data.plans.blockers.length > 0 && <ul className="list-disc space-y-1 pl-5">
+          {reconcile.data.plans.blockers.map((blocker, index) => <li key={`${blocker.planId}-${index}`}>
+            {blocker.symbol} · v1 plan #{blocker.planId}: {PLAN_RECOVERY_MESSAGES[blocker.code] ?? 'Review this legacy plan before retrying reconciliation.'}
+          </li>)}
+        </ul>}
+      </div>}
     </div>
     {status.isLoading && <p role="status" className="text-sm">Loading retired monitor status…</p>}
     {status.isError && <p role="alert" className="text-sm text-destructive">Unable to load retired monitor status.</p>}

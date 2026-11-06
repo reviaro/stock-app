@@ -59,10 +59,26 @@ export function useTransferLegacyPaperHolding() {
   })
 }
 
+export interface LegacyPaperReconciliation {
+  checked: number
+  updated: number
+  unchanged: number
+  failures: number
+  plans?: {
+    checked: number
+    reconciled: number
+    closed: number
+    cancelled: number
+    blocked: number
+    skipped: number
+    blockers: { planId: number; symbol: string; code: string; message?: string }[]
+  }
+}
+
 export function useReconcileLegacyPaperOrders() {
   const cache = useQueryClient()
   return useMutation({
-    mutationFn: () => paperInvestingRequest<{ checked: number; updated: number; unchanged: number; failures: number }>('/legacy-reconcile', {}),
+    mutationFn: () => paperInvestingRequest<LegacyPaperReconciliation>('/legacy-reconcile', {}),
     onSuccess: () => Promise.all([
       cache.invalidateQueries({ queryKey: ['alpaca-paper'] }),
       cache.invalidateQueries({ queryKey: ['alpaca-dt-v2'] }),

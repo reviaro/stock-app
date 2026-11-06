@@ -1,9 +1,10 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, expect, test, vi } from 'vitest'
 import { LegacyPaperArchive } from './LegacyPaperArchive'
+import type { LegacyPaperReconciliation } from '@/hooks/useAlpacaPaperInvesting'
 
 const { disable, status, retire, transfer, reconcile } = vi.hoisted(() => ({
-  reconcile: { mutate: vi.fn(), isPending: false, error: null, data: undefined as { checked: number; updated: number; unchanged: number; failures: number } | undefined },
+  reconcile: { mutate: vi.fn(), isPending: false, error: null, data: undefined as LegacyPaperReconciliation | undefined },
   transfer: { mutate: vi.fn(), reset: vi.fn(), isPending: false, isSuccess: false, error: null },
   retire: { mutate: vi.fn(), isPending: false, isSuccess: false, error: null },
   disable: { mutate: vi.fn(), isPending: false, isError: false, isSuccess: false, error: null },
@@ -57,11 +58,41 @@ test('transfers only the displayed broker quantity with exact confirmation and a
 test('reconciles retained legacy orders and reports incomplete broker evidence without an order confirmation', () => {
   const { rerender } = render(<LegacyPaperArchive />)
   fireEvent.click(screen.getByRole('button', { name: 'Show legacy paper history & recovery' }))
-  fireEvent.click(screen.getByRole('button', { name: 'Reconcile legacy paper orders' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Reconcile legacy paper orders & plans' }))
   expect(reconcile.mutate).toHaveBeenCalledWith()
   expect(transfer.mutate).not.toHaveBeenCalled()
   reconcile.data = { checked: 3, updated: 1, unchanged: 1, failures: 1 }
   rerender(<LegacyPaperArchive />)
   expect(screen.getByRole('alert')).toHaveTextContent('Checked 3 orders; updated 1, unchanged 1.')
   expect(screen.getByRole('alert')).toHaveTextContent('1 could not be verified. Reconciliation is still required.')
+})
+
+test('distinguishes reconciled v1 plans from unchanged order audits and retained transfer history', () => {
+  reconcile.data = {
+    checked: 0, updated: 0, unchanged: 0, failures: 0,
+    plans: { checked: 2, reconciled: 2, closed: 1, cancelled: 1, blocked: 0, skipped: 1, blockers: [] },
+  }
+  render(<LegacyPaperArchive />)
+  fireEvent.click(screen.getByRole('button', { name: 'Show legacy paper history & recovery' }))
+  const result = screen.getByRole('status', { name: 'Legacy plan reconciliation' })
+  expect(result).toHaveTextContent('Checked 2 legacy v1 plans; reconciled 2 (1 closed, 1 canceled); 0 still blocked.')
+  expect(result).toHaveTextContent('Transferred plans retained as history: 1.')
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+})
+
+test('shows actionable blocked-plan reasons without exposing arbitrary broker response text', () => {
+  reconcile.data = {
+    checked: 2, updated: 2, unchanged: 0, failures: 0,
+    plans: { checked: 3, reconciled: 1, closed: 1, cancelled: 0, blocked: 2, skipped: 0, blockers: [
+      { planId: 7, symbol: 'SPY', code: 'LEGACY_POSITION_OPEN', message: 'broker-private-marker' },
+      { planId: 8, symbol: 'AAPL', code: 'UNRECOGNIZED_CODE', message: 'broker-private-marker' },
+    ] },
+  }
+  render(<LegacyPaperArchive />)
+  fireEvent.click(screen.getByRole('button', { name: 'Show legacy paper history & recovery' }))
+  const result = screen.getByRole('alert', { name: 'Legacy plan reconciliation' })
+  expect(result).toHaveTextContent('2 still blocked.')
+  expect(result).toHaveTextContent('SPY · v1 plan #7: A broker position is still open.')
+  expect(result).toHaveTextContent('AAPL · v1 plan #8: Review this legacy plan before retrying reconciliation.')
+  expect(screen.queryByText(/broker-private-marker/)).not.toBeInTheDocument()
 })
