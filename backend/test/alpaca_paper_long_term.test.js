@@ -25,10 +25,11 @@ async function fixture() {
         submit:async order=>{state.submitted.push(order);if(state.unknown)throw Error('synthetic unavailable');const result={...order,id:'synthetic-order-'+state.submitted.length,status:'new',filled_qty:'0',filled_avg_price:null};state.orders.set(order.client_order_id,result);return result;},
         cancel:async id=>{for(const order of state.orders.values())if(order.id===id)order.status='canceled';},
     };
-    const service=createPaperLongTermInvesting({store,env,clientFactory:()=>client,legacyGuard:async()=>state.legacy});
+    const getFreshResearchPacket=async symbol=>({symbol,id:'fresh-test-evidence',contentHash:'a'.repeat(64),generatedAt:new Date().toISOString(),accountScope:'research_only',eligibleForDecision:true,provenance:{news:{available:true}},data:{info:{price:100},news:[]},...state.research});
+    const service=createPaperLongTermInvesting({store,env,getFreshResearchPacket,clientFactory:()=>client,legacyGuard:async()=>state.legacy});
     const policy={...baseStore.DEFAULT_POLICY,budget:10000,paused:false,targets:[{symbol:'AAPL',weightPct:20}]};
     await service.savePolicy(policy,0,'ENABLE PAPER INVESTING');
-    return {store,env,account,state,client,service,policy};
+    return {store,env,account,state,client,service,policy,getFreshResearchPacket};
 }
 const confirmation=plan=>({confirmation:`${plan.nextOrder.side.toUpperCase()} ${plan.nextOrder.symbol} PAPER`});
 
@@ -123,4 +124,21 @@ test('paper research evidence cannot collide with live decisions and automatic m
     assert.ok(result.order);assert.equal(f.state.submitted.length,1);
     await f.service.decision({...input,policyVersion:2,decisionKey:'automatic-paper-decision'});assert.equal(f.state.submitted.length,1);
     await assert.rejects(f.service.decision({...input,account_id:2}),{code:'PAPER_INVALID_DECISION'});
+});
+
+test('paper automatic refusals report blockers instead of asking the operator to approve',async()=>{
+    const f=await fixture();const research=require('../services/research_store');
+    await f.service.savePolicy({...f.policy,executionMode:'automatic',targets:[...f.policy.targets,{symbol:'FXAIX',weightPct:10}]},1,'ENABLE AUTOMATIC PAPER INVESTING');
+    const packet=await research.savePacket({symbol:'AAPL',generatedAt:new Date().toISOString(),accountScope:'research_only',eligibleForDecision:true,data:{info:{price:100}}});
+    const analysis={packetId:packet.id,contentHash:packet.contentHash,strategyVersion:'paper-refusal-v1',analyzedAt:new Date().toISOString(),model:'synthetic-model',
+        claims:[{path:'data.info.price',value:100}],assumptions:['Synthetic allocation remains valid'],alternatives:['Wait and retain cash'],invalidation:'The thesis fails the next review.'};
+    const seen=[];
+    const getAsset=f.client.getAsset;
+    f.client.getAsset=async symbol=>{seen.push(symbol);if(symbol==='FXAIX')throw Object.assign(Error('not found'),{brokerStatus:404});return getAsset(symbol);};
+    f.client.getLatestQuote=async symbol=>({symbol,quote:{bp:100,ap:102,bs:100,as:100,t:new Date().toISOString()}});
+    const result=await f.service.decision({account_id:1,policyVersion:2,decisionKey:'paper-spread-refusal',symbol:'AAPL',side:'buy',reason:'Synthetic paper allocation review.',analysis});
+    assert.equal(result.status,'blocked');assert.equal(result.awaitingConfirmation,false);
+    assert.ok(result.blockers.some(b=>b.startsWith('AAPL:')));assert.deepEqual(seen,['AAPL']);assert.equal(f.state.submitted.length,0);
+    const saved=(await f.service.overview()).decisions.find(d=>d.decision_key==='paper-spread-refusal');
+    assert.equal(saved.status,'blocked');assert.deepEqual(saved.blockers,result.blockers);
 });

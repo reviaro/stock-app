@@ -92,6 +92,49 @@ describe('Long-Term Live workspace', () => {
     expect(hooks.preview.mutate).toHaveBeenCalledWith({ decisionKey: 'synthetic-decision' })
     expect(hooks.execute.mutate).not.toHaveBeenCalled()
   })
+  it('shows automatic spread refusals as blocked without asking for approval', () => {
+    hooks.overview.data = { ...baseline(), connected: true, policy: { ...baseline().policy, executionMode: 'automatic' },
+      decisions: [{ decision_key: 'blocked-adbe', symbol: 'ADBE', side: 'buy', reason: 'A long-term investment thesis.', created_at: new Date().toISOString(),
+        status: 'blocked', blockers: ['ADBE: spread exceeds the approved limit.'] }] }
+    render(<AlpacaLivePage />)
+    expect(screen.getByText('Blocked')).toBeVisible()
+    expect(screen.getByText('ADBE: spread exceeds the approved limit.')).toBeVisible()
+    expect(screen.queryByText('Awaiting approval')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Check current blockers' }))
+    expect(hooks.preview.mutate).toHaveBeenCalledWith({ decisionKey: 'blocked-adbe' })
+    expect(hooks.execute.mutate).not.toHaveBeenCalled()
+  })
+  it('shows a policy mismatch as needing fresh analysis and disables stale review', () => {
+    hooks.overview.data = { ...baseline(), connected: true, decisions: [{ decision_key: 'stale-policy', symbol: 'ADBE', side: 'buy', reason: 'An older recommendation.',
+      created_at: new Date().toISOString(), status: 'needs_reanalysis', blockers: ['This decision used policy 1; the current policy is 2.'] }] }
+    render(<AlpacaLivePage />)
+    expect(screen.getByText('Needs fresh analysis')).toBeVisible()
+    expect(screen.getByText('This decision used policy 1; the current policy is 2.')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Review current order' })).toBeDisabled()
+  })
+  it('allows approval of a current recommendation after its quote preview expires', () => {
+    hooks.overview.data = { ...baseline(), connected: true }
+    Object.assign(hooks.preview, { data: { id: 'reviewed-plan', decisionKey: 'recommendation', expiresAt: new Date(Date.now() - 3600000).toISOString(),
+      reviewExpiresAt: new Date(Date.now() + 3600000).toISOString(), blockers: [], rows: [], managedValue: 0, spendableCash: 1000, unmanagedValue: 0,
+      nextOrder: { side: 'buy', symbol: 'ADBE', qty: 1, limitPrice: 250, notional: 250 } } })
+    render(<AlpacaLivePage />)
+    expect(screen.getByText(/Approval will refresh the checks/)).toBeVisible()
+    const submit = screen.getByRole('button', { name: 'Approve & submit live order' })
+    expect(submit).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Type BUY ADBE LIVE'), { target: { value: 'BUY ADBE LIVE' } })
+    expect(submit).toBeEnabled()
+    fireEvent.click(submit)
+    expect(hooks.execute.mutate).toHaveBeenCalledWith({ planId: 'reviewed-plan', confirmation: 'BUY ADBE LIVE' })
+  })
+  it('keeps approval disabled after the recommendation review deadline', () => {
+    hooks.overview.data = { ...baseline(), connected: true }
+    Object.assign(hooks.preview, { data: { id: 'expired-recommendation', decisionKey: 'old-recommendation', expiresAt: new Date(Date.now() - 3600000).toISOString(),
+      reviewExpiresAt: new Date(Date.now() - 1000).toISOString(), blockers: [], rows: [], managedValue: 0, spendableCash: 1000, unmanagedValue: 0,
+      nextOrder: { side: 'buy', symbol: 'ADBE', qty: 1, limitPrice: 250, notional: 250 } } })
+    render(<AlpacaLivePage />)
+    fireEvent.change(screen.getByLabelText('Type BUY ADBE LIVE'), { target: { value: 'BUY ADBE LIVE' } })
+    expect(screen.getByRole('button', { name: 'Approve & submit live order' })).toBeDisabled()
+  })
   it('blocks policy and order authority after verification expires while retaining immediate pause', () => {
     hooks.security.data = { authenticated: true, mfaConfigured: true, recentMfa: false, recentAuthUntil: new Date(Date.now() - 1).toISOString() }
     hooks.overview.data = { ...baseline(), policy: { ...baseline().policy, paused: false } }

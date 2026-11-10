@@ -29,7 +29,7 @@ export function useAlpacaLive() {
   }, retry: false, staleTime: 0, refetchOnWindowFocus: true })
   const policy = useMutation({ mutationFn: (body: { policy: LivePolicy; expectedVersion: number; confirmation: string }) => liveRequest('/policy', body, 'PUT'), onSuccess: refresh })
   const pause = useMutation({ mutationFn: (expectedVersion: number) => liveRequest('/pause', { expectedVersion }), onSettled: refresh })
-  const preview = useMutation({ mutationFn: (body: { decisionKey?: string }) => liveRequest<LivePlan>('/preview', body) })
+  const preview = useMutation({ mutationFn: (body: { decisionKey?: string }) => liveRequest<LivePlan>('/preview', body), onSettled: refresh })
   const execute = useMutation({ mutationFn: (body: { planId: string; confirmation: string }) => liveRequest<{ order: LiveOrder }>('/execute', body), onSettled: refresh })
   const cancel = useMutation({ mutationFn: (id: string) => liveRequest('/orders/' + encodeURIComponent(id) + '/cancel', {}), onSettled: refresh })
   const draft = useMutation({ mutationFn: () => liveRequest<SimulatorAllocationDraft>('/simulator-draft') })

@@ -114,3 +114,17 @@ test('ceilToTick rounds up to Alpaca tick precision: two decimals at/above $1, f
     assert.strictEqual(ceilToTick(172.671), 172.68);
     assert.strictEqual(ceilToTick(0.67891), 0.679);
 });
+
+test('a quote published during the request is validated against the clock after receipt', async () => {
+    let instant=Date.parse('2026-09-17T13:29:59.500Z');
+    const client={getLatestQuote:async()=>{instant+=1000;return rawQuote();}};
+    const result=await getProvenQuote({client,symbol:'NVDA',now:()=>new Date(instant)});
+    assert.strictEqual(result.sourceTimestamp,'2026-09-17T13:30:00.000Z');
+    assert.strictEqual(result.retrievedAt,'2026-09-17T13:30:00.500Z');
+});
+
+test('reading the clock after receipt still rejects stale and future-dated quotes', async () => {
+    for(const [instant,code] of [['2026-09-17T13:29:59.999Z','ALPACA_QUOTE_FUTURE'],['2026-09-17T13:30:10.001Z','ALPACA_QUOTE_STALE']]) {
+        await assert.rejects(getProvenQuote({client:{getLatestQuote:async()=>rawQuote()},symbol:'NVDA',now:()=>new Date(instant)}),{code});
+    }
+});

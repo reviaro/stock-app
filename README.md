@@ -523,11 +523,33 @@ Send that JSON to `POST /api/alpaca-live/decisions`. Use the actual current
 policy version and a unique key for each distinct decision. Shares and limit
 prices are calculated by the server from approved allocation drift, fresh
 Alpaca IEX bid/ask evidence and cash limits; agents cannot supply them. In
-confirmation mode, review the decision in the UI and confirm a fresh preview.
+confirmation mode, review the recommendation and its order price/size limits.
+Saved recommendations remain reviewable for 24 hours from the earlier of the
+packet and analysis timestamps. Approval rebuilds the 60-second execution preview
+with current account state, quotes and sizing. It cannot increase the reviewed
+quantity or value, pay a higher buy limit, or accept a lower sell limit; those
+changes require another review. Manual allocation previews without an agent
+recommendation still expire after 60 seconds.
 In automatic mode, an eligible decision may submit one DAY limit order
 immediately. This mode responds to agent requests and does not run a timer.
 Read the overview to reconcile and wait for a terminal order state before the
 next decision. Accepted and partially filled orders are not completed trades.
+`DAY` controls how long the unfilled order remains active, not the holding period.
+There are no scheduled intraday exits in this workflow.
+
+Decision responses report `status: blocked` and `awaitingConfirmation: false`
+when execution checks fail, including in automatic mode. `awaiting_confirmation`
+is reserved for an eligible decision under confirmation mode. The overview retains
+blocker reasons and the check time, distinguishes submitted, partially filled and
+filled orders, and identifies expired recommendations and policy changes that
+require fresh agent analysis. A selected decision checks its symbol and every
+managed holding; an unrelated, unheld target cannot block it. The full allocation
+preview still checks all targets so unsupported imports remain visible.
+
+Automatic mode does not retry blocked decisions on a timer. Read the overview
+before retrying the same unchanged decision key; a revised policy or thesis needs
+a new decision key and current research. Never retry an uncertain broker outcome
+as a new decision.
 
 Implementation references: [Alpaca orders](https://docs.alpaca.markets/us/docs/orders-at-alpaca),
 [fractional trading](https://docs.alpaca.markets/docs/fractional-trading), and
@@ -585,11 +607,18 @@ attestation `I VERIFIED THIS ISSUER DISCLOSURE`. Verification is operator-attest
 not independently authenticated by the server. Disclosures expire after 90 days;
 undisclosed holdings remain unknown in look-through exposure analysis.
 
-Agent live requests require an eligible saved research packet and analysis within
-30 minutes. Claims must match typed fields in that packet. Assumptions, alternatives,
+New agent paper/live requests require an eligible saved research packet and analysis
+within 30 minutes. Once saved, a recommendation can be reviewed for 24 hours;
+its immutable evidence does not expire at the short execution-quote deadline.
+Claims must match typed fields in that packet. Assumptions, alternatives,
 invalidation, strategy version and agent-reported model identity are retained
-privately and linked to reconciled order/fill outcomes. Confirmation rechecks the
-research evidence. This supplements the independent broker execution guards;
+privately and linked to reconciled order/fill outcomes. Before execution, Oakline
+fetches a current research packet and checks eligibility, news, filings and thesis
+evidence against the original analysis. New headlines/filings or changed fundamental
+evidence require new agent analysis; the execution path does not judge materiality.
+Unavailable event coverage blocks execution. Refreshed evidence is linked in the
+decision audit. Policy changes also require new analysis. These checks supplement
+the independent broker execution guards;
 it does not establish that the investment thesis is correct.
 
 The Strategy Research Lab includes prospective agent evaluations. Freeze the model,

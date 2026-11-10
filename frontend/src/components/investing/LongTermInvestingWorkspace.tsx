@@ -2,11 +2,16 @@ import { useEffect, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import type { useAlpacaLive } from '@/hooks/useAlpacaLive'
-import type { LiveOverview, LivePolicy } from '@/types/alpacaLive'
+import type { InvestmentDecisionStatus, LiveOverview, LivePolicy } from '@/types/alpacaLive'
 
 const money = (n?: number) => n == null ? 'Unavailable' : n.toLocaleString('en-US', { style: 'currency', currency: 'USD' })
 const inputClass = 'mt-1 w-full min-w-0 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary'
 const terminal = new Set(['filled', 'canceled', 'expired', 'rejected'])
+const decisionLabels: Record<InvestmentDecisionStatus, string> = {
+  needs_review: 'Needs review', needs_reanalysis: 'Needs fresh analysis', blocked: 'Blocked', ready: 'Ready for agent submission',
+  awaiting_confirmation: 'Awaiting approval', submitted: 'Submitted', partially_filled: 'Partially filled', filled: 'Filled',
+  canceled: 'Canceled', expired: 'Expired', rejected: 'Rejected', unknown: 'Outcome uncertain — reconcile',
+}
 type Environment = 'live' | 'paper'
 export type InvestingOverview = Omit<LiveOverview, 'configuration'> & {
   configuration: Omit<LiveOverview['configuration'], 'environment'> & { environment: Environment }
@@ -113,8 +118,12 @@ export function LongTermInvestingWorkspace({ hooks, environment, verified, verif
   const [confirmation, setConfirmation] = useState('')
   const plan = hooks.preview.data
   const [expired, setExpired] = useState(true)
+  const [reviewExpired, setReviewExpired] = useState(true)
   useEffect(() => {
-    const tick = () => setExpired(!plan || Date.parse(plan.expiresAt) <= Date.now())
+    const tick = () => {
+      setExpired(!plan || Date.parse(plan.expiresAt) <= Date.now())
+      setReviewExpired(!plan?.reviewExpiresAt || !(Date.parse(plan.reviewExpiresAt) > Date.now()))
+    }
     tick()
     if (!plan) return
     const timer = setInterval(tick, 1000)
@@ -153,22 +162,40 @@ export function LongTermInvestingWorkspace({ hooks, environment, verified, verif
         <section aria-labelledby={`${environment}-decisions-heading`} className="space-y-3">
           <h2 id={`${environment}-decisions-heading`} className="text-lg font-semibold">Investment agent decisions</h2>
           {!data.decisions.length && <p className="text-sm text-muted-foreground">No {environment} decisions yet. Your investment agent uses a dedicated {environment}-investing credential. Its requests need a saved research packet, strategy version, dated analysis and matched factual claims, and follow the saved allocation limits and execution mode.</p>}
+          <p className="text-sm text-muted-foreground">Recommendations stay reviewable for 24 hours from their research evidence. Approval refreshes research, prices, account state and sizing within the reviewed limits. New events or a policy change require fresh agent analysis.</p>
+          {data.policy.executionMode === 'automatic' && <p className="text-sm text-muted-foreground">Automatic decisions submit when their checks pass. Blocked decisions show the last refusal below; they do not wait for your approval or retry on a timer.</p>}
           {data.decisions.slice(0, 20).map(d => {
-            const submitted = data.orders.some(o => o.decisionKey === d.decision_key)
-            return <article key={d.decision_key} className="rounded-lg border border-border bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-3"><strong>{d.side.toUpperCase()} {d.symbol}</strong><span className="text-xs text-muted-foreground">{submitted ? 'Order recorded' : 'Awaiting review / readiness'}</span></div><p className="mt-2 whitespace-pre-wrap break-words text-sm text-muted-foreground">{d.reason}</p>{d.analysis && <details className="mt-2 text-xs text-muted-foreground"><summary className="cursor-pointer">Research reviewed {new Date(d.analysis.analyzedAt).toLocaleString()}</summary><p className="mt-2">Strategy: {d.analysis.strategyVersion} · Model reported by agent: {d.analysis.model}</p><p className="mt-1 whitespace-pre-wrap break-words">Invalidation: {d.analysis.invalidation}</p></details>}<Button className="mt-3" variant="outline" disabled={submitted || hooks.preview.isPending || !data.connected} onClick={() => preview(d.decision_key)}>Review current order</Button></article>
+            const order = data.orders.find(o => o.decisionKey === d.decision_key)
+            const status = d.status ?? (order ? order.status === 'filled' ? 'filled' : 'submitted' : 'needs_review')
+            const needsAnalysis = status === 'needs_reanalysis' || (status === 'expired' && !order)
+            return <article key={d.decision_key} className="rounded-lg border border-border bg-card p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3"><strong>{d.side.toUpperCase()} {d.symbol}</strong><span className="text-xs text-muted-foreground">{decisionLabels[status]}</span></div>
+              <p className="mt-2 whitespace-pre-wrap break-words text-sm text-muted-foreground">{d.reason}</p>
+              {!!d.blockers?.length && <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-amber-700 dark:text-amber-300">{d.blockers.map(b => <li key={b}>{b}</li>)}</ul>}
+              {d.expiresAt && !order && <p className="mt-2 text-xs text-muted-foreground">Recommendation review deadline: {new Date(d.expiresAt).toLocaleString()}</p>}
+              {d.checkedAt && <p className="mt-1 text-xs text-muted-foreground">Last execution check: {new Date(d.checkedAt).toLocaleString()}</p>}
+              {d.analysis && <details className="mt-2 text-xs text-muted-foreground"><summary className="cursor-pointer">Research reviewed {new Date(d.analysis.analyzedAt).toLocaleString()}</summary>
+                <p className="mt-2">Strategy: {d.analysis.strategyVersion} · Model reported by agent: {d.analysis.model}</p>
+                {d.analysis.assumptions?.map((a, i) => <p key={i} className="mt-1 whitespace-pre-wrap break-words">Assumption: {a}</p>)}
+                {d.analysis.alternatives?.map((a, i) => <p key={i} className="mt-1 whitespace-pre-wrap break-words">Alternative: {a}</p>)}
+                <p className="mt-1 whitespace-pre-wrap break-words">Invalidation: {d.analysis.invalidation}</p>
+              </details>}
+              <Button className="mt-3" variant="outline" disabled={!!order || needsAnalysis || hooks.preview.isPending || !data.connected} onClick={() => preview(d.decision_key)}>{data.policy.executionMode === 'automatic' ? 'Check current blockers' : 'Review current order'}</Button>
+            </article>
           })}
         </section>
         <section aria-labelledby={`${environment}-preview-heading`} className="rounded-xl border border-border bg-card p-4 sm:p-6">
           <div className="flex flex-wrap items-center justify-between gap-3"><h2 id={`${environment}-preview-heading`} className="text-lg font-semibold">Allocation drift & next order</h2><Button variant="outline" disabled={!data.connected || hooks.preview.isPending} onClick={() => preview()}>{hooks.preview.isPending ? 'Checking broker evidence…' : 'Build fresh preview'}</Button></div>
-          <p className="mt-2 text-sm text-muted-foreground">One order at a time, with sells before buys. Each preview lasts 60 seconds. IEX quotes are checked for age and spread; actual fills come from Alpaca.</p>
+          <p className="mt-2 text-sm text-muted-foreground">One order at a time, with sells before buys. Execution quotes last 60 seconds; recommendation review lasts 24 hours. Approval refreshes execution checks and requires another review if the price or size exceeds your reviewed limits. DAY is the order’s time in force; holdings remain invested across sessions.</p>
           {hooks.preview.error && <p role="alert" className="mt-3 text-sm text-destructive">{hooks.preview.error.message}</p>}
           {plan && <div className="mt-4 space-y-4">
             <p className="text-sm">Allocation capital {money(plan.allocationCapital)} · App-managed value {money(plan.managedValue)} · Available within limits {money(plan.spendableCash)} · Protected unrelated holdings {money(plan.unmanagedValue)}</p>
             {plan.blockers.length > 0 && <ul role="status" className="list-disc space-y-1 pl-5 text-sm text-amber-700 dark:text-amber-300">{plan.blockers.map(b => <li key={b}>{b}</li>)}</ul>}
             <div className="overflow-x-auto"><table className="w-full text-left text-sm"><caption className="sr-only">Target allocation and proposed adjustments</caption><thead className="border-b border-border text-muted-foreground"><tr>{['Symbol', 'Owned shares', 'Target', 'Adjustment', 'Limit', 'Value'].map(t => <th key={t} className="whitespace-nowrap px-2 py-2 font-medium">{t}</th>)}</tr></thead><tbody>{plan.rows.map(r => <tr key={r.symbol} className="border-b border-border/60"><td className="px-2 py-3 font-medium">{r.symbol}</td><td className="px-2 py-3 tabular-nums">{r.currentQty}</td><td className="px-2 py-3 tabular-nums">{r.targetWeightPct}%</td><td className="whitespace-nowrap px-2 py-3">{r.actionable ? `${r.side.toUpperCase()} ${r.qty}` : 'Within threshold'}</td><td className="px-2 py-3">{money(r.limitPrice)}</td><td className="px-2 py-3">{money(r.notional)}</td></tr>)}</tbody></table></div>
             {!next && <p role="status" className="text-sm text-muted-foreground">No actionable order under the current allocation and thresholds.</p>}
-            {next && <div className="space-y-3 border-t border-border pt-4"><p className="font-medium">Next: {next.side.toUpperCase()} {next.qty} {next.symbol} · DAY limit {money(next.limitPrice)} · up to {money(next.notional)}</p><label className="block max-w-md text-sm">Type {phrase}<input className={inputClass} autoComplete="off" value={confirmation} onChange={e => setConfirmation(e.target.value)} /></label><Button variant="destructive" disabled={!verified || confirmation !== phrase || plan.blockers.length > 0 || expired || hooks.execute.isPending || hooks.execute.isSuccess || Boolean(error)} onClick={() => hooks.execute.mutate({ planId: plan.id, confirmation })}>{hooks.execute.isPending ? 'Submitting once…' : `Submit ${environment} limit order`}</Button></div>}
-            {expired && <p role="status" className="text-sm text-muted-foreground">Preview expired. Build a fresh preview before confirming.</p>}
+            {next && <div className="space-y-3 border-t border-border pt-4"><p className="font-medium">Next: {next.side.toUpperCase()} {next.qty} {next.symbol} · DAY limit {money(next.limitPrice)} · up to {money(next.notional)}</p><label className="block max-w-md text-sm">Type {phrase}<input className={inputClass} autoComplete="off" value={confirmation} onChange={e => setConfirmation(e.target.value)} /></label><Button variant="destructive" disabled={!verified || confirmation !== phrase || plan.blockers.length > 0 || (plan.decisionKey && plan.reviewExpiresAt ? reviewExpired : expired) || hooks.execute.isPending || hooks.execute.isSuccess || Boolean(error)} onClick={() => hooks.execute.mutate({ planId: plan.id, confirmation })}>{hooks.execute.isPending ? 'Checking & submitting once…' : plan.decisionKey ? `Approve & submit ${environment} order` : `Submit ${environment} limit order`}</Button></div>}
+            {next && plan.decisionKey && plan.reviewExpiresAt && <p className="text-sm text-muted-foreground">Approval allows up to {next?.qty} shares, at {next?.side === 'sell' ? 'no less than' : 'no more than'} {money(next?.limitPrice)} per share. Review deadline: {new Date(plan.reviewExpiresAt).toLocaleString()}.</p>}
+            {expired && <p role="status" className="text-sm text-muted-foreground">{plan.decisionKey && plan.reviewExpiresAt ? reviewExpired ? 'Recommendation expired. Ask the strategy agent for new analysis.' : plan.blockers.length ? 'Execution check expired. Check the current blockers again.' : 'Execution quote expired. Approval will refresh the checks within your reviewed price and size limits.' : 'Preview expired. Build a fresh preview before confirming.'}</p>}
           </div>}
           {hooks.execute.error && <p role="alert" className="mt-3 text-sm text-destructive">{hooks.execute.error.message}</p>}
           {hooks.execute.isSuccess && <p role="status" className="mt-3 text-sm">Order recorded. Accepted is not the same as filled; refresh to reconcile before the next trade.</p>}

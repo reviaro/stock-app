@@ -91,10 +91,12 @@ function validateAndAnnotateQuote(response, { requestedSymbol, feed, now = new D
     };
 }
 
-async function getProvenQuote({ client, symbol, feed = 'iex', now = new Date(), maxAgeMs = DEFAULT_MAX_QUOTE_AGE_MS } = {}) {
+async function getProvenQuote({ client, symbol, feed = 'iex', now = () => new Date(), maxAgeMs = DEFAULT_MAX_QUOTE_AGE_MS } = {}) {
     const requestedSymbol = String(symbol || '').trim().toUpperCase();
     const response = await client.getLatestQuote(requestedSymbol, { feed });
-    return validateAndAnnotateQuote(response, { requestedSymbol, feed, now, maxAgeMs });
+    // A quote published during the request is not from the future. Read the
+    // injected clock after receipt; explicit Dates remain useful for pure fixtures.
+    return validateAndAnnotateQuote(response, { requestedSymbol, feed, now: typeof now === 'function' ? now() : now, maxAgeMs });
 }
 
 module.exports = {

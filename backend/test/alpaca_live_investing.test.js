@@ -41,7 +41,8 @@ async function fixture(mode='confirm') {
     };
     const policy={...baseStore.DEFAULT_POLICY,budget:10000,maxOrderValue:500,paused:false,executionMode:mode,targets:[{symbol:'AAPL',weightPct:20}]};
     await store.savePolicy(policy,0,mode==='automatic'?'ENABLE AUTOMATIC LIVE INVESTING':'ENABLE LIVE INVESTING');
-    const service=createLiveInvesting({store,env,clientFactory:()=>client});
+    const getFreshResearchPacket=async symbol=>({symbol,id:'fresh-test-evidence',contentHash:'a'.repeat(64),generatedAt:new Date().toISOString(),accountScope:'research_only',eligibleForDecision:true,provenance:{news:{available:true}},data:{info:{price:100},news:[]},...state.research});
+    const service=createLiveInvesting({store,env,getFreshResearchPacket,clientFactory:()=>client});
     const decision=service.decision,analysisByKey=new Map();
     service.decision=async input=>{
         if(!analysisByKey.has(input.decisionKey)){
@@ -50,7 +51,7 @@ async function fixture(mode='confirm') {
         }
         return decision({...input,analysis:Object.hasOwn(input,'analysis')?input.analysis:analysisByKey.get(input.decisionKey)});
     };
-    return {store,env,account,state,client,policy,service};
+    return {store,env,account,state,client,policy,service,getFreshResearchPacket};
 }
 const confirms=p=>({confirmation:p.nextOrder.side.toUpperCase()+' '+p.nextOrder.symbol+' LIVE'});
 
@@ -372,4 +373,163 @@ test('a database failure after dispatch starts preserves uncertainty and never r
     await f.service.overview();
     assert.equal((await f.store.orders())[0].status,'new');
     assert.equal(f.state.submitted.length,1);
+});
+
+test('a selected automatic investment ignores unavailable unheld targets and reports submission',async()=>{
+    const f=await fixture('automatic');
+    const policy={...f.policy,targets:[...f.policy.targets,{symbol:'BRK-B',weightPct:10},{symbol:'FXAIX',weightPct:10}]};
+    await f.store.savePolicy(policy,1,'ENABLE AUTOMATIC LIVE INVESTING');
+    const assets=[],getAsset=f.client.getAsset;
+    f.client.getAsset=async symbol=>{assets.push(symbol);if(symbol!=='AAPL')throw Object.assign(Error('not found'),{brokerStatus:404});return getAsset(symbol);};
+    const result=await f.service.decision({account_id:1,policyVersion:2,decisionKey:'isolated-target-'+serial,symbol:'AAPL',side:'buy',reason:'Synthetic long-term recommendation within the approved allocation.'});
+    assert.equal(result.status,'submitted');assert.equal(result.awaitingConfirmation,false);
+    assert.equal(f.state.submitted.length,1);assert.ok(assets.every(s=>s==='AAPL'));
+    assert.deepEqual(result.plan.blockers,[]);
+    const view=await f.service.overview();
+    assert.equal(view.decisions.find(d=>d.decision_key===result.order.decisionKey).status,'submitted');
+});
+
+test('a selected investment still refuses its own spread and retains an explicit blocked status',async()=>{
+    for(const mode of ['automatic','confirm']) {
+        const f=await fixture(mode);
+        f.client.getLatestQuote=async symbol=>({symbol,quote:{bp:100,ap:102,bs:100,as:100,t:new Date().toISOString()}});
+        const key='wide-spread-'+serial;
+        const result=await f.service.decision({account_id:1,policyVersion:1,decisionKey:key,symbol:'AAPL',side:'buy',reason:'Synthetic long-term allocation review.'});
+        assert.equal(result.status,'blocked');assert.equal(result.awaitingConfirmation,false);
+        assert.ok(result.blockers.some(b=>b.includes('spread 200 bps; maximum 50 bps')));
+        assert.ok(!result.blockers.some(b=>b.includes('minimum trade')));
+        const view=await f.service.overview();const decision=view.decisions.find(d=>d.decision_key===key);
+        assert.equal(decision.status,'blocked');assert.deepEqual(decision.blockers,result.blockers);
+        assert.equal(decision.lastPlan,undefined);assert.equal(f.state.submitted.length,0);
+    }
+});
+
+test('selected buys still require all managed valuations and completed sell adjustments',async()=>{
+    const f=await fixture('automatic');
+    f.state.positions=[{symbol:'MSFT',qty:'30',side:'long',current_price:'100',unrealized_pl:'0'}];
+    await f.store.savePolicy({...f.policy,paused:true},1,'');
+    await f.service.adopt({symbol:'MSFT',qty:30,reason:'Synthetic explicit ownership of the existing holding.',confirmation:'MANAGE MSFT 30 LIVE'});
+    const state=await f.store.settings();await f.store.savePolicy(f.policy,state.version,'ENABLE AUTOMATIC LIVE INVESTING');
+    const input={account_id:1,policyVersion:state.version+1,decisionKey:'managed-marks-'+serial,symbol:'AAPL',side:'buy',reason:'Synthetic allocation needing a prior managed sale.'};
+    const getQuote=f.client.getLatestQuote;
+    f.client.getLatestQuote=async symbol=>{if(symbol==='MSFT')throw Error('No valuation');return getQuote(symbol);};
+    let result=await f.service.decision(input);
+    assert.equal(result.status,'blocked');assert.ok(result.blockers.some(b=>b.startsWith('MSFT:')));
+    f.client.getLatestQuote=getQuote;result=await f.service.decision(input);
+    assert.ok(result.blockers.some(b=>b.includes('sell adjustments')));assert.equal(f.state.submitted.length,0);
+});
+
+test('policy changes explain why an old recommendation needs fresh agent analysis',async()=>{
+    const f=await fixture();const key='policy-review-'+serial;
+    await f.service.decision({account_id:1,policyVersion:1,decisionKey:key,symbol:'AAPL',side:'buy',reason:'Synthetic original policy recommendation.'});
+    await f.store.savePolicy({...f.policy,executionMode:'automatic'},1,'ENABLE AUTOMATIC LIVE INVESTING');
+    const d=(await f.service.overview()).decisions.find(d=>d.decision_key===key);
+    assert.equal(d.status,'needs_reanalysis');assert.match(d.blockers[0],/policy 1; the current policy is 2/);
+    await assert.rejects(f.service.previewDecision(key),{code:'LIVE_POLICY_CHANGED'});assert.equal(f.state.submitted.length,0);
+});
+
+async function agedRecommendation(hours) {
+    const f=await fixture();const key='aged-review-'+serial;
+    const result=await f.service.decision({account_id:1,policyVersion:1,decisionKey:key,symbol:'AAPL',side:'buy',reason:'Synthetic recommendation for a multi-year holding period.'});
+    const clock=()=>new Date(Date.now()+hours*3600000);
+    f.client.getClock=async()=>({is_open:true,next_close:new Date(clock().getTime()+3600000).toISOString()});
+    f.client.getLatestQuote=async symbol=>({symbol,quote:{bp:f.state.price,ap:f.state.price+0.02,bs:100,as:100,t:new Date(clock().getTime()-100).toISOString()}});
+    let researchReads=0;
+    const service=createLiveInvesting({store:f.store,env:f.env,clientFactory:()=>f.client,now:clock,
+        getFreshResearchPacket:async symbol=>{researchReads++;return {...await f.getFreshResearchPacket(symbol),generatedAt:clock().toISOString()};}});
+    return {...f,service,key,plan:result.plan,researchReads:()=>researchReads};
+}
+
+test('a 23-hour recommendation refreshes research and its expired order preview on approval',async()=>{
+    const f=await agedRecommendation(23);
+    assert.ok(Date.parse(f.plan.reviewExpiresAt)>Date.parse(f.plan.expiresAt));
+    const result=await f.service.execute(f.plan.id,confirms(f.plan));
+    assert.equal(f.state.submitted.length,1);assert.equal(f.researchReads(),1);
+    assert.notEqual(result.order.planId,f.plan.id);assert.equal(result.order.decisionKey,f.key);
+    await f.service.execute(f.plan.id,confirms(f.plan));assert.equal(f.state.submitted.length,1);
+});
+
+test('a recommendation older than 24 hours cannot be revived by a fresh execution quote',async()=>{
+    const f=await agedRecommendation(25);
+    const d=(await f.service.overview()).decisions.find(d=>d.decision_key===f.key);assert.equal(d.status,'expired');
+    await assert.rejects(f.service.execute(f.plan.id,confirms(f.plan)),{code:'LIVE_RESEARCH_REQUIRED'});
+    assert.equal(f.state.submitted.length,0);assert.equal(f.researchReads(),0);
+});
+
+test('approval refresh never increases the price or quantity the operator reviewed',async()=>{
+    for(const price of [101,99]) {
+        const f=await agedRecommendation(1);f.state.price=price;
+        await assert.rejects(f.service.execute(f.plan.id,confirms(f.plan)),{code:'LIVE_REVIEW_CHANGED'});
+        assert.equal(f.state.submitted.length,0);
+        const d=(await f.service.overview()).decisions.find(d=>d.decision_key===f.key);assert.equal(d.status,'blocked');
+        assert.match(d.blockers[0],/price or size you reviewed/);
+    }
+});
+
+for(const [label,research] of [
+    ['news unavailable',{provenance:{news:{available:false}}}],
+    ['new headline',{data:{info:{price:100},news:[{title:'A newly reported event',url:'https://example.test/event'}]}}],
+    ['new filing',{data:{info:{price:100},news:[],filings:{filings:[{accession:'new-filing'}]}}}],
+    ['changed fundamentals',{data:{info:{price:100,freeCashflow:50},news:[]}}],
+]) test(`approval refuses ${label} and keeps the refusal visible`,async()=>{
+    const f=await agedRecommendation(1);f.state.research=research;
+    await assert.rejects(f.service.execute(f.plan.id,confirms(f.plan)),{code:'LIVE_RESEARCH_REQUIRED'});
+    assert.equal(f.state.submitted.length,0);
+    const d=(await f.service.overview()).decisions.find(d=>d.decision_key===f.key);assert.equal(d.status,'blocked');assert.ok(d.blockers.length);
+});
+
+test('slow research refresh completes before the execution preview lifetime starts',async()=>{
+    const f=await fixture();const input={account_id:1,policyVersion:1,decisionKey:'slow-research-'+serial,symbol:'AAPL',side:'buy',reason:'Synthetic long-term recommendation with a slow research provider.'};
+    const {plan}=await f.service.decision(input);let elapsed=0;
+    const clock=()=>new Date(Date.now()+elapsed);
+    f.client.getClock=async()=>({is_open:true,next_close:new Date(clock().getTime()+3600000).toISOString()});
+    f.client.getLatestQuote=async symbol=>({symbol,quote:{bp:100,ap:100.02,bs:100,as:100,t:new Date(clock().getTime()-100).toISOString()}});
+    const service=createLiveInvesting({store:f.store,env:f.env,clientFactory:()=>f.client,now:clock,
+        getFreshResearchPacket:async symbol=>{elapsed=120000;return {...await f.getFreshResearchPacket(symbol),generatedAt:clock().toISOString()};}});
+    const result=await service.execute(plan.id,confirms(plan));
+    assert.equal(f.state.submitted.length,1);assert.ok(Date.parse(result.plan.createdAt)>Date.parse(plan.expiresAt));
+});
+
+test('recommendation expiry after reservation blocks dispatch and retains the consumed intent',async()=>{
+    const f=await agedRecommendation(23.99);
+    const record=await f.store.getDecision(f.key);
+    const deadline=Date.parse(require('../services/research_decisions').recommendationExpiresAt(record.analysis,record.packet_generated_at));
+    let instant=deadline-20000;
+    const clock=()=>new Date(instant);
+    f.client.getClock=async()=>({is_open:true,next_close:new Date(instant+3600000).toISOString()});
+    f.client.getLatestQuote=async symbol=>({symbol,quote:{bp:100,ap:100.02,bs:100,as:100,t:new Date(instant-100).toISOString()}});
+    const service=createLiveInvesting({store:f.store,env:f.env,clientFactory:()=>f.client,now:clock,
+        getFreshResearchPacket:async symbol=>({...await f.getFreshResearchPacket(symbol),generatedAt:clock().toISOString()})});
+    const reserve=f.store.reserveOrder;
+    f.store.reserveOrder=async(...args)=>{const result=await reserve(...args);instant=deadline;return result;};
+    await assert.rejects(service.execute(f.plan.id,confirms(f.plan)),{code:'LIVE_ORDER_NOT_SENT'});
+    assert.equal(f.state.submitted.length,0);const [order]=await f.store.orders();assert.equal(order.status,'canceled');
+    assert.ok((await eventsFor(order.id)).some(e=>e.code==='LIVE_RESEARCH_REQUIRED'));
+});
+
+test('retrying a blocked saved decision after 30 minutes preserves its 24-hour recommendation',async()=>{
+    const f=await fixture('automatic');f.state.clockOpen=false;
+    const key='retry-window-'+serial;
+    await f.service.decision({account_id:1,policyVersion:1,decisionKey:key,symbol:'AAPL',side:'buy',reason:'Synthetic decision initially blocked by the closed market.'});
+    const original=await f.store.getDecision(key);
+    const clock=()=>new Date(Date.now()+3600000);
+    f.client.getClock=async()=>({is_open:true,next_close:new Date(clock().getTime()+3600000).toISOString()});
+    f.client.getLatestQuote=async symbol=>({symbol,quote:{bp:100,ap:100.02,bs:100,as:100,t:new Date(clock().getTime()-100).toISOString()}});
+    const service=createLiveInvesting({store:f.store,env:f.env,clientFactory:()=>f.client,now:clock,
+        getFreshResearchPacket:async symbol=>({...await f.getFreshResearchPacket(symbol),generatedAt:clock().toISOString()})});
+    const result=await service.decision({account_id:1,policyVersion:1,decisionKey:key,symbol:original.symbol,side:original.side,reason:original.reason,analysis:original.analysis});
+    assert.equal(result.status,'submitted');assert.equal(f.state.submitted.length,1);
+    await f.store.savePolicy({...f.policy,paused:true},1,'');
+    const replay=await service.decision({account_id:1,policyVersion:1,decisionKey:key,symbol:original.symbol,side:original.side,reason:original.reason,analysis:original.analysis});
+    assert.equal(replay.replayed,true);assert.equal(f.state.submitted.length,1);
+});
+
+test('recommendation approval cannot move a reviewed order to a different broker account',async()=>{
+    const f=await fixture();const {plan}=await f.service.decision({account_id:1,policyVersion:1,decisionKey:'bound-review-'+serial,symbol:'AAPL',side:'buy',reason:'Synthetic account-bound investment recommendation.'});
+    const service=createLiveInvesting({store:f.store,env:f.env,clientFactory:()=>f.client,getFreshResearchPacket:async symbol=>{
+        f.account.id='different-review-account';f.env.ALPACA_LIVE_ACCOUNT_ID=f.account.id;
+        return f.getFreshResearchPacket(symbol);
+    }});
+    await assert.rejects(service.execute(plan.id,confirms(plan)),{code:'LIVE_ACCOUNT_CHANGED'});
+    assert.equal(f.state.submitted.length,0);
 });
