@@ -9,13 +9,19 @@ export interface LiveOrder {
   qty: number; limitPrice: number; status: string; filledQty: number; filledAvgPrice: number | null
   createdAt: string; updatedAt: string
 }
+export type InvestmentDecisionStatus = 'needs_review' | 'needs_reanalysis' | 'blocked' | 'ready' | 'awaiting_confirmation' | 'submitted' | 'partially_filled' | 'filled' | 'canceled' | 'expired' | 'rejected' | 'unknown'
+export interface InvestmentDecision {
+  decision_key: string; symbol: string; side: string; reason: string; created_at: string
+  policy_version?: number; status?: InvestmentDecisionStatus; blockers?: string[]; expiresAt?: string | null; checkedAt?: string | null; orderId?: string | null
+  analysis?: { strategyVersion: string; model: string; analyzedAt: string; invalidation: string; assumptions?: string[]; alternatives?: string[]; claims?: { path: string; value: string | number | boolean }[] } | null
+}
 export interface LiveOverview {
   configuration: { configured: boolean; accountBound: boolean; tradingEnabled: boolean; environment: 'live' }
   version: number; policy: LivePolicy; connected: boolean; blockers: string[]
   cash?: number; equity?: number; cashBuyingPower?: number; accountLabel?: string; marketOpen?: boolean; checkedAt?: string
   positions: { symbol: string; qty: number; price: number; value: number; managedQty: number; unrealizedPnl: number }[]
   orders: LiveOrder[]
-  decisions: { decision_key: string; symbol: string; side: string; reason: string; created_at: string; analysis?: { strategyVersion: string; model: string; analyzedAt: string; invalidation: string } | null }[]
+  decisions: InvestmentDecision[]
 }
 export interface LivePlanRow {
   symbol: string; side: 'buy' | 'sell'; qty: number; limitPrice: number; notional: number
@@ -24,6 +30,7 @@ export interface LivePlanRow {
 }
 export interface LivePlan {
   id: string; policyVersion: number; createdAt: string; expiresAt: string; decisionKey: string | null
+  reviewExpiresAt?: string | null
   nextOrder: LivePlanRow | null; rows: LivePlanRow[]; blockers: string[]
   managedValue: number; spendableCash: number; unmanagedValue: number; allocationCapital: number
 }

@@ -6,7 +6,9 @@ const { getProvenQuote, ceilToTick, floorToTick } = require('./alpaca_market_dat
 const { computeHoldings, buildSimulatorAccount } = require('./simulator_ledger');
 const { getDefaultHybridQuote } = require('./hybrid_market_data');
 const { emitSecurityEvent } = require('./security_events');
+const researchDecisions = require('./research_decisions');
 const MAX_EXECUTION_EVIDENCE_AGE_MS = 10_000;
+const decisionOrderStatus = order => ['filled','partially_filled','canceled','expired','rejected','unknown'].includes(order.status) ? order.status : 'submitted';
 
 const numeric = (value, label, fail) => {
     if (!['number','string'].includes(typeof value) || String(value).trim()==='' || !Number.isFinite(Number(value))) throw fail('INVALID_BROKER_DATA','Missing or invalid '+label+'.',503);
@@ -31,7 +33,7 @@ function orderObservation(local, remote, fail = (code, message, status = 409) =>
     return { status:remote.status,broker_id:String(remote.id),filled_qty:filled,filled_avg_price:average };
 }
 
-function createLongTermInvesting({ store, env=process.env, clientFactory, configuration, environment='live', expectedAccountId=()=>env.ALPACA_LIVE_ACCOUNT_ID, requireExpectedAccountId=true, legacyGuard=async()=>[], now=()=>new Date(), sourceDb=db, getSourceQuote=getDefaultHybridQuote } = {}) {
+function createLongTermInvesting({ store, env=process.env, clientFactory, configuration, environment='live', expectedAccountId=()=>env.ALPACA_LIVE_ACCOUNT_ID, requireExpectedAccountId=true, legacyGuard=async()=>[], now=()=>new Date(), sourceDb=db, getSourceQuote=getDefaultHybridQuote, getFreshResearchPacket } = {}) {
     if (!['live', 'paper'].includes(environment)) throw new Error('Unsupported investing environment');
     const fail = (code, message, status = 409) => Object.assign(new Error(message), {code: environment.toUpperCase() + '_' + code, status});
     const observeOrder = (local, remote) => orderObservation(local, remote, fail);
@@ -95,16 +97,38 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         if (cash<0 || equity<=0 || cashBuyingPower<0) issues.push('Cash-only investing requires positive equity and non-negative cash balances.');
         return {state,client,accountKey,account,clock,orders,owned,positions,openOrders,cash,equity,cashBuyingPower,issues,readStartedAt};
     }
+    function decisionView(d,state,orders,issues=[]) {
+        const {lastPlan,lastCheck,packet_generated_at,...retained}=d;
+        const expiresAt=researchDecisions.recommendationExpiresAt(d.analysis,packet_generated_at);
+        const order=orders.find(o=>o.decisionKey===d.decision_key);
+        let status=lastCheck?.status||'needs_review';
+        let blockers=lastCheck?.blockers||lastPlan?.blockers||[];
+        if(order) { status=decisionOrderStatus(order); blockers=[]; }
+        else if(d.policy_version!==state.version) { status='needs_reanalysis'; blockers=[`This decision used policy ${d.policy_version}; the current policy is ${state.version}. Ask the strategy agent for a new decision under the current policy.`]; }
+        else if(!expiresAt) { status='needs_reanalysis'; blockers=['This decision needs a saved research evidence record.']; }
+        else if(Date.parse(expiresAt)<=now().getTime()) { status='expired'; blockers=['The 24-hour recommendation window expired. Ask the strategy agent for a new decision.']; }
+        else {
+            blockers=[...new Set([...blockers,...issues])];
+            if(blockers.length) status='blocked';
+            else if(!lastCheck && !lastPlan) status='needs_review';
+            else if(state.policy.executionMode==='confirm') status='awaiting_confirmation';
+            else status='ready';
+        }
+        return {...retained,status,blockers,expiresAt,checkedAt:lastCheck?.checkedAt||lastPlan?.createdAt||null,orderId:order?.id||null};
+    }
     async function overview() {
         const state=await store.settings(); const config=configuration(env);
-        const base={configuration:{...config,accountBound:environment === 'paper' ? config.accountBound || Boolean(state.accountKey) : config.accountBound},version:state.version,policy:state.policy,orders:(await store.orders()).map(cleanOrder),decisions:await store.decisions()};
-        if (!config.configured) return {...base,connected:false,blockers:[`Add ${environment} credentials on the server.`],positions:[]};
+        const decisions=await store.decisions();
+        const base={configuration:{...config,accountBound:environment === 'paper' ? config.accountBound || Boolean(state.accountKey) : config.accountBound},version:state.version,policy:state.policy,orders:(await store.orders()).map(cleanOrder)};
+        const disconnected=blockers=>({...base,connected:false,blockers,positions:[],decisions:decisions.map(d=>decisionView(d,state,base.orders,blockers))});
+        if (!config.configured) return disconnected([`Add ${environment} credentials on the server.`]);
         try {
             const s=await snapshot();
             return {...base,connected:true,accountLabel:'••••'+String(s.account.id).slice(-4),
                 cash:s.cash,equity:s.equity,cashBuyingPower:s.cashBuyingPower,marketOpen:s.clock.is_open,
+                version:s.state.version,policy:s.state.policy,decisions:decisions.map(d=>decisionView(d,s.state,s.orders.map(cleanOrder),s.issues)),
                 positions:s.positions,orders:s.orders.map(cleanOrder),blockers:s.issues,checkedAt:now().toISOString()};
-        } catch(e) { return {...base,connected:false,blockers:[e.code?.startsWith(environment.toUpperCase() + '_')?e.message:'The broker is unavailable.'],positions:[]}; }
+        } catch(e) { return disconnected([e.code?.startsWith(environment.toUpperCase() + '_')?e.message:'The broker is unavailable.']); }
     }
     async function preview({decisionKey=null,symbol=null,side=null}={}) {
         const s=await snapshot(); const p=s.state.policy;
@@ -113,7 +137,9 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         const unmanagedValue=s.positions.filter(h=>!s.owned[h.symbol]).reduce((n,h)=>n+h.value,0);
         const allocationCapital=Math.min(p.budget,Math.max(0,s.equity-unmanagedValue));
         if (!(allocationCapital>0)) blockers.push('No funded capital is available within the ceiling after protecting unrelated holdings.');
-        const symbols=[...new Set([...p.targets.map(t=>t.symbol),...Object.keys(s.owned).filter(k=>s.owned[k]>1e-7)])].sort();
+        // A selected recommendation needs its target and every managed holding.
+        // Unheld, unrelated targets cannot affect this order's valuation or sales.
+        const symbols=[...new Set([...p.targets.filter(t=>!symbol||t.symbol===symbol).map(t=>t.symbol),...Object.keys(s.owned).filter(k=>s.owned[k]>1e-7)])].sort();
         const rows=[]; const capitalMarks=new Map(); let managedValue=0;
         for (const ticker of symbols) {
             let asset;
@@ -126,10 +152,10 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
                 blockers.push(ticker+': not an active tradable US stock or ETF. No automatic fund substitution is performed.'); continue;
             }
             let q;
-            try { q=await getProvenQuote({client:s.client,symbol:ticker,now:now(),feed:'iex'}); }
+            try { q=await getProvenQuote({client:s.client,symbol:ticker,now,feed:'iex'}); }
             catch { blockers.push(ticker+': a fresh Alpaca bid/ask quote is unavailable.'); continue; }
             const spread=(q.askPrice-q.bidPrice)/q.bidPrice*10000;
-            if (q.bidPrice<1 || spread>p.maxSpreadBps) { blockers.push(ticker+': price or spread exceeds the approved limits.'); continue; }
+            if (q.bidPrice<1 || spread>p.maxSpreadBps) { blockers.push(`${ticker}: price or spread exceeds the approved limits (bid $${q.bidPrice}, ask $${q.askPrice}, spread ${round(spread)} bps; maximum ${p.maxSpreadBps} bps).`); continue; }
             const held=s.positions.find(h=>h.symbol===ticker); const owned=s.owned[ticker]||0;
             if (held && Math.abs(held.qty-owned)>1e-7) { blockers.push(ticker+': existing holdings are not fully owned by this app.'); continue; }
             const target=p.targets.find(t=>t.symbol===ticker)?.weightPct||0;
@@ -159,24 +185,46 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         if (next?.side==='buy' && rows.some(r=>r.actionable && r.side==='sell')) blockers.push('Complete and reconcile the sell adjustments before requesting a buy.');
         if (next?.side==='buy' && next.qty*next.limitPrice>spendable+1e-8) blockers.push('This buy would exceed cash-only funding or the required reserve. Sell and reconcile first.');
         if (next?.side==='buy' && (capitalMarks.get(next.symbol)+next.qty*next.limitPrice)>allocationCapital*p.maxPositionPct/100+0.01) blockers.push('This buy would exceed the maximum position weight.');
-        if (symbol && !next) blockers.push('This decision is outside the approved target drift or minimum trade.');
+        if (symbol && !next && !blockers.some(b=>b.startsWith(symbol+':'))) blockers.push('This decision is outside the approved target drift or minimum trade.');
+        const decision=decisionKey?await store.getDecision(decisionKey):null;
+        if(decision && decision.policy_version!==s.state.version) throw fail('POLICY_CHANGED','The policy changed. Ask the strategy agent for a new decision under the current policy.');
         const plan={id:crypto.randomUUID(),accountKey:s.accountKey,policyVersion:s.state.version,stateSequence:s.state.sequence,createdAt:now().toISOString(),
             expiresAt:new Date(now().getTime()+60000).toISOString(),decisionKey,rows,nextOrder:next,blockers:[...new Set(blockers)],
+            reviewExpiresAt:decision?researchDecisions.recommendationExpiresAt(decision.analysis,decision.packet_generated_at):null,
             managedValue:round(managedValue),spendableCash:round(spendable),unmanagedValue:round(unmanagedValue),allocationCapital:round(allocationCapital),
             brokerQuantities:s.positions.map(h=>[h.symbol,h.qty]).sort((a,b)=>a[0].localeCompare(b[0]))};
         await store.savePlan(plan);
+        if(decisionKey) await store.recordDecisionCheck(decisionKey,{status:plan.blockers.length?'blocked':p.executionMode==='confirm'?'awaiting_confirmation':'ready',blockers:plan.blockers,planId:plan.id,checkedAt:plan.createdAt});
         return publicPlan(plan);
     }
     function publicPlan(plan) { const {accountKey,brokerQuantities,...safe}=plan; void accountKey; void brokerQuantities; return safe; }
-    async function executeReviewed(planId,{confirmation,automatic=false}={}) {
+    async function executeReviewed(planId,{confirmation,automatic=false,refreshDecision=true,researchCheck=null}={}) {
         const row=await store.getPlan(planId);
         if (!row) throw fail('PLAN_NOT_FOUND','Preview a long-term order first.',404);
         const plan=JSON.parse(row.plan_json); const order=plan.nextOrder;
         const existing=(await store.orders()).find(o=>o.plan_id===plan.id || (plan.decisionKey && o.decision_key===plan.decisionKey));
         if (existing) return {order:cleanOrder(existing),replayed:true};
-        if (plan.decisionKey) await require('./research_decisions').validateStored(evidenceKey(plan.decisionKey),order?.symbol,now());
         if (!order || plan.blockers.length) throw fail('PLAN_BLOCKED','Resolve the preview blockers before submitting.');
         if (!automatic && confirmation!==`${order.side.toUpperCase()} ${order.symbol} ${confirmationSuffix}`) throw fail('CONFIRMATION_REQUIRED','Type the exact order confirmation.',400);
+        if(plan.decisionKey && refreshDecision) {
+            // Slow research refreshes must finish before starting the short quote
+            // window. Only an explicit approval or agent request reaches here.
+            const checkedResearch=await researchDecisions.validateForExecution(evidenceKey(plan.decisionKey),order.symbol,{now,getFreshPacket:getFreshResearchPacket});
+            const refreshed=await previewDecision(plan.decisionKey);
+            const refreshedRecord=await store.getPlan(refreshed.id);
+            if(!refreshedRecord || JSON.parse(refreshedRecord.plan_json).accountKey!==plan.accountKey) {
+                throw fail('ACCOUNT_CHANGED','The broker account changed since this recommendation was previewed. Review the account and build a fresh preview.');
+            }
+            const next=refreshed.nextOrder;
+            if(refreshed.blockers.length||!next) throw fail('PLAN_BLOCKED',refreshed.blockers.join(' ')||'This recommendation no longer has an eligible order.');
+            if(next.symbol!==order.symbol||next.side!==order.side||(!automatic && (next.qty>order.qty+1e-8
+                ||next.qty*next.limitPrice>order.qty*order.limitPrice+1e-8
+                ||(next.side==='buy'?next.limitPrice>order.limitPrice:next.limitPrice<order.limitPrice)))) {
+                throw fail('REVIEW_CHANGED','The refreshed order exceeds the price or size you reviewed. Build a fresh preview and review its new limits.');
+            }
+            return {...await executeReviewed(refreshed.id,{confirmation,automatic,refreshDecision:false,researchCheck:checkedResearch}),plan:refreshed};
+        }
+        if(plan.decisionKey && !researchCheck) throw fail('RESEARCH_REQUIRED','Refresh the recommendation evidence before execution.');
         if (!configuration(env).tradingEnabled) throw fail('GATE_CLOSED','Server-side order submission is disabled.');
         if (Date.parse(plan.expiresAt)<=now().getTime()) throw fail('PLAN_EXPIRED','The preview expired. Refresh prices and review again.');
         const fresh=await snapshot();
@@ -187,14 +235,14 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         const asset=await fresh.client.getAsset(order.symbol);
         if (asset?.symbol!==order.symbol || asset.class!=='us_equity' || asset.status!=='active' || asset.tradable!==true || asset.exchange==='OTC'
             || (!Number.isInteger(order.qty) && asset.fractionable!==true)) throw fail('ASSET_CHANGED','The asset is no longer eligible.');
-        const q=await getProvenQuote({client:fresh.client,symbol:order.symbol,feed:'iex',now:now()});
+        const q=await getProvenQuote({client:fresh.client,symbol:order.symbol,feed:'iex',now});
         const quoteTimes=[Date.parse(q.sourceTimestamp)];
         if (q.bidPrice<1 || (q.askPrice-q.bidPrice)/q.bidPrice*10000>fresh.state.policy.maxSpreadBps
             || (order.side==='buy'?q.askPrice>order.limitPrice:q.bidPrice<order.limitPrice)) throw fail('PRICE_CHANGED','The market moved beyond the approved limit or spread. Preview again.');
         const p=fresh.state.policy;
         let managed=0;
         for (const position of fresh.positions.filter(h=>fresh.owned[h.symbol]>0)) {
-            const mark=position.symbol===order.symbol?q:await getProvenQuote({client:fresh.client,symbol:position.symbol,feed:'iex',now:now()});
+            const mark=position.symbol===order.symbol?q:await getProvenQuote({client:fresh.client,symbol:position.symbol,feed:'iex',now});
             quoteTimes.push(Date.parse(mark.sourceTimestamp));
             managed+=position.qty*mark.askPrice;
         }
@@ -215,12 +263,14 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
             if (!Number.isFinite(checkedAt) || !Number.isFinite(Date.parse(plan.expiresAt)) || !Number.isFinite(Date.parse(plan.createdAt))
                 || Date.parse(plan.expiresAt)<=checkedAt || checkedAt<Date.parse(plan.createdAt)) throw fail('PLAN_EXPIRED','The reviewed plan expired before dispatch.');
             if (checkedAt>=sessionClose) throw fail('MARKET_CLOSED','The regular session closed before dispatch.');
+            if(researchCheck && checkedAt>=Date.parse(researchCheck.validUntil)) throw fail('RESEARCH_REQUIRED','The recommendation or refreshed research expired before dispatch. Request fresh analysis.');
             const evidence=[fresh.readStartedAt,assetReadStartedAt,clockReadStartedAt,...quoteTimes];
             if (evidence.some(t=>!Number.isFinite(t) || checkedAt<t || checkedAt-t>MAX_EXECUTION_EVIDENCE_AGE_MS)) {
                 throw fail('EXECUTION_EVIDENCE_STALE','Broker facts or quote evidence expired before dispatch.');
             }
         };
         assertFresh();
+        if(researchCheck) await store.recordDecisionCheck(plan.decisionKey,{status:'ready',blockers:[],planId:plan.id,checkedAt:now().toISOString(),research:researchCheck});
         const reserved=await store.reserveOrder(plan,order,{enabled:()=>configuration(env).tradingEnabled
             && now().getTime()-Date.parse(q.sourceTimestamp)<=10000 && now().getTime()>=Date.parse(q.sourceTimestamp),automatic,now});
         if (reserved.replayed) return {order:cleanOrder(reserved.order),replayed:true};
@@ -257,30 +307,41 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
             if (options.automatic && !result.replayed) emitSecurityEvent(environment + '_execute',{outcome:'success'});
             return result;
         } catch (error) {
+            const retained=await store.getPlan(planId);
+            const plan=retained?JSON.parse(retained.plan_json):null;
+            if(plan?.decisionKey) await store.recordDecisionCheck(plan.decisionKey,{status:'blocked',blockers:[error.code?.startsWith(environment.toUpperCase()+'_')||error.code==='LIVE_RESEARCH_REQUIRED'?error.message:'Execution checks could not be completed. Refresh and review again.'],planId,checkedAt:now().toISOString()});
             if (options.automatic) emitSecurityEvent(environment + '_execute',{outcome:error.status>=500?'failure':'refused',code:error.code});
             throw error;
         }
     }
     async function decision(input) {
         if (input?.account_id!==1) throw fail('INVALID_DECISION','The long-term source account must be 1.',400);
-        if (input.policyVersion!==(await store.settings()).version) throw fail('POLICY_CHANGED','Read the current investing policy before requesting a decision.');
-        const research=require('./research_decisions');
-        const analysis=await research.validateAnalysis(input.analysis,input.symbol,{now:now()});
+        // Replays reconcile the original intent even after its research expires.
+        // The immutable evidence still has to match the original request.
+        const previous=await store.getDecision(input.decisionKey);
+        const existing=previous?(await store.orders()).find(o=>o.decision_key===previous.decision_key):null;
+        if (!existing && input.policyVersion!==(await store.settings()).version) throw fail('POLICY_CHANGED','Read the current investing policy before requesting a decision.');
+        const analysis=await researchDecisions.validateAnalysis(input.analysis,input.symbol,{now:existing?new Date(previous.analysis?.analyzedAt):now(),
+            ...(previous?{maxAgeMs:researchDecisions.RECOMMENDATION_MAX_AGE_MS}:{})});
         const d=await store.saveDecision(input);
         await require('./research_store').saveDecisionEvidence(evidenceKey(d.decision_key),analysis);
-        const existing=(await store.orders()).find(o=>o.decision_key===d.decision_key);
-        if (existing) return {order:cleanOrder(existing),replayed:true};
+        if (existing) return {order:cleanOrder(existing),replayed:true,status:decisionOrderStatus(existing),awaitingConfirmation:false};
         const plan=await preview({decisionKey:d.decision_key,symbol:d.symbol,side:d.side});
         if (plan.policyVersion!==d.policy_version) throw fail('POLICY_CHANGED','The investing policy changed during the decision.');
         const state=await store.settings();
-        if (state.policy.executionMode==='automatic' && !plan.blockers.length) return {plan,...await execute(plan.id,{automatic:true})};
-        return {plan,awaitingConfirmation:true};
+        if(state.version!==d.policy_version) throw fail('POLICY_CHANGED','The policy changed during this decision. Ask the strategy agent for new analysis.');
+        if (state.policy.executionMode==='automatic' && !plan.blockers.length) {
+            const result=await execute(plan.id,{automatic:true});
+            return {plan,...result,status:decisionOrderStatus(result.order),awaitingConfirmation:false};
+        }
+        return {plan,status:plan.blockers.length?'blocked':'awaiting_confirmation',blockers:plan.blockers,awaitingConfirmation:!plan.blockers.length && state.policy.executionMode==='confirm'};
     }
     async function previewDecision(key) {
-        const d=(await store.decisions()).find(d=>d.decision_key===key);
+        const d=await store.getDecision(key);
         if (!d) throw fail('DECISION_NOT_FOUND','Decision not found.',404);
-        if (d.policy_version!==(await store.settings()).version) throw fail('POLICY_CHANGED','Ask the strategy agent for fresh analysis under the current policy.');
-        await require('./research_decisions').validateStored(evidenceKey(key),d.symbol,now());
+        const state=await store.settings();
+        if (d.policy_version!==state.version) throw fail('POLICY_CHANGED',`This decision used policy ${d.policy_version}; the current policy is ${state.version}. Ask the strategy agent for a new decision under the current policy.`);
+        await researchDecisions.validateStored(evidenceKey(key),d.symbol,now());
         return preview({decisionKey:key,symbol:d.symbol,side:d.side});
     }
     async function cancel(id) {

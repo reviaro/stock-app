@@ -18,7 +18,7 @@ export function useAlpacaPaperInvesting() {
     retry: false, staleTime: 15000, refetchOnWindowFocus: false })
   const policy = useMutation({ mutationFn: (body: { policy: LivePolicy; expectedVersion: number; confirmation: string }) => paperInvestingRequest('/policy', body, 'PUT'), onSuccess: refresh })
   const pause = useMutation({ mutationFn: (expectedVersion: number) => paperInvestingRequest('/pause', { expectedVersion }), onSettled: refresh })
-  const preview = useMutation({ mutationFn: (body: { decisionKey?: string }) => paperInvestingRequest<LivePlan>('/preview', body) })
+  const preview = useMutation({ mutationFn: (body: { decisionKey?: string }) => paperInvestingRequest<LivePlan>('/preview', body), onSettled: refresh })
   const execute = useMutation({ mutationFn: (body: { planId: string; confirmation: string }) => paperInvestingRequest<{ order: LiveOrder }>('/execute', body), onSettled: refresh })
   const cancel = useMutation({ mutationFn: (id: string) => paperInvestingRequest('/orders/' + encodeURIComponent(id) + '/cancel', {}), onSettled: refresh })
   const draft = useMutation({ mutationFn: () => paperInvestingRequest<SimulatorAllocationDraft>('/simulator-draft') })

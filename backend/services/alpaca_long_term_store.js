@@ -52,6 +52,8 @@ async function init() {
             `CREATE TABLE IF NOT EXISTS alpaca_investing_ownership (id INTEGER PRIMARY KEY AUTOINCREMENT, account_key TEXT NOT NULL, symbol TEXT NOT NULL, delta_qty REAL NOT NULL, broker_qty REAL NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL)`,
             `CREATE TABLE IF NOT EXISTS alpaca_investing_orders (id TEXT PRIMARY KEY, plan_id TEXT NOT NULL UNIQUE, decision_key TEXT UNIQUE, account_key TEXT NOT NULL, client_order_id TEXT NOT NULL UNIQUE, symbol TEXT NOT NULL, side TEXT NOT NULL, qty REAL NOT NULL, limit_price REAL NOT NULL, status TEXT NOT NULL, broker_id TEXT, filled_qty REAL NOT NULL DEFAULT 0, filled_avg_price REAL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
             `CREATE TABLE IF NOT EXISTS alpaca_investing_events (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, detail_json TEXT NOT NULL, created_at TEXT NOT NULL)`,
+            `CREATE INDEX IF NOT EXISTS alpaca_investing_decision_checks ON alpaca_investing_events(action,json_extract(detail_json,'$.decisionKey'),id)`,
+            `CREATE INDEX IF NOT EXISTS alpaca_investing_decision_plans ON alpaca_investing_plans(json_extract(plan_json,'$.decisionKey'))`,
             `CREATE TRIGGER IF NOT EXISTS alpaca_investing_order_intent_immutable BEFORE UPDATE ON alpaca_investing_orders WHEN NEW.id IS NOT OLD.id OR NEW.plan_id IS NOT OLD.plan_id OR NEW.decision_key IS NOT OLD.decision_key OR NEW.account_key IS NOT OLD.account_key OR NEW.client_order_id IS NOT OLD.client_order_id OR NEW.symbol IS NOT OLD.symbol OR NEW.side IS NOT OLD.side OR NEW.qty IS NOT OLD.qty OR NEW.limit_price IS NOT OLD.limit_price OR NEW.created_at IS NOT OLD.created_at BEGIN SELECT RAISE(ABORT,'long-term order intent is immutable'); END`,
             ...['alpaca_investing_orders','alpaca_investing_plans','alpaca_investing_events','alpaca_investing_decisions','alpaca_investing_ownership'].map(t => `CREATE TRIGGER IF NOT EXISTS ${t}_no_delete BEFORE DELETE ON ${t} BEGIN SELECT RAISE(ABORT,'long-term history is retained'); END`),
             ...['alpaca_investing_plans','alpaca_investing_events','alpaca_investing_decisions','alpaca_investing_ownership'].map(t => `CREATE TRIGGER IF NOT EXISTS ${t}_no_update BEFORE UPDATE ON ${t} BEGIN SELECT RAISE(ABORT,'long-term history is immutable'); END`),
@@ -199,7 +201,18 @@ async function saveDecision(input) {
         return (await all(c,'SELECT * FROM alpaca_investing_decisions WHERE decision_key=?',[input.decisionKey]))[0];
     });
 }
-const decisions = () => connection(async c=>(await all(c,'SELECT d.*,r.analysis_json FROM alpaca_investing_decisions d LEFT JOIN research_decision_evidence r ON r.decision_key=?||d.decision_key ORDER BY d.created_at DESC LIMIT 100',[environment === 'paper' ? 'paper:' : ''])).map(({analysis_json,...row})=>({...row,analysis:analysis_json?JSON.parse(analysis_json):null})));
+async function readDecisions(key) {
+    return connection(async c=>(await all(c,`SELECT d.*,r.analysis_json,json_extract(p.packet_json,'$.generatedAt') AS packet_generated_at,
+        (SELECT plan_json FROM alpaca_investing_plans WHERE json_extract(plan_json,'$.decisionKey')=d.decision_key ORDER BY rowid DESC LIMIT 1) AS last_plan,
+        (SELECT detail_json FROM alpaca_investing_events WHERE action='decision_checked' AND json_extract(detail_json,'$.decisionKey')=d.decision_key ORDER BY id DESC LIMIT 1) AS last_check
+        FROM alpaca_investing_decisions d LEFT JOIN research_decision_evidence r ON r.decision_key=?||d.decision_key
+        LEFT JOIN research_packets p ON p.id=r.packet_id ${key===undefined?'':'WHERE d.decision_key=?'} ORDER BY d.created_at DESC LIMIT 100`,
+        [environment === 'paper' ? 'paper:' : '',...(key===undefined?[]:[key])])).map(({analysis_json,last_plan,last_check,...row})=>({...row,
+            analysis:analysis_json?JSON.parse(analysis_json):null,lastPlan:last_plan?JSON.parse(last_plan):null,lastCheck:last_check?JSON.parse(last_check):null})));
+}
+const decisions = () => readDecisions();
+const getDecision = async key => (await readDecisions(key))[0] || null;
+const recordDecisionCheck = (decisionKey,detail) => connection(c=>event(c,'decision_checked',{...detail,decisionKey}));
 const ownership = () => connection(c=>all(c,'SELECT * FROM alpaca_investing_ownership ORDER BY id'));
 async function adoptWithin(c,{accountKey,symbol,brokerQty,expectedOwned,policyVersion,reason}) {
         const current=await state(c);
@@ -230,7 +243,7 @@ async function transferLegacy(input) {
         return {...result,transferredPlans:input.plans.map(p=>({version:p.version,id:p.id}))};
     });
 }
-return { init, settings, savePolicy, orders, getPlan, savePlan, reserveOrder, dispatchOrder, updateOrder, hash, finalStatuses, DEFAULT_POLICY, validatePolicy, saveDecision, decisions, ownership, adopt, handovers, transferLegacy };
+return { init, settings, savePolicy, orders, getPlan, savePlan, reserveOrder, dispatchOrder, updateOrder, hash, finalStatuses, DEFAULT_POLICY, validatePolicy, saveDecision, decisions, getDecision, recordDecisionCheck, ownership, adopt, handovers, transferLegacy };
 
 }
 module.exports = { createLongTermStore, DEFAULT_POLICY };
