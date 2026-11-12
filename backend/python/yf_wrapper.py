@@ -372,6 +372,11 @@ def get_stock_info(symbol):
         if quote_price is None:
             return _unavailable(symbol, 'A verified quote price is unavailable')
         quote_time = _utc_iso_from_epoch(info.get('regularMarketTime')) if provider_price else (_utc_iso_from_epoch(hist.index[-1].timestamp()) if len(hist) and callable(getattr(hist.index[-1], 'timestamp', None)) else None)
+        # Alerts compare the quote with its provider-reported previous close.
+        # Historical bars may not yet include today's session, or may contain only one row.
+        quote_previous_close = research_number(info.get('regularMarketPreviousClose'))
+        if quote_previous_close is None or quote_previous_close <= 0:
+            quote_previous_close = research_number(info.get('previousClose'))
         
         return {
             'status': 'success',
@@ -397,6 +402,7 @@ def get_stock_info(symbol):
                 'ask': 0,
                 'open': open_price,
                 'previousClose': prev_close,
+                'regularMarketPreviousClose': quote_previous_close if quote_previous_close is not None and quote_previous_close > 0 else None,
                 'dayHigh': day_high,
                 'dayLow': day_low,
                 'marketCap': info.get('marketCap'),

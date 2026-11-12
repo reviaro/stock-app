@@ -24,6 +24,7 @@ const { tools, chatTools } = require('../services/ai_service');
 
 test('chat exposes only approved tools with SDK-compatible input validation', () => {
     assert.deepEqual(Object.keys(chatTools).sort(), [
+        'getEarningsReview', 'getResearchUpdates',
         'getResearchEvidence','getPortfolioContext','calculateValuation','analyzeExposure','getCanslimAnalysis','getStockInfo', 'getTechnicalIndicators', 'getMarketDirection', 'getNews',
         'getMemo', 'getQualityMetrics', 'getRiskRules', 'checkPortfolioRisk',
         'simulator_get_account', 'simulator_get_holdings', 'simulator_buy',
@@ -35,6 +36,8 @@ test('chat exposes only approved tools with SDK-compatible input validation', ()
     }
     assert.equal(chatTools.getStockInfo.inputSchema.safeParse({ symbol: 'MSFT' }).success, true);
     assert.equal(chatTools.getStockInfo.inputSchema.safeParse({ symbol: 123 }).success, false);
+    assert.equal(chatTools.getEarningsReview.inputSchema.safeParse({ symbol: 'MSFT' }).success, true);
+    assert.equal(chatTools.getResearchUpdates.inputSchema.safeParse({ symbol: '../MSFT' }).success, false);
     assert.equal(chatTools.simulator_buy.inputSchema.safeParse({ symbol: 'MSFT', shares: 1 }).success, false);
 });
 

@@ -657,6 +657,7 @@ function initDb() {
             for (const sql of require('../services/simulator_controls').schema) db.run(sql);
             for (const sql of require('../services/strategy_evaluation').schema) db.run(sql);
             for (const sql of require('../services/research_store').schema) db.run(sql);
+            for (const sql of require('../services/research_monitor_store').schema) db.run(sql);
             db.run(`
                 CREATE INDEX IF NOT EXISTS idx_chat_history_session
                 ON chat_history(session_id, created_at DESC)

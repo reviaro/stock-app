@@ -31,6 +31,7 @@ test('generic read tokens and simulator agents cannot mutate research disclosure
 });
 test('research chat does not expose paper mutations until the operator opts in',()=>{
     const tools=getChatTools();assert.equal(tools.simulator_buy,undefined);assert.equal(tools.simulator_sell,undefined);assert.ok(tools.getResearchEvidence);
+    assert.ok(tools.getEarningsReview);assert.ok(tools.getResearchUpdates);
     const approved=getChatTools({allowPaperTrading:true});assert.ok(approved.simulator_buy);assert.ok(approved.simulator_sell);
     assert.equal(Object.keys(approved).some(k=>/live.*(buy|sell|submit)/i.test(k)),false);
 });

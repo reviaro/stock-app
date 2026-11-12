@@ -11,8 +11,9 @@ const OpportunitiesPage = lazy(() => import('@/pages/OpportunitiesPage').then((m
 const AlpacaLivePage = lazy(() => import('@/pages/AlpacaLivePage').then((module) => ({ default: module.AlpacaLivePage })))
 const StrategyLabPage = lazy(() => import('@/pages/StrategyLabPage').then((module) => ({ default: module.StrategyLabPage })))
 const PortfolioLabPage = lazy(() => import('@/pages/PortfolioLabPage').then((module) => ({ default: module.PortfolioLabPage })))
+const ResearchMonitorPage = lazy(() => import('@/pages/ResearchMonitorPage').then((module) => ({ default: module.ResearchMonitorPage })))
 
-type Tab = 'dashboard' | 'opportunities' | 'simulator' | 'research-lab' | 'portfolio-lab' | 'alpaca-live'
+type Tab = 'dashboard' | 'opportunities' | 'simulator' | 'research-lab' | 'portfolio-lab' | 'alpaca-live' | 'research-monitor'
 type AuthState =
   | { status: 'loading' }
   | { status: 'unavailable' }
@@ -22,6 +23,7 @@ type AuthState =
 const TABS: { id: Tab; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'opportunities', label: 'Opportunities' },
+  { id: 'research-monitor', label: 'Research Monitor' },
   { id: 'simulator', label: 'Simulator' },
   { id: 'research-lab', label: 'Research Lab' },
   { id: 'portfolio-lab', label: 'Portfolio Lab' },
@@ -235,6 +237,8 @@ function App() {
               ? <Dashboard />
               : activeTab === 'opportunities'
                 ? <OpportunitiesPage />
+                : activeTab === 'research-monitor'
+                  ? <ResearchMonitorPage />
                 : activeTab === 'simulator'
                   ? <SimulatorPage />
                   : activeTab === 'research-lab'

@@ -102,6 +102,7 @@ function createApp({ auth = createAuthFromEnv(), env = process.env } = {}) {
     app.use('/api/transactions', transactionsRoutes);
     app.use('/api/simulator', simulatorRoutes);
     app.use('/api/research-notes', researchNotesRoutes);
+    app.use('/api/research/monitor', require('./routes/research_monitor').createResearchMonitorRouter());
     app.use('/api/research', require('./routes/research').createResearchRouter());
     app.use('/api/screener', screenerRoutes);
     app.use('/api/alpaca-paper', alpacaPaperRoutes);
@@ -159,18 +160,21 @@ async function start() {
         await db.initDb();
         console.log('Database initialized');
 
+        let stopResearchMonitor;
         if (process.env.SAMPLE_DATA === '1') {
             console.log('Sample mode: background refresh jobs and universe warm-up are disabled');
         } else {
             initUniverseScheduler();
             initSnapshotScheduler();
             require('./services/simulator_performance').initSimulatorPerformanceScheduler();
+            stopResearchMonitor = require('./services/research_monitor').startResearchMonitor();
         }
 
         const host = resolveListenHost();
         const server = app.listen(PORT, host, () => {
             console.log(`Oakline running on ${host}:${PORT}`);
         });
+        if (stopResearchMonitor) server.once('close', stopResearchMonitor);
         if (releaseSampleLock) {
             process.once('exit', releaseSampleLock);
             const stopSample = () => {
