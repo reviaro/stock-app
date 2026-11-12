@@ -59,7 +59,7 @@ function LegacyRecovery({ overview }: { overview?: InvestingOverview }) {
   const reconcile = useReconcileLegacyPaperOrders()
   const [confirmation, setConfirmation] = useState('')
   return <div className="mt-4 space-y-4">
-    <p className="text-sm text-muted-foreground">These records belong to the retired day-trading strategy and are excluded from long-term results. Resolve outstanding broker activity before starting long-term investing. Existing broker orders remain at Alpaca until filled or canceled.</p>
+    <p className="text-sm text-muted-foreground">These records belong to the retired day-trading strategy. The account-wide paper portfolio review includes their broker activity. Resolve outstanding broker activity before starting long-term investing. Existing broker orders remain at Alpaca until filled or canceled.</p>
     <p className="text-sm text-muted-foreground">Transferred plans retain their historical state and fill evidence, but no longer belong to day-trading execution.</p>
     {(overview?.legacyHandovers?.length ?? 0) > 0 && <ul aria-label="Transferred legacy holdings" className="space-y-1 text-sm">
       {overview!.legacyHandovers!.map(handover => <li key={`${handover.legacyVersion}-${handover.planId}`}>

@@ -68,8 +68,8 @@ they change as the app evolves.
 
 | Measure | Count |
 |---|---:|
-| Backend JavaScript tests / test files | 1000 / 113 |
-| Frontend tests / test files | 137 / 37 |
+| Backend JavaScript tests / test files | 1010 / 114 |
+| Frontend tests / test files | 142 / 38 |
 | API route files | 23 |
 | Standalone migration files | 2 |
 
@@ -387,6 +387,27 @@ target weights and order limits. **Local simulator** remains account 1, with its
 own ledger and reinvestment controls. Importing its allocation changes an editable
 weights draft only. Review symbols and limits before saving; mutual funds are not
 automatically substituted with ETFs.
+
+The paper workspace includes **Simulated Holdings**, **Buffett Review**, and
+**Trade History** using the paper broker account's own positions and executions.
+Holdings show average cost, current price, the per-share change from the previous
+close, market value, unrealized P&L, and managed quantities. The review includes
+one-month, three-month, or one-year daily equity charts, allocation contributions,
+and a thesis log linked to actual long-term investing fills. Trade history supports
+symbol/side filters and CSV export of all matching retrieved executions, including
+partial fills and external or legacy paper trades.
+
+`GET /portfolio?period=1M` (also `3M` or `1A`) is operator-only and read-only. It
+reads up to 1,000 broker fill activities, deduplicated by execution ID, and reports
+incomplete history or provider failures explicitly. Realized P&L, exit counts,
+win rate and holding periods are **FIFO estimates**, before fees and without
+tax-lot/corporate-action adjustments; they are withheld unless complete retrieved
+fills reconcile to current broker quantities. Sell fills are grouped by order for
+exit counts and win rate. Broker period P&L and observed equity drawdown are not
+cash-flow-adjusted time-weighted returns. No local simulator values are copied
+into paper performance, and the report does not submit or reconcile orders.
+Provider references: [daily portfolio history](https://docs.alpaca.markets/us/reference/getaccountportfoliohistory-1)
+and [account activities](https://docs.alpaca.markets/us/reference/getaccountactivities).
 
 Paper investing keeps the existing `ALPACA_API_KEY`, `ALPACA_API_SECRET` and fixed
 paper endpoint. `ALPACA_PAPER_ORDER_ENTRY_ENABLED=true` is the server submission

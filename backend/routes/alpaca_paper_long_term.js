@@ -17,6 +17,7 @@ function createPaperLongTermRouter({ service = createPaperLongTermInvesting() } 
         }
     };
     router.get('/overview',respond(()=>service.overview()));
+    router.get('/portfolio',respond(req=>service.portfolio({period:req.query.period})));
     router.get('/simulator-draft',respond(()=>service.simulatorDraft()));
     router.put('/policy',respond(req=>service.savePolicy(req.body?.policy,req.body?.expectedVersion,req.body?.confirmation)));
     router.post('/pause',respond(req=>service.pause(req.body?.expectedVersion)));

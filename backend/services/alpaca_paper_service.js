@@ -88,6 +88,9 @@ function createPaperClient({ env = process.env, fetchImpl = http.fetch, timeoutM
         getAccount: () => request('/v2/account'),
         getClock: () => request('/v2/clock'),
         getPositions: () => request('/v2/positions'),
+        // Daily account equity, including external paper trades. This is a broker
+        // balance history, not the local simulator's cash-flow-adjusted return.
+        getPortfolioHistory: ({ period = '1M' } = {}) => request(`/v2/account/portfolio/history?period=${encodeURIComponent(period)}&timeframe=1D`),
         getOrders: ({ status = 'open', nested = false } = {}) => request(`/v2/orders?status=${encodeURIComponent(status)}&direction=desc${nested ? '&nested=true' : ''}`),
         getAsset: (symbol) => request(`/v2/assets/${encodeURIComponent(symbol)}`),
         getPosition: async (symbol) => {
