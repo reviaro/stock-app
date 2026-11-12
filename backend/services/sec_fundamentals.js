@@ -48,7 +48,8 @@ function normalizeFacts(payload,{asOf=new Date().toISOString().slice(0,10)}={}){
     return {annual,quarterly,evidence,asOf,cik:String(payload.cik).padStart(10,'0'),source:'sec_edgar',limitations:['Standard US-GAAP USD mappings only; custom taxonomy, foreign currency and missing debt components remain unavailable.','Quarterly facts require a standalone quarter; cumulative year-to-date values are not treated as quarters.']};
 }
 function createSecSource({env=process.env,fetchImpl=http.fetch,now=()=>new Date()}={}){
-    const cache=createAsyncTtlCache({ttlMs:6*3600_000});let gate=Promise.resolve();
+    const cache=createAsyncTtlCache({ttlMs:6*3600_000});
+    const reports=createAsyncTtlCache({ttlMs:15*60_000});let gate=Promise.resolve();
     const configured=()=>typeof env.SEC_USER_AGENT==='string'&&/^[^\r\n]{5,200}\s+[^\s@]+@[^\s@]+\.[^\s@]+$/.test(env.SEC_USER_AGENT);
     async function json(url){
         if(!configured())throw Error('SEC source requires a server-side contact user agent');
@@ -70,14 +71,28 @@ function createSecSource({env=process.env,fetchImpl=http.fetch,now=()=>new Date(
     }
     async function get(symbol){
         if(!configured())return {status:'unavailable',configurationRequired:true,source:'sec_edgar'};
-        return cache.get(symbol,async()=>{
+        return reports.get(symbol,async()=>{
             const cik=await company(symbol);
-            const [facts,submissions]=await Promise.all([json(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`),json(`https://data.sec.gov/submissions/CIK${cik}.json`)]);
+            const [facts,submissions]=await Promise.all([cache.get('facts:'+cik,()=>json(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`)),json(`https://data.sec.gov/submissions/CIK${cik}.json`)]);
             const normalized=normalizeFacts(facts,{asOf:now().toISOString().slice(0,10)});
             const recent=submissions.filings?.recent||{};
-            const filings=(recent.accessionNumber||[]).slice(0,30).map((accn,i)=>({form:recent.form?.[i],filedAt:recent.filingDate?.[i],reportDate:recent.reportDate?.[i],accession:accn,
-                url:/^\d{10}-\d{2}-\d{6}$/.test(accn)&&/^[A-Za-z0-9_.-]+$/.test(recent.primaryDocument?.[i]||'')?`https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${accn.replaceAll('-','')}/${recent.primaryDocument[i]}`:null}));
-            return {status:'success',data:{...normalized,filings},meta:{source:'sec_edgar',retrievedAt:now().toISOString()}};
+            const filings=(recent.accessionNumber||[]).slice(0,100).map((accn,i)=>({form:recent.form?.[i],filedAt:recent.filingDate?.[i],reportDate:recent.reportDate?.[i],accession:accn,items:recent.items?.[i]||'',
+                url:/^\d{10}-\d{2}-\d{6}$/.test(accn)&&/^[A-Za-z0-9_.-]+$/.test(recent.primaryDocument?.[i]||'')?`https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${accn.replaceAll('-','')}/${recent.primaryDocument[i]}`:null}))
+                .filter(f=>DATE.test(f.filedAt||'')&&f.filedAt<=normalized.asOf);
+            const announcement=filings.find(f=>f.form==='8-K'&&/(?:^|[,\s])2\.02(?:$|[,\s])/.test(f.items)&&f.url);
+            let earningsRelease=null;
+            if(announcement){
+                earningsRelease={...announcement,exhibitUrl:null};
+                try{
+                    const folder=announcement.url.slice(0,announcement.url.lastIndexOf('/')+1);
+                    const index=await cache.get('exhibit:'+announcement.accession,()=>json(folder+'index.json'));
+                    const files=(index.directory?.item||[]).map(f=>f.name).filter(name=>typeof name==='string'&&/^[A-Za-z0-9_.-]+\.(?:htm|html|txt|pdf)$/i.test(name));
+                    const exhibit=files.find(name=>/ex(?:hibit)?[-_]?99[-_.]?0?1(?!\d)/i.test(name));
+                    if(exhibit)earningsRelease.exhibitUrl=folder+exhibit;
+                }catch{/* The verified 8-K link remains available when its exhibit cannot be resolved. */}
+            }
+            const earnings=require('./earnings_analysis').analyzeEarnings(facts,{asOf:normalized.asOf,filings,earningsRelease});
+            return {status:'success',data:{...normalized,filings,earnings},meta:{source:'sec_edgar',retrievedAt:now().toISOString()}};
         });
     }
     return {get,configured};

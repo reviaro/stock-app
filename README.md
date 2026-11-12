@@ -68,9 +68,9 @@ they change as the app evolves.
 
 | Measure | Count |
 |---|---:|
-| Backend JavaScript tests / test files | 944 / 107 |
-| Frontend tests / test files | 123 / 35 |
-| API route files | 22 |
+| Backend JavaScript tests / test files | 1000 / 113 |
+| Frontend tests / test files | 137 / 37 |
+| API route files | 23 |
 | Standalone migration files | 2 |
 
 Schema initialization also lives in `backend/database/db.js`. See [Tests](#tests)
@@ -97,6 +97,9 @@ for the commands, including the separate Portfolio Lab Python checks.
 - **Research journal** — per-stock memos (thesis, fair value range, buy/trim
   levels, invalidation, conviction) plus structured research notes, with AI
   draft and bear-case pressure-test helpers.
+- **Research Monitor** — persistent unread news and filing inbox, SEC quarterly
+  earnings comparisons and earnings-release links, plus one-time or repeating
+  price alerts with imports from saved memo buy/trim levels.
 - **Value screener** — scores candidates on quality vs. valuation.
 - **Portfolio Lab** — read-only skfolio allocation research comparing equal
   weight, inverse volatility, HRP, minimum variance, and constrained CVaR with
@@ -569,6 +572,62 @@ The app keeps its existing patched HTTP transport and does not retry order POSTs
 ## License
 
 Licensed under the MIT License. See [LICENSE](LICENSE).
+
+## Research Monitor
+
+Open **Research Monitor** for the persistent “Since your last review” inbox.
+The server follows watchlist symbols, positive holdings in the main transaction
+ledger, and symbols with enabled price alerts. Separate simulator and broker
+accounts are not implicitly combined with this ledger; add their symbols to the
+watchlist if you want to follow them here.
+
+- **Earnings review:** compares up to eight reported SEC quarters, revenue and
+  diluted EPS growth, operating margins, and links to source reports and the latest
+  earnings 8-K / EX-99.1 release when resolvable. Missing data stays missing.
+  Derived fourth-quarter amounts require three contiguous reported quarters;
+  diluted EPS is never derived by subtraction. Financial facts are cached for six
+  hours and filing lists for 15 minutes; a newer filing than the facts is flagged.
+- **News monitor:** collects available headlines and material-report filing types
+  from the last 14 days. Stable identities prevent duplicate inbox items across
+  checks and restarts. Explicit review actions acknowledge only the displayed
+  event IDs, so newly arriving items remain unread. Topic categories are simple
+  descriptive tags, not assessments of investment impact. Provider feeds are
+  bounded and can miss events; an empty inbox is not proof of no material news.
+- **Price alerts:** supports USD levels above/below a threshold and daily percentage
+  gains/losses from the quote provider's reported previous close. Levels fire once, or repeat after an
+  observed move away and back. Repeating percentage rules fire at most once per
+  New York market date. Quotes must match the symbol, be non-demo USD observations
+  no more than 20 minutes old, and not be daily-bar fallbacks. Missing previous
+  closes block percentage alerts. Paused rules do not run; reset explicitly
+  re-arms a rule. An observed threshold is not a guaranteed crossing or fill.
+- **Memo levels:** “Import saved memo levels” copies the selected company's saved
+  `buy_below` and `trim_above` prices into one-time alerts. Repeat the import after
+  editing a memo. Unchanged levels preserve their state; changed levels re-arm.
+  Deleting a memo does not delete previously imported alerts; manage them in the
+  monitor's saved-alert list.
+
+Checks start shortly after server startup and run every 15 minutes while Oakline
+is running, including when the browser is closed. Sample mode disables background
+checks. **Check now** uses the same bounded worker, with a one-minute cooldown;
+concurrent requests share one check. Source failures remain visible and the last
+earnings report is retained with a warning. Notifications are stored in the local
+database and shown in the app; there is no email, push delivery or order execution.
+
+Earnings and filings require the existing server-side `SEC_USER_AGENT` contact
+configuration. News uses the existing Alpaca/Benzinga source when configured,
+with labeled Yahoo fallback. These features introduce no new package dependency.
+The workflow was inspired by
+[day-trader-skill](https://github.com/Jakeschincariol/day-trader-skill); Oakline's
+implementation uses its own research services, database and authorization.
+
+Read endpoints: `GET /api/research/monitor` (optional `symbol`, `kind`,
+`includeReviewed=1`, `before` cursor) and
+`GET /api/research/monitor/earnings/:symbol`. Authenticated operators can POST to
+`/check`, `/reviewed` with `{ids}`, `/alerts` with
+`{symbol, condition, threshold, repeat?, label?}`, `/alerts/import-memo` with
+`{symbol}`, and `/alerts/:id/{enable|disable|reset|delete}`, relative to the monitor
+root. Read-only agents cannot change alert or review state. Chat exposes
+`getEarningsReview` and `getResearchUpdates` as read-only tools.
 
 ## Research evidence and evaluation
 
