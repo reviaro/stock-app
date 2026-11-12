@@ -12,6 +12,7 @@ const { hooks } = vi.hoisted(() => {
 })
 vi.mock('@/hooks/useAlpacaPaperInvesting', () => ({ useAlpacaPaperInvesting: () => hooks }))
 vi.mock('@/components/investing/LegacyPaperArchive', () => ({ LegacyPaperArchive: () => <div>Legacy recovery</div> }))
+vi.mock('@/components/investing/PaperPortfolioPanels', () => ({ PaperPortfolioPanels: () => <div>Paper portfolio review</div> }))
 const baseline = (): InvestingOverview => ({ configuration: { configured: false, accountBound: false, tradingEnabled: false, environment: 'paper' },
   version: 0, policy: { budget: 0, reservePct: 10, maxPositionPct: 25, maxOrderValue: 500, minTradeValue: 25, driftPct: 2,
     maxSpreadBps: 50, fractional: true, paused: true, executionMode: 'confirm', targets: [] },
@@ -29,6 +30,8 @@ describe('Long-term paper workspace', () => {
     expect(screen.getByRole('button', { name: 'Build fresh preview' })).toBeDisabled()
     expect(screen.getByRole('checkbox', { name: 'Pause new paper orders' })).toBeChecked()
     expect(screen.queryByLabelText(/secret/i)).not.toBeInTheDocument()
+    expect(screen.getByText('Paper portfolio review')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Broker holdings' })).not.toBeInTheDocument()
   })
   it('makes automatic mode a deliberate policy choice with exact activation confirmation', () => {
     hooks.overview.data = { ...baseline(), policy: { ...baseline().policy, budget: 1000, targets: [{ symbol: 'AAPL', weightPct: 20 }] } }

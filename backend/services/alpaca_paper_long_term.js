@@ -5,6 +5,7 @@ const store = require('./alpaca_paper_long_term_store');
 const { createPaperClient, getPaperConfiguration, reconcilePaperOrderAudits } = require('./alpaca_paper_service');
 const handover = require('./alpaca_paper_handover');
 const {reconcileLegacyV1Plans} = require('./alpaca_paper_legacy_reconciliation');
+const { createPaperPortfolio } = require('./alpaca_paper_portfolio');
 const db = require('../database/db');
 const v1 = require('./alpaca_day_trade_store');
 const v2 = require('./alpaca_day_trade_v2_store');
@@ -33,6 +34,8 @@ function createPaperInvestingClient({ env = process.env, ...options } = {}) {
     return {
         getAccount:()=>call(()=>client.getAccount()),getClock:()=>call(()=>client.getClock()),
         getPositions:()=>call(()=>client.getPositions()),getOrders:()=>call(()=>client.getOrders({status:'open',nested:true})),
+        getPortfolioHistory:options=>call(()=>client.getPortfolioHistory(options)),
+        getAccountActivities:options=>call(()=>client.getAccountActivities(options)),
         getAsset:symbol=>call(()=>client.getAsset(symbol)),getLatestQuote:(symbol,options)=>call(()=>client.getLatestQuote(symbol,options)),
         getOrder:id=>call(()=>client.getOrder(id,{nested:true})),
         getOrderByClientOrderId:id=>call(()=>client.getOrderByClientOrderId(id)),
@@ -72,6 +75,7 @@ function createPaperLongTermInvesting(options = {}) {
         expectedAccountId:()=>env.ALPACA_PAPER_ACCOUNT_ID,requireExpectedAccountId:false,
         clientFactory,...options,legacyGuard:guard});
     const overview = service.overview;
+    service.portfolio = createPaperPortfolio({store:paperStore,clientFactory,env,now,configuration});
     service.overview = async () => ({...await overview(),legacyHandovers:(await paperStore.handovers()).map(row=>({legacyVersion:row.legacy_version,planId:row.plan_id,symbol:row.symbol,qty:row.transferred_qty}))});
     const requireTransition = async () => {
         const blockers = await guard();

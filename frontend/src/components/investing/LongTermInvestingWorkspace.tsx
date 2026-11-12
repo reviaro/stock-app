@@ -113,7 +113,7 @@ function OwnershipReview({ data, hooks, verified, environment }: SectionProps) {
   </details>
 }
 
-export function LongTermInvestingWorkspace({ hooks, environment, verified, verification }: { hooks: InvestingHooks; environment: Environment; verified: boolean; verification?: ReactNode }) {
+export function LongTermInvestingWorkspace({ hooks, environment, verified, verification, portfolio }: { hooks: InvestingHooks; environment: Environment; verified: boolean; verification?: ReactNode; portfolio?: ReactNode }) {
   const { data, isLoading, error } = hooks.overview
   const [confirmation, setConfirmation] = useState('')
   const plan = hooks.preview.data
@@ -158,6 +158,7 @@ export function LongTermInvestingWorkspace({ hooks, environment, verified, verif
           <Button className="mt-4" variant="destructive" disabled={data.policy.paused || hooks.pause.isPending} onClick={() => hooks.pause.mutate(data.version)}>{hooks.pause.isPending ? 'Pausing…' : 'Pause new orders now'}</Button>
           {hooks.pause.error && <p role="alert" className="mt-3 text-sm text-destructive">{hooks.pause.error.message}</p>}
         </section>
+        {portfolio}
         <PolicyEditor key={data.version} data={data} hooks={hooks} verified={verified} environment={environment} />
         <section aria-labelledby={`${environment}-decisions-heading`} className="space-y-3">
           <h2 id={`${environment}-decisions-heading`} className="text-lg font-semibold">Investment agent decisions</h2>
@@ -200,7 +201,7 @@ export function LongTermInvestingWorkspace({ hooks, environment, verified, verif
           {hooks.execute.error && <p role="alert" className="mt-3 text-sm text-destructive">{hooks.execute.error.message}</p>}
           {hooks.execute.isSuccess && <p role="status" className="mt-3 text-sm">Order recorded. Accepted is not the same as filled; refresh to reconcile before the next trade.</p>}
         </section>
-        <section aria-labelledby={`${environment}-holdings-heading`}><h2 id={`${environment}-holdings-heading`} className="text-lg font-semibold">Broker holdings</h2><p className="mt-1 text-sm text-muted-foreground">Confirmed app fills and explicit ownership reviews establish managed quantities. External holdings and corporate-action discrepancies require review.</p><div className="mt-3 space-y-2">{!data.positions.length && <p className="text-sm text-muted-foreground">No verified broker positions to display.</p>}{data.positions.map(p => <div key={p.symbol} className="flex flex-wrap justify-between gap-2 border-b border-border py-3 text-sm"><strong>{p.symbol}</strong><span>{p.qty} shares · {money(p.value)}</span><span className="text-muted-foreground">{p.managedQty > 0 ? `${p.managedQty} managed shares` : 'Protected external holding'}</span></div>)}</div></section>
+        {!portfolio && <section aria-labelledby={`${environment}-holdings-heading`}><h2 id={`${environment}-holdings-heading`} className="text-lg font-semibold">Broker holdings</h2><p className="mt-1 text-sm text-muted-foreground">Confirmed app fills and explicit ownership reviews establish managed quantities. External holdings and corporate-action discrepancies require review.</p><div className="mt-3 space-y-2">{!data.positions.length && <p className="text-sm text-muted-foreground">No verified broker positions to display.</p>}{data.positions.map(p => <div key={p.symbol} className="flex flex-wrap justify-between gap-2 border-b border-border py-3 text-sm"><strong>{p.symbol}</strong><span>{p.qty} shares · {money(p.value)}</span><span className="text-muted-foreground">{p.managedQty > 0 ? `${p.managedQty} managed shares` : 'Protected external holding'}</span></div>)}</div></section>}
         <OwnershipReview data={data} hooks={hooks} verified={verified} environment={environment} />
         <section aria-labelledby={`${environment}-orders-heading`}><h2 id={`${environment}-orders-heading`} className="text-lg font-semibold">Broker order evidence</h2>{!data.orders.length && <p className="mt-2 text-sm text-muted-foreground">No {environment} orders have been submitted.</p>}<div className="mt-3 space-y-3">{data.orders.slice(0, 100).map(o => <article key={o.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-4"><div><strong className="text-sm">{o.side.toUpperCase()} {o.qty} {o.symbol}</strong><p className="mt-1 text-xs text-muted-foreground">{o.status} · filled {o.filledQty} · average {o.filledAvgPrice == null ? 'Pending' : money(o.filledAvgPrice)}</p></div>{!terminal.has(o.status) && <Button variant="outline" disabled={hooks.cancel.isPending} onClick={() => hooks.cancel.mutate(o.id)}>Cancel remaining {o.symbol}</Button>}</article>)}</div>{hooks.cancel.error && <p role="alert" className="mt-3 text-sm text-destructive">{hooks.cancel.error.message}</p>}</section>
       </>}
