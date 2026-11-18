@@ -33,6 +33,68 @@ async function fixture() {
 }
 const confirmation=plan=>({confirmation:`${plan.nextOrder.side.toUpperCase()} ${plan.nextOrder.symbol} PAPER`});
 
+async function heldFixture() {
+    const f=await fixture();
+    await f.service.savePolicy({...f.policy,executionMode:'automatic',targets:[...f.policy.targets,{symbol:'HELD',weightPct:10}]},1,'ENABLE AUTOMATIC PAPER INVESTING');
+    f.state.positions=[{symbol:'HELD',qty:'10',current_price:'100',side:'long',unrealized_pl:'0'}];
+    f.store.ownership=async()=>[{symbol:'HELD',delta_qty:10,account_key:f.store.hash(f.account.id)}];
+    for(const method of ['getAsset','getLatestQuote']) {
+        const original=f.client[method];
+        f.client[method]=async symbol=>{assert.equal(symbol,'AAPL',method+' requested unrelated holding');return original(symbol);};
+    }
+    return f;
+}
+
+test('selected paper buy uses held snapshot valuation in preview and execution',async()=>{
+    const f=await heldFixture();
+    const plan=await f.service.preview({symbol:'AAPL',side:'buy'});
+    assert.deepEqual(plan.blockers,[]);assert.equal(plan.managedValue,1000);assert.equal(plan.spendableCash,8000);
+    await f.service.execute(plan.id,confirmation(plan));assert.equal(f.state.submitted.length,1);
+});
+
+for (const [reason,shares,equity] of [['oversized',5,2800],['below drift',18,9600]]) {
+    test(`selected paper buy rejects ${reason} reviewed quantity after equity drops, before reservation`,async t=>{
+        const f=await fixture();
+        await f.service.savePolicy({...f.policy,maxOrderValue:100},1,'ENABLE PAPER INVESTING');
+        f.state.positions=[{symbol:'AAPL',qty:String(shares),current_price:'100',side:'long',unrealized_pl:'0'}];
+        f.store.ownership=async()=>[{symbol:'AAPL',delta_qty:shares,account_key:f.store.hash(f.account.id)}];
+        const plan=await f.service.previewOperatorBuy('AAPL');
+        assert.deepEqual(plan.blockers,[]);
+        const reserve=t.mock.method(f.store,'reserveOrder');
+        f.account.equity=String(equity);
+        await assert.rejects(f.service.execute(plan.id,confirmation(plan)),{code:'PAPER_TARGET_CHANGED'});
+        assert.equal(reserve.mock.callCount(),0);
+        assert.equal(f.state.submitted.length,0);
+    });
+}
+
+test('operator buys require an approved symbol and manual confirmation; racing previews reserve only once',async()=>{
+    const f=await heldFixture();
+    for(const invalid of ['',null,'OTHER']) await assert.rejects(f.service.previewOperatorBuy(invalid),{code:'PAPER_INVALID_TARGET'});
+    const plans=await Promise.all([f.service.previewOperatorBuy('AAPL'),f.service.previewOperatorBuy('AAPL')]);
+    assert.equal(f.state.submitted.length,0);
+    await assert.rejects(f.service.execute(plans[0].id,{automatic:true}),{code:'PAPER_CONFIRMATION_REQUIRED'});
+    await assert.rejects(f.service.execute(plans[0].id,{}),{code:'PAPER_CONFIRMATION_REQUIRED'});
+    const results=await Promise.allSettled(plans.map(p=>f.service.execute(p.id,confirmation(p))));
+    const winner=results.findIndex(r=>r.status==='fulfilled');assert.notEqual(winner,-1);
+    assert.equal(results[1-winner].reason.code,'PAPER_STATE_CHANGED');
+    assert.equal((await f.service.execute(plans[winner].id,confirmation(plans[winner]))).replayed,true);
+    assert.equal(f.state.submitted.length,1);
+});
+
+test('selected buy fails closed on missing, invalid, overweight or changed held marks and ownership',async()=>{
+    const f=await heldFixture(),opts={symbol:'AAPL',side:'buy'};
+    const plan=await f.service.preview(opts),held=f.state.positions[0];
+    for(const mark of [null,'',0,'bad','1e308']) {
+        held.current_price=mark;
+        await assert.rejects(f.service.preview(opts));await assert.rejects(f.service.execute(plan.id,confirmation(plan)));
+    }
+    held.current_price='210';assert.ok((await f.service.preview(opts)).blockers.some(b=>b.includes('sell adjustments')));
+    await assert.rejects(f.service.execute(plan.id,confirmation(plan)));
+    held.current_price='100';held.qty='9';assert.ok((await f.service.preview(opts)).blockers.some(b=>b.includes('quantity differs')));
+    assert.equal(f.state.submitted.length,0);
+});
+
 test('paper configuration never consumes live keys, rejects live endpoints and disables sample trading',()=>{
     assert.equal(configuration({ALPACA_LIVE_API_KEY:'synthetic',ALPACA_LIVE_SECRET_KEY:'synthetic'}).configured,false);
     assert.throws(()=>configuration({ALPACA_TRADING_BASE_URL:'https://api.alpaca.markets'}),{code:'PAPER_ENDPOINT_INVALID'});

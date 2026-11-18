@@ -22,6 +22,13 @@ function createPaperLongTermRouter({ service = createPaperLongTermInvesting() } 
     router.put('/policy',respond(req=>service.savePolicy(req.body?.policy,req.body?.expectedVersion,req.body?.confirmation)));
     router.post('/pause',respond(req=>service.pause(req.body?.expectedVersion)));
     router.post('/preview',respond(req=>req.body?.decisionKey ? service.previewDecision(req.body.decisionKey) : service.preview()));
+    router.post('/manual-buy/preview',respond(req=>{
+        const body=req.body;
+        if (!body || Array.isArray(body) || Object.keys(body).length !== 1 || !Object.hasOwn(body,'symbol') || typeof body.symbol !== 'string' || !body.symbol.trim()) {
+            throw Object.assign(new Error('Expected only a non-empty symbol.'),{code:'PAPER_INVALID_REQUEST',status:400});
+        }
+        return service.previewOperatorBuy(body.symbol);
+    }));
     router.post('/execute',respond(req=>service.execute(req.body?.planId,{confirmation:req.body?.confirmation})));
     router.post('/decisions',respond(req=>service.decision(req.body)));
     router.post('/orders/:id/cancel',respond(req=>service.cancel(req.params.id)));
