@@ -1,12 +1,13 @@
 import { LongTermInvestingWorkspace } from '@/components/investing/LongTermInvestingWorkspace'
 import { LegacyPaperArchive } from '@/components/investing/LegacyPaperArchive'
 import { useAlpacaPaperInvesting } from '@/hooks/useAlpacaPaperInvesting'
+import { PaperManualBuy } from '@/components/investing/PaperManualBuy'
 import { PaperPortfolioPanels } from '@/components/investing/PaperPortfolioPanels'
 
 export function AlpacaPaperPage() {
   const hooks = useAlpacaPaperInvesting()
   return <div className="space-y-6">
-    <LongTermInvestingWorkspace hooks={hooks} environment="paper" verified portfolio={<PaperPortfolioPanels />} />
+    <LongTermInvestingWorkspace hooks={hooks} environment="paper" verified portfolio={<><PaperPortfolioPanels /><PaperManualBuy hooks={hooks} /></>} />
     <LegacyPaperArchive overview={hooks.overview.data} />
   </div>
 }

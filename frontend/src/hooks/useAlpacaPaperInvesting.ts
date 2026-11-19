@@ -7,7 +7,11 @@ export async function paperInvestingRequest<T>(path: string, body?: unknown, met
     ? { credentials: 'same-origin' }
     : { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
   const json = await response.json()
-  if (!response.ok || json.status !== 'success') throw new Error(json.error || 'Unable to reach paper investing.')
+  if (!response.ok || json.status !== 'success') {
+    throw Object.assign(new Error(json.error || 'Unable to reach paper investing.'), {
+      code: json.status === 'error' && typeof json.code === 'string' ? json.code : undefined,
+    })
+  }
   return json.data as T
 }
 
@@ -19,11 +23,14 @@ export function useAlpacaPaperInvesting() {
   const policy = useMutation({ mutationFn: (body: { policy: LivePolicy; expectedVersion: number; confirmation: string }) => paperInvestingRequest('/policy', body, 'PUT'), onSuccess: refresh })
   const pause = useMutation({ mutationFn: (expectedVersion: number) => paperInvestingRequest('/pause', { expectedVersion }), onSettled: refresh })
   const preview = useMutation({ mutationFn: (body: { decisionKey?: string }) => paperInvestingRequest<LivePlan>('/preview', body), onSettled: refresh })
-  const execute = useMutation({ mutationFn: (body: { planId: string; confirmation: string }) => paperInvestingRequest<{ order: LiveOrder }>('/execute', body), onSettled: refresh })
+  const manualPreview = useMutation({ retry: false, mutationFn: (symbol: string) => paperInvestingRequest<LivePlan>('/manual-buy/preview', { symbol }) })
+  const executeOrder = (body: { planId: string; confirmation: string }) => paperInvestingRequest<{ order: LiveOrder }>('/execute', body)
+  const execute = useMutation({ mutationFn: executeOrder, onSettled: refresh })
+  const manualExecute = useMutation({ mutationFn: executeOrder, retry: false, onSettled: refresh })
   const cancel = useMutation({ mutationFn: (id: string) => paperInvestingRequest('/orders/' + encodeURIComponent(id) + '/cancel', {}), onSettled: refresh })
   const draft = useMutation({ mutationFn: () => paperInvestingRequest<SimulatorAllocationDraft>('/simulator-draft') })
   const ownership = useMutation({ mutationFn: (body: { symbol: string; qty: number; confirmation: string; reason: string }) => paperInvestingRequest('/ownership', body), onSuccess: refresh })
-  return { overview, policy, pause, preview, execute, cancel, draft, ownership }
+  return { overview, manualPreview, manualExecute, policy, pause, preview, execute, cancel, draft, ownership }
 }
 
 export function useRetirePaperDayTrading() {

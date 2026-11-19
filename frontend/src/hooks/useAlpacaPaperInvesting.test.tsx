@@ -24,6 +24,11 @@ test('paper allocation import and confirmed submission use only the paper endpoi
     const draft = await hook.result.current.draft.mutateAsync()
     expect(draft.sourceAccountId).toBe(1)
   })
+  await act(async () => { await hook.result.current.manualPreview.mutateAsync('SPY') })
+  expect(fetcher).toHaveBeenCalledWith('/api/alpaca-paper/long-term/manual-buy/preview', {
+    method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{"symbol":"SPY"}',
+  })
+  expect(fetcher.mock.calls.some(([url]) => String(url).endsWith('/execute'))).toBe(false)
   expect(fetcher.mock.calls.some(([url]) => String(url).endsWith('/policy'))).toBe(false)
   await act(async () => { await hook.result.current.execute.mutateAsync({ planId: 'reviewed-paper-plan', confirmation: 'BUY SPY PAPER' }) })
   expect(fetcher).toHaveBeenCalledWith('/api/alpaca-paper/long-term/execute', {
@@ -31,6 +36,17 @@ test('paper allocation import and confirmed submission use only the paper endpoi
     body: JSON.stringify({ planId: 'reviewed-paper-plan', confirmation: 'BUY SPY PAPER' }),
   })
   expect(fetcher.mock.calls.every(([url]) => String(url).startsWith('/api/alpaca-paper/long-term/'))).toBe(true)
+})
+
+test('manual execute preserves the server refusal code and message', async () => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async input => String(input).endsWith('/execute')
+    ? new Response(JSON.stringify({ status: 'error', code: 'PAPER_TARGET_CHANGED', error: 'Target changed.' }), { status: 409 })
+    : ok({}))
+  const hook = mount()
+  await act(async () => {
+    await expect(hook.result.current.manualExecute.mutateAsync({ planId: 'old', confirmation: 'BUY SPY PAPER' }))
+      .rejects.toMatchObject({ code: 'PAPER_TARGET_CHANGED', message: 'Target changed.' })
+  })
 })
 
 test('legacy reconciliation uses the operator session without the retired order token and refreshes paper evidence', async () => {

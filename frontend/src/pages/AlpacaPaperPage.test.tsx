@@ -8,7 +8,7 @@ const { hooks } = vi.hoisted(() => {
   const mutation = () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), reset: vi.fn(), isPending: false, isSuccess: false, data: undefined, error: null })
   return { hooks: { overview: { data: undefined as InvestingOverview | undefined, isLoading: false, isFetching: false, error: null, refetch: vi.fn() },
     security: { data: { authenticated: true, mfaConfigured: true, recentMfa: true, recentAuthUntil: new Date(Date.now() + 300000).toISOString() }, error: null, refetch: vi.fn() },
-    policy: mutation(), pause: mutation(), preview: mutation(), execute: mutation(), cancel: mutation(), draft: mutation(), ownership: mutation() } }
+    manualPreview: mutation(), manualExecute: mutation(), policy: mutation(), pause: mutation(), preview: mutation(), execute: mutation(), cancel: mutation(), draft: mutation(), ownership: mutation() } }
 })
 vi.mock('@/hooks/useAlpacaPaperInvesting', () => ({ useAlpacaPaperInvesting: () => hooks }))
 vi.mock('@/components/investing/LegacyPaperArchive', () => ({ LegacyPaperArchive: () => <div>Legacy recovery</div> }))
@@ -19,7 +19,7 @@ const baseline = (): InvestingOverview => ({ configuration: { configured: false,
   connected: false, blockers: ['Add separate paper credentials on the server.'], positions: [], orders: [], decisions: [] })
 describe('Long-term paper workspace', () => {
   beforeEach(() => {
-    vi.clearAllMocks(); hooks.overview.data = baseline()
+    vi.clearAllMocks(); hooks.manualPreview.mutateAsync.mockReset(); hooks.manualExecute.mutateAsync.mockReset(); hooks.overview.data = baseline()
     hooks.security.data = { authenticated: true, mfaConfigured: true, recentMfa: true, recentAuthUntil: new Date(Date.now() + 300000).toISOString() }
     for (const key of ['policy', 'pause', 'preview', 'execute', 'cancel', 'draft', 'ownership'] as const) Object.assign(hooks[key], { isPending: false, isSuccess: false, data: undefined, error: null })
   })
@@ -32,6 +32,72 @@ describe('Long-term paper workspace', () => {
     expect(screen.queryByLabelText(/secret/i)).not.toBeInTheDocument()
     expect(screen.getByText('Paper portfolio review')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Broker holdings' })).not.toBeInTheDocument()
+  })
+  it.each(['accepted', 'timeout', 'PAPER_ORDER_UNKNOWN'])('reviews a selected saved target once, then reconciles %s', async outcome => {
+    const data = baseline()
+    data.connected = data.configuration.tradingEnabled = true
+    data.blockers = []; data.policy.paused = false; data.policy.executionMode = 'automatic'
+    data.policy.targets = [{ symbol: 'SPY', weightPct: 15 }]; hooks.overview.data = data
+    hooks.manualPreview.mutateAsync.mockResolvedValue({ id: 'manual', policyVersion: data.version, blockers: [],
+      expiresAt: new Date(Date.now() + 60000).toISOString(), nextOrder: { side: 'buy', symbol: 'SPY', qty: 2, limitPrice: 100, notional: 200 } })
+    if (outcome === 'timeout') hooks.manualExecute.mutateAsync.mockRejectedValue(new Error('Timed out'))
+    else if (outcome === 'PAPER_ORDER_UNKNOWN') hooks.manualExecute.mutateAsync.mockRejectedValue(Object.assign(new Error('PAPER_PRICE_CHANGED'), { code: outcome }))
+    else hooks.manualExecute.mutateAsync.mockResolvedValue({ order: { status: 'accepted', filledQty: 0, planId: 'manual' } })
+    const view = render(<AlpacaPaperPage />)
+    const select = screen.getByRole('combobox', { name: 'Saved policy target' })
+    expect(within(select).getByRole('option', { name: /SPY.*15%/ })).toBeInTheDocument()
+    fireEvent.change(select, { target: { value: 'SPY' } })
+    const preview = screen.getByRole('button', { name: 'Preview selected buy' }); fireEvent.click(preview)
+    expect(hooks.manualPreview.mutateAsync).toHaveBeenCalledWith('SPY')
+    const submit = await screen.findByRole('button', { name: 'Submit selected paper buy' })
+    expect(screen.getByText(/2 shares.*\$100.00.*\$200.00/)).toBeVisible()
+    expect(submit).toBeDisabled(); expect(hooks.manualExecute.mutateAsync).not.toHaveBeenCalled()
+    fireEvent.change(screen.getByLabelText('Type BUY SPY PAPER'), { target: { value: 'BUY SPY PAPER' } })
+    fireEvent.click(submit); fireEvent.click(submit)
+    expect(hooks.manualExecute.mutateAsync).toHaveBeenCalledExactlyOnceWith({ planId: 'manual', confirmation: 'BUY SPY PAPER' })
+    expect(await screen.findByText(outcome !== 'accepted' ? /outcome uncertain/i : /accepted.*filled quantity: 0/i)).toBeVisible()
+    expect(submit).toBeDisabled(); expect(preview).toBeDisabled()
+    data.orders = [{ id: 'order', planId: 'manual', status: 'filled', symbol: 'SPY', side: 'buy', qty: 2,
+      filledQty: 2, filledAvgPrice: 99, limitPrice: 100, decisionKey: null, createdAt: '', updatedAt: '' }]
+    view.rerender(<AlpacaPaperPage />)
+    expect(screen.getByText(/Broker status: filled.*Filled quantity: 2/)).toBeVisible()
+    expect(preview).toBeEnabled(); expect(submit).toBeDisabled()
+  })
+  it.each(['PAPER_TARGET_CHANGED', 'PAPER_PLAN_EXPIRED', 'PAPER_PRICE_CHANGED'])('requires a new preview and confirmation after %s', async code => {
+    const data = baseline(); data.connected = data.configuration.tradingEnabled = true
+    data.blockers = []; data.policy.paused = false; data.policy.targets = [{ symbol: 'SPY', weightPct: 15 }]; hooks.overview.data = data
+    const plan = { policyVersion: data.version, blockers: [], expiresAt: new Date(Date.now() + 60000).toISOString(),
+      nextOrder: { side: 'buy', symbol: 'SPY', qty: 1, limitPrice: 100, notional: 100 } }
+    hooks.manualPreview.mutateAsync.mockResolvedValueOnce({ ...plan, id: 'old' }).mockResolvedValueOnce({ ...plan, id: 'fresh' })
+    hooks.manualExecute.mutateAsync.mockRejectedValueOnce(Object.assign(new Error('Review changed.'), { code }))
+    render(<AlpacaPaperPage />)
+    fireEvent.change(screen.getByLabelText('Saved policy target'), { target: { value: 'SPY' } })
+    const preview = screen.getByRole('button', { name: 'Preview selected buy' })
+    fireEvent.click(preview)
+    fireEvent.change(await screen.findByLabelText('Type BUY SPY PAPER'), { target: { value: 'BUY SPY PAPER' } })
+    const submitName = { name: 'Submit selected paper buy' }
+    fireEvent.click(screen.getByRole('button', submitName))
+    expect(await screen.findByText(/Review changed\./)).toBeVisible()
+    expect(screen.queryByRole('button', submitName)).not.toBeInTheDocument()
+    expect(preview).toBeEnabled(); fireEvent.click(preview)
+    expect(await screen.findByLabelText('Type BUY SPY PAPER')).toHaveValue('')
+    expect(screen.getByRole('button', submitName)).toBeDisabled()
+    expect(hooks.manualExecute.mutateAsync).toHaveBeenCalledExactlyOnceWith({ planId: 'old', confirmation: 'BUY SPY PAPER' })
+  })
+  it.each(['expired', 'blocked', 'wrong target'])('refuses a %s selected buy plan despite exact confirmation', async reason => {
+    const data = baseline(); data.connected = data.configuration.tradingEnabled = true
+    data.blockers = []; data.policy.paused = false; data.policy.targets = [{ symbol: 'SPY', weightPct: 15 }]; hooks.overview.data = data
+    hooks.manualPreview.mutateAsync.mockResolvedValue({ id: 'manual', policyVersion: data.version,
+      blockers: reason === 'blocked' ? ['Spread exceeds policy'] : [], expiresAt: new Date(Date.now() + (reason === 'expired' ? -1 : 60000)).toISOString(),
+      nextOrder: { side: 'buy', symbol: reason === 'wrong target' ? 'QQQ' : 'SPY', qty: 1, limitPrice: 100, notional: 100 } })
+    render(<AlpacaPaperPage />)
+    fireEvent.change(screen.getByRole('combobox', { name: 'Saved policy target' }), { target: { value: 'SPY' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Preview selected buy' }))
+    fireEvent.change(await screen.findByLabelText('Type BUY SPY PAPER'), { target: { value: 'BUY SPY PAPER' } })
+    if (reason === 'blocked') expect(screen.getByText('Spread exceeds policy')).toBeVisible()
+    if (reason === 'expired') expect(screen.getByText(/— expired/)).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Submit selected paper buy' })).toBeDisabled()
+    expect(hooks.manualExecute.mutateAsync).not.toHaveBeenCalled()
   })
   it('makes automatic mode a deliberate policy choice with exact activation confirmation', () => {
     hooks.overview.data = { ...baseline(), policy: { ...baseline().policy, budget: 1000, targets: [{ symbol: 'AAPL', weightPct: 20 }] } }
