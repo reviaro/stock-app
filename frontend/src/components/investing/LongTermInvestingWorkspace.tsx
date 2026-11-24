@@ -27,6 +27,9 @@ function PolicyEditor({ data, hooks, verified, environment }: SectionProps) {
   const [confirmation, setConfirmation] = useState('')
   const [importNote, setImportNote] = useState('')
   const phrase = `ENABLE ${policy.executionMode === 'automatic' ? 'AUTOMATIC ' : ''}${environment.toUpperCase()} INVESTING`
+  // Mirrors the server rule: resuming needs a funded ceiling and at least one target.
+  const resumeHint = policy.paused ? '' : !policy.targets.length ? 'Add at least one target weight or import the simulator draft before resuming new orders.'
+    : !(policy.budget > 0) ? 'Set a capital ceiling above $0 before resuming new orders.' : ''
   const setNumber = (key: keyof LivePolicy, value: string) => setPolicy(old => ({ ...old, [key]: value === '' ? Number.NaN : Number(value) }))
   const fields: { key: keyof LivePolicy; label: string; min: number; max: number; step: string }[] = [
     { key: 'budget', label: 'Capital ceiling ($)', min: 0, max: 1e9, step: '0.01' },
@@ -86,7 +89,8 @@ function PolicyEditor({ data, hooks, verified, environment }: SectionProps) {
       {!policy.paused && <label className="block text-sm">Type {phrase}<input className={inputClass} autoComplete="off" value={confirmation} onChange={e => setConfirmation(e.target.value)} /></label>}
       {hooks.policy.error && <p role="alert" className="text-sm text-destructive">{hooks.policy.error.message}</p>}
       {hooks.draft.error && <p role="alert" className="text-sm text-destructive">{hooks.draft.error.message}</p>}
-      <Button type="submit" disabled={!verified || hooks.policy.isPending || (!policy.paused && (confirmation !== phrase || !(policy.budget > 0) || !policy.targets.length))}>{hooks.policy.isPending ? 'Saving…' : `Save ${environment} policy`}</Button>
+      {resumeHint && <p id={`${environment}-policy-resume-hint`} className="text-sm text-amber-700 dark:text-amber-300">{resumeHint}</p>}
+      <Button type="submit" aria-describedby={resumeHint ? `${environment}-policy-resume-hint` : undefined} disabled={!verified || hooks.policy.isPending || (!policy.paused && (confirmation !== phrase || !(policy.budget > 0) || !policy.targets.length))}>{hooks.policy.isPending ? 'Saving…' : `Save ${environment} policy`}</Button>
     </form>
   </section>
 }
