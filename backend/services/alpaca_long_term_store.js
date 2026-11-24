@@ -26,7 +26,7 @@ async function transaction(fn) {
 }
 const hash = value => crypto.createHash('sha256').update(String(value)).digest('hex');
 const finalStatuses = new Set(['filled', 'canceled', 'expired', 'rejected']);
-function validatePolicy(input) {
+function validatePolicy(input, { allowEmptyTargets = false } = {}) {
     const p = {};
     for (const [key, min, max] of [['budget',0,1e9],['reservePct',0,100],['maxPositionPct',1,100],['maxOrderValue',1,1e7],['minTradeValue',1,1e6],['driftPct',0.1,20],['maxSpreadBps',1,100]]) {
         if (typeof input?.[key] !== 'number' || !Number.isFinite(input[key]) || input[key] < min || input[key] > max) throw fail('INVALID_POLICY', 'Invalid ' + key + '.', 400);
@@ -48,7 +48,8 @@ function validatePolicy(input) {
         return { symbol: t.symbol, weightPct: t.weightPct, ...(t.source ? { source: t.source } : {}) };
     }).sort((a,b) => a.symbol.localeCompare(b.symbol));
     if (new Set(p.targets.map(t => t.symbol)).size !== p.targets.length || p.targets.reduce((n,t) => n+t.weightPct,0) > 100-p.reservePct+1e-8 || p.minTradeValue > p.maxOrderValue) throw fail('INVALID_POLICY', 'Targets must be unique and leave the configured cash reserve; minimum trade cannot exceed the order limit.', 400);
-    if (!p.paused && (!p.budget || !p.targets.length)) throw fail('INVALID_POLICY', 'Set a funded budget and targets before unpausing.', 400);
+    // A trade may remove the last target; only an operator save must keep one to unpause.
+    if (!p.paused && (!p.budget || (!p.targets.length && !allowEmptyTargets))) throw fail('INVALID_POLICY', 'Set a funded budget and targets before unpausing.', 400);
     return p;
 }
 async function init() {
@@ -127,7 +128,7 @@ async function reserveOrder(plan, order, { enabled, automatic = false, now = () 
         if (plan.targetChange) {
             // The reviewed target becomes part of the policy only together with its order.
             if (environment !== 'paper') throw fail('INVALID_POLICY', 'Target changes are available only on Paper.', 400);
-            const next = validatePolicy(applyTargetChange(current.policy, plan.targetChange));
+            const next = validatePolicy(applyTargetChange(current.policy, plan.targetChange), { allowEmptyTargets: true });
             await run(c, 'UPDATE alpaca_investing_settings SET version=version+1,policy_json=? WHERE id=1', [JSON.stringify(next)]);
             await event(c, 'policy_saved', { version: current.version+1, policy: next, actor: plan.targetChange.actor, planId: plan.id, decisionKey: plan.decisionKey || null });
         }
@@ -141,16 +142,16 @@ async function reserveOrder(plan, order, { enabled, automatic = false, now = () 
 }
 // A plan that changes a target was reserved one policy version later.
 const appliedVersion = plan => plan.policyVersion + (plan.targetChange ? 1 : 0);
-// Undo a reserved target change whose order was never sent, unless the
-// operator has saved a newer policy since; that policy stays authoritative.
-async function restoreTarget(c, plan) {
+// Undo a reserved target change whose order was never sent or ended with
+// nothing filled, unless a newer policy was saved since; that policy stays authoritative.
+async function restoreTarget(c, plan, reason = 'order_not_sent') {
     if (!plan.targetChange) return;
     const latest = await state(c);
     if (latest.version !== appliedVersion(plan)) return;
     const previous = plan.targetChange.previous;
     const restored = applyTargetChange(latest.policy, { symbol: plan.targetChange.symbol, weightPct: previous?.weightPct ?? 0, source: previous?.source });
     await run(c, 'UPDATE alpaca_investing_settings SET version=version+1,policy_json=? WHERE id=1', [JSON.stringify(restored)]);
-    await event(c, 'policy_saved', { version: latest.version+1, policy: restored, actor: 'system', reason: 'order_not_sent', planId: plan.id, decisionKey: plan.decisionKey || null });
+    await event(c, 'policy_saved', { version: latest.version+1, policy: restored, actor: 'system', reason, planId: plan.id, decisionKey: plan.decisionKey || null });
 }
 // Serialize the final check and the *start* of dispatch with policy/ownership
 // writes, even in another process. The durable reservation already exists before
@@ -222,6 +223,11 @@ async function updateOrder(id, patch) {
         await run(c,'UPDATE alpaca_investing_orders SET '+selected.map(k => k+'=?').join(',')+',updated_at=? WHERE id=?', [...selected.map(k=>patch[k]),new Date().toISOString(),id]);
         await run(c,'UPDATE alpaca_investing_settings SET sequence=sequence+1 WHERE id=1');
         await event(c,'order_observed',{ id, ...patch });
+        const status = patch.status ?? previous.status;
+        if (!finalStatuses.has(previous.status) && finalStatuses.has(status) && !((patch.filled_qty ?? previous.filled_qty) > 0)) {
+            const planRow = (await all(c,'SELECT plan_json FROM alpaca_investing_plans WHERE id=?',[previous.plan_id]))[0];
+            if (planRow) await restoreTarget(c, JSON.parse(planRow.plan_json), 'order_unfilled');
+        }
     });
 }
 async function saveDecision(input) {

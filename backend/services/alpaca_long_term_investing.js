@@ -159,7 +159,7 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         const selectedBuy=environment==='paper' && Boolean(symbol) && side==='buy';
         if (selectedBuy && !operatorTrade && !p.targets.some(t=>t.symbol===symbol && t.weightPct>0)) throw fail('INVALID_TARGET','Choose a saved approved buy target.',400);
         const blockers=[...s.issues];
-        if (!p.budget || !p.targets.length) blockers.push('Save a capital budget and target allocation.');
+        if (!p.budget || (!p.targets.length && !operatorTrade)) blockers.push('Save a capital budget and target allocation.');
         const unmanagedValue=s.positions.filter(h=>!s.owned[h.symbol]).reduce((n,h)=>n+h.value,0);
         const allocationCapital=Math.min(p.budget,Math.max(0,s.equity-unmanagedValue));
         if (!(allocationCapital>0)) blockers.push('No funded capital is available within the ceiling after protecting unrelated holdings.');
@@ -235,7 +235,7 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
             const resultingWeightPct=allocationCapital>0?(owned+(side==='buy'?next.qty:-next.qty))*next.limitPrice/allocationCapital*100:0;
             targetChange=planOperatorTargetChange(s.state.policy,{symbol,side,resultingWeightPct,sellsAll:side==='sell' && next.qty>=owned-1e-8});
             if (targetChange) {
-                try { store.validatePolicy(applyTargetChange(s.state.policy,targetChange)); }
+                try { store.validatePolicy(applyTargetChange(s.state.policy,targetChange),{allowEmptyTargets:true}); }
                 catch (e) { blockers.push(symbol+': the resulting target is outside the policy. '+e.message); }
             }
         }

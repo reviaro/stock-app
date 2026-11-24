@@ -240,9 +240,11 @@ test('decision weights are validated, paper-only, stored and part of replay iden
 
 async function craftPlan(f,{targetChange,symbol='VTI',side='buy'}){
     const s=await f.store.settings();
-    return {id:require('node:crypto').randomUUID(),accountKey:f.store.hash(f.account.id),policyVersion:s.version,stateSequence:s.sequence,
+    const plan={id:require('node:crypto').randomUUID(),accountKey:f.store.hash(f.account.id),policyVersion:s.version,stateSequence:s.sequence,
         createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+60000).toISOString(),decisionKey:null,
         nextOrder:{symbol,side,qty:1,limitPrice:100.13},targetChange};
+    await f.store.savePlan(plan);
+    return plan;
 }
 async function policyEvents(){
     const conn=db.getDb();
@@ -423,4 +425,49 @@ test('malformed agent weights are refused as invalid decisions before anything i
         assert.equal(await f.store.getDecision(key),null);
     }
     await assert.rejects(f.service.decision({...await agentDecision(f,{key:'pick-badside-0001',symbol:'VTI',targetWeightPct:5,policyVersion:version}),side:'hold'}),{code:'PAPER_INVALID_DECISION'});
+});
+
+test('a terminal zero-fill outcome restores the target; a partial fill keeps it',async()=>{
+    const f=await fixture();
+    const plan=await craftPlan(f,{targetChange:agentVti});
+    const reserved=await f.store.reserveOrder(plan,plan.nextOrder,{enabled:()=>true});
+    await f.store.dispatchOrder(plan,reserved.order,{assertFresh:()=>{},submit:async()=>({id:'synthetic-rejected',status:'new'})});
+    await f.store.updateOrder(reserved.order.id,{status:'rejected'});
+    let s=await f.store.settings();
+    assert.equal(s.policy.targets.some(t=>t.symbol==='VTI'),false);
+    assert.equal(s.version,plan.policyVersion+2);
+    const [restored]=await policyEvents(); assert.equal(restored.actor,'system'); assert.equal(restored.reason,'order_unfilled');
+    const second=await craftPlan(f,{targetChange:agentVti});
+    const held=await f.store.reserveOrder(second,second.nextOrder,{enabled:()=>true});
+    await f.store.dispatchOrder(second,held.order,{assertFresh:()=>{},submit:async()=>({id:'synthetic-partial',status:'new'})});
+    await f.store.updateOrder(held.order.id,{status:'partially_filled',filled_qty:0.5});
+    await f.store.updateOrder(held.order.id,{status:'canceled'});
+    s=await f.store.settings();
+    assert.deepEqual(s.policy.targets.find(t=>t.symbol==='VTI'),{symbol:'VTI',weightPct:5,source:'agent'});
+    assert.equal(s.version,second.policyVersion+1);
+});
+
+test('an unfilled operator full sell that expires restores the removed target',async()=>{
+    const f=await fixture();
+    const plan=await craftPlan(f,{symbol:'AAPL',side:'sell',targetChange:{symbol:'AAPL',weightPct:0,actor:'operator',previous:{weightPct:20}}});
+    const reserved=await f.store.reserveOrder(plan,plan.nextOrder,{enabled:()=>true});
+    assert.equal((await f.store.settings()).policy.targets.some(t=>t.symbol==='AAPL'),false);
+    await f.store.dispatchOrder(plan,reserved.order,{assertFresh:()=>{},submit:async()=>({id:'synthetic-expired',status:'new'})});
+    await f.store.updateOrder(reserved.order.id,{status:'new',broker_id:'synthetic-expired'});
+    await f.store.updateOrder(reserved.order.id,{status:'expired'});
+    assert.deepEqual((await f.store.settings()).policy.targets,[{symbol:'AAPL',weightPct:20}]);
+});
+
+test('an operator can sell the only targeted holding and then buy with no targets saved',async()=>{
+    const f=await fixture();
+    f.state.positions=[{symbol:'AAPL',qty:'3',current_price:'100',side:'long',unrealized_pl:'0'}];
+    f.store.ownership=async()=>[{symbol:'AAPL',delta_qty:3,account_key:f.store.hash(f.account.id)}];
+    const sell=await f.service.previewOperatorTrade({symbol:'AAPL',side:'sell',qty:3});
+    assert.deepEqual(sell.blockers,[]);
+    await f.service.execute(sell.id,confirmation(sell));
+    assert.deepEqual((await f.store.settings()).policy.targets,[]);
+    f.state.positions=[];
+    for (const o of await f.store.orders()) if (!f.store.finalStatuses.has(o.status)) await f.store.updateOrder(o.id,{status:'filled',filled_qty:o.qty});
+    const buy=await f.service.previewOperatorTrade({symbol:'VTI',side:'buy',qty:1});
+    assert.deepEqual(buy.blockers,[]);
 });

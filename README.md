@@ -437,8 +437,11 @@ cash reserve across all targets. Lowering a pick is allowed even above a reduced
 cap. The server still sizes the order from that weight, fresh quotes and cash
 limits, so a weight that does not clear the minimum allocation drift or minimum
 trade cannot trade. The target is saved, tagged `"source": "agent"`, only when its
-order is reserved: a refused or blocked decision leaves the policy unchanged, and
-a reserved order that is never sent restores the previous target. Each pick
+order is reserved: a refused or blocked decision leaves the policy unchanged. If
+the reserved order is refused before dispatch, or ends rejected, canceled or
+expired with nothing filled, the previous target is restored, unless the policy
+was saved again in the meantime. An uncertain outcome keeps the target until it
+reconciles. Each pick
 creates a new policy version, so read the overview again before the next
 decision. Refusal codes are `PAPER_AGENT_TARGET_MODE` (not unpaused automatic
 mode), `PAPER_AGENT_TARGET_OPERATOR` (an operator-set target),
@@ -454,7 +457,8 @@ Maximum order, maximum position, capital ceiling, cash reserve, spread, asset
 eligibility and sell-first still apply; minimum trade and minimum allocation drift
 do not. A buy raises the saved target to at least the resulting weight; a sell
 lowers it to at most the resulting weight, and selling every managed share removes
-it. Sell buttons appear only on app-managed holdings. Operator trades always need
+it, even the last target. The same restore rule applies when the order ends with
+nothing filled. Sell buttons appear only on app-managed holdings. Operator trades always need
 the typed confirmation and never execute automatically.
 
 Orders are cash-funded, long-only stock/ETF DAY limit orders. DAY controls how
