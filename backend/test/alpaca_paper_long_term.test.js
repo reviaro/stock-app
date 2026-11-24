@@ -295,3 +295,62 @@ test('an invalid applied policy rolls back the reservation',async()=>{
     assert.equal((await f.store.settings()).version,plan.policyVersion);
     assert.equal((await f.store.orders()).length,before);
 });
+
+async function agentDecision(f,{key,symbol,side='buy',targetWeightPct,policyVersion}){
+    const research=require('../services/research_store');
+    const packet=await research.savePacket({symbol,generatedAt:new Date().toISOString(),accountScope:'research_only',eligibleForDecision:true,data:{info:{price:100}}});
+    const analysis={packetId:packet.id,contentHash:packet.contentHash,strategyVersion:'synthetic-paper-v1',analyzedAt:new Date().toISOString(),model:'synthetic-model',
+        claims:[{path:'data.info.price',value:100}],assumptions:['Synthetic thesis remains valid'],alternatives:['Wait and retain cash'],invalidation:'The thesis fails the next review.'};
+    return {account_id:1,policyVersion,decisionKey:key,symbol,side,reason:'Synthetic thesis for an agent-sized holding.',analysis,...(targetWeightPct===undefined?{}:{targetWeightPct})};
+}
+async function automaticWithCap(f,cap=20){
+    const saved=await f.service.savePolicy({...f.policy,executionMode:'automatic',agentPicksMaxPct:cap},1,'ENABLE AUTOMATIC PAPER INVESTING');
+    return saved.version;
+}
+
+test('automatic agent pick buys an untargeted symbol and saves it as an agent target',async()=>{
+    const f=await fixture();const version=await automaticWithCap(f);
+    const r=await f.service.decision(await agentDecision(f,{key:'pick-new-0001',symbol:'VTI',targetWeightPct:10,policyVersion:version}));
+    assert.ok(r.order); assert.equal(f.state.submitted.at(-1).symbol,'VTI'); assert.equal(f.state.submitted.at(-1).side,'buy');
+    const s=await f.store.settings();
+    assert.equal(s.version,version+1);
+    assert.deepEqual(s.policy.targets.find(t=>t.symbol==='VTI'),{symbol:'VTI',weightPct:10,source:'agent'});
+    const overview=await f.service.overview();
+    assert.equal(overview.agentPicksUsedPct,10);
+    assert.notEqual(overview.decisions.find(d=>d.decision_key==='pick-new-0001').status,'needs_reanalysis');
+});
+
+test('agent picks are refused in confirm mode, over the cap and on operator targets with the policy unchanged',async()=>{
+    const f=await fixture();
+    await assert.rejects(f.service.decision(await agentDecision(f,{key:'pick-confirm-0001',symbol:'VTI',targetWeightPct:5,policyVersion:1})),{code:'PAPER_AGENT_TARGET_MODE'});
+    assert.equal(await f.store.getDecision('pick-confirm-0001'),null);
+    const version=await automaticWithCap(f);
+    await assert.rejects(f.service.decision(await agentDecision(f,{key:'pick-overcap-0001',symbol:'VTI',targetWeightPct:21,policyVersion:version})),{code:'PAPER_AGENT_TARGET_LIMIT'});
+    await assert.rejects(f.service.decision(await agentDecision(f,{key:'pick-operator-001',symbol:'AAPL',targetWeightPct:22,policyVersion:version})),{code:'PAPER_AGENT_TARGET_OPERATOR'});
+    assert.equal(await f.store.getDecision('pick-overcap-0001'),null);
+    assert.equal((await f.store.settings()).version,version);
+    assert.equal(f.state.submitted.length,0);
+});
+
+test('a blocked agent pick leaves no target',async()=>{
+    const f=await fixture();const version=await automaticWithCap(f);
+    const quote=f.client.getLatestQuote;
+    f.client.getLatestQuote=async symbol=>symbol==='VTI'?{symbol,quote:{bp:100,ap:101,bs:100,as:100,t:new Date(Date.now()-100).toISOString()}}:quote(symbol);
+    const r=await f.service.decision(await agentDecision(f,{key:'pick-blocked-0001',symbol:'VTI',targetWeightPct:10,policyVersion:version}));
+    assert.equal(r.status,'blocked'); assert.equal(f.state.submitted.length,0);
+    const s=await f.store.settings();
+    assert.equal(s.version,version); assert.equal(s.policy.targets.some(t=>t.symbol==='VTI'),false);
+});
+
+test('plain decisions without a weight still require a saved target',async()=>{
+    const f=await fixture();const version=await automaticWithCap(f);
+    await assert.rejects(f.service.decision(await agentDecision(f,{key:'pick-plain-0001',symbol:'VTI',policyVersion:version})),{code:'PAPER_INVALID_TARGET'});
+});
+
+test('a stale operator save after an agent pick is refused and the pick survives',async()=>{
+    const f=await fixture();const version=await automaticWithCap(f);
+    const before=(await f.store.settings()).policy;
+    await f.service.decision(await agentDecision(f,{key:'pick-stale-0001',symbol:'VTI',targetWeightPct:10,policyVersion:version}));
+    await assert.rejects(f.service.savePolicy({...before,maxOrderValue:400},version,'ENABLE AUTOMATIC PAPER INVESTING'),{code:'PAPER_POLICY_CHANGED'});
+    assert.ok((await f.store.settings()).policy.targets.some(t=>t.symbol==='VTI' && t.source==='agent'));
+});

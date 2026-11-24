@@ -7,6 +7,7 @@ const { computeHoldings, buildSimulatorAccount } = require('./simulator_ledger')
 const { getDefaultHybridQuote } = require('./hybrid_market_data');
 const { emitSecurityEvent } = require('./security_events');
 const researchDecisions = require('./research_decisions');
+const { agentPicksUsedPct, applyTargetChange, planAgentTargetChange } = require('./long_term_target_changes');
 const MAX_EXECUTION_EVIDENCE_AGE_MS = 10_000;
 const decisionOrderStatus = order => ['filled','partially_filled','canceled','expired','rejected','unknown'].includes(order.status) ? order.status : 'submitted';
 
@@ -119,7 +120,8 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
     async function overview() {
         const state=await store.settings(); const config=configuration(env);
         const decisions=await store.decisions();
-        const base={configuration:{...config,accountBound:environment === 'paper' ? config.accountBound || Boolean(state.accountKey) : config.accountBound},version:state.version,policy:state.policy,orders:(await store.orders()).map(cleanOrder)};
+        const base={configuration:{...config,accountBound:environment === 'paper' ? config.accountBound || Boolean(state.accountKey) : config.accountBound},version:state.version,policy:state.policy,orders:(await store.orders()).map(cleanOrder),
+            ...(environment==='paper'?{agentPicksUsedPct:agentPicksUsedPct(state.policy)}:{})};
         const disconnected=blockers=>({...base,connected:false,blockers,positions:[],decisions:decisions.map(d=>decisionView(d,state,base.orders,blockers))});
         if (!config.configured) return disconnected([`Add ${environment} credentials on the server.`]);
         try {
@@ -146,8 +148,12 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         }
         return {value,sellFirst};
     }
-    async function preview({decisionKey=null,symbol=null,side=null}={}) {
-        const s=await snapshot(); const p=s.state.policy;
+    async function preview({decisionKey=null,symbol=null,side=null,targetWeightPct=null}={}) {
+        const s=await snapshot();
+        // An agent-sized pick is evaluated against its proposed target; the
+        // saved policy changes only when its order is reserved.
+        const targetChange=environment==='paper' && targetWeightPct!=null ? planAgentTargetChange(s.state.policy,{symbol,side,weightPct:targetWeightPct},fail) : null;
+        const p=targetChange?applyTargetChange(s.state.policy,targetChange):s.state.policy;
         const selectedBuy=environment==='paper' && Boolean(symbol) && side==='buy';
         if (selectedBuy && !p.targets.some(t=>t.symbol===symbol && t.weightPct>0)) throw fail('INVALID_TARGET','Choose a saved approved buy target.',400);
         const blockers=[...s.issues];
@@ -216,7 +222,7 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         const decision=decisionKey?await store.getDecision(decisionKey):null;
         if(decision && decision.policy_version!==s.state.version) throw fail('POLICY_CHANGED','The policy changed. Ask the strategy agent for a new decision under the current policy.');
         const plan={id:crypto.randomUUID(),accountKey:s.accountKey,policyVersion:s.state.version,stateSequence:s.state.sequence,createdAt:now().toISOString(),
-            expiresAt:new Date(now().getTime()+60000).toISOString(),decisionKey,...(selectedBuy?{selectedBuySymbol:symbol}:{}),rows,nextOrder:next,blockers:[...new Set(blockers)],
+            expiresAt:new Date(now().getTime()+60000).toISOString(),decisionKey,...(selectedBuy?{selectedBuySymbol:symbol}:{}),targetChange,rows,nextOrder:next,blockers:[...new Set(blockers)],
             reviewExpiresAt:decision?researchDecisions.recommendationExpiresAt(decision.analysis,decision.packet_generated_at):null,
             managedValue:round(managedValue),spendableCash:round(spendable),unmanagedValue:round(unmanagedValue),allocationCapital:round(allocationCapital),
             brokerQuantities:s.positions.map(h=>[h.symbol,h.qty]).sort((a,b)=>a[0].localeCompare(b[0]))};
@@ -288,7 +294,7 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         if (order.side==='buy' && ((fresh.owned[order.symbol]||0)*q.askPrice+order.qty*order.limitPrice)>allocationCapital*p.maxPositionPct/100+0.01) throw fail('POSITION_LIMIT','The current position would exceed the approved weight.');
         if (order.side==='sell' && (order.qty>(fresh.owned[order.symbol]||0)+1e-8 || order.qty>(fresh.positions.find(h=>h.symbol===order.symbol)?.qty||0))) throw fail('OWNERSHIP_CHANGED','The sell exceeds app-owned or verified broker shares.');
         if (selectedBuy) {
-            const weight=p.targets.find(t=>t.symbol===order.symbol)?.weightPct||0;
+            const weight=plan.targetChange?plan.targetChange.weightPct:(p.targets.find(t=>t.symbol===order.symbol)?.weightPct||0);
             // Match preview's bid mark for drift; size against the limit we would actually submit.
             const gap=allocationCapital*weight/100-(fresh.owned[order.symbol]||0)*q.bidPrice;
             const driftPct=allocationCapital>0?gap/allocationCapital*100:0;
@@ -368,12 +374,16 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         const previous=await store.getDecision(input.decisionKey);
         const existing=previous?(await store.orders()).find(o=>o.decision_key===previous.decision_key):null;
         if (!existing && input.policyVersion!==(await store.settings()).version) throw fail('POLICY_CHANGED','Read the current investing policy before requesting a decision.');
+        // Refuse an out-of-policy agent pick before it is recorded as a decision.
+        if (!previous && environment==='paper' && typeof input.targetWeightPct==='number' && Number.isFinite(input.targetWeightPct)) {
+            planAgentTargetChange((await store.settings()).policy,{symbol:input.symbol,side:input.side,weightPct:input.targetWeightPct},fail);
+        }
         const analysis=await researchDecisions.validateAnalysis(input.analysis,input.symbol,{now:existing?new Date(previous.analysis?.analyzedAt):now(),
             ...(previous?{maxAgeMs:researchDecisions.RECOMMENDATION_MAX_AGE_MS}:{})});
         const d=await store.saveDecision(input);
         await require('./research_store').saveDecisionEvidence(evidenceKey(d.decision_key),analysis);
         if (existing) return {order:cleanOrder(existing),replayed:true,status:decisionOrderStatus(existing),awaitingConfirmation:false};
-        const plan=await preview({decisionKey:d.decision_key,symbol:d.symbol,side:d.side});
+        const plan=await preview({decisionKey:d.decision_key,symbol:d.symbol,side:d.side,targetWeightPct:d.target_weight_pct??null});
         if (plan.policyVersion!==d.policy_version) throw fail('POLICY_CHANGED','The investing policy changed during the decision.');
         const state=await store.settings();
         if(state.version!==d.policy_version) throw fail('POLICY_CHANGED','The policy changed during this decision. Ask the strategy agent for new analysis.');
@@ -389,7 +399,7 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         const state=await store.settings();
         if (d.policy_version!==state.version) throw fail('POLICY_CHANGED',`This decision used policy ${d.policy_version}; the current policy is ${state.version}. Ask the strategy agent for a new decision under the current policy.`);
         await researchDecisions.validateStored(evidenceKey(key),d.symbol,now());
-        return preview({decisionKey:key,symbol:d.symbol,side:d.side});
+        return preview({decisionKey:key,symbol:d.symbol,side:d.side,targetWeightPct:d.target_weight_pct??null});
     }
     async function cancel(id) {
         const state=await store.settings(); const client=clientFactory(); const account=await client.getAccount(); requireAccount(account,state);
