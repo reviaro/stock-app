@@ -238,3 +238,60 @@ test('decision weights are validated, paper-only, stored and part of replay iden
     assert.equal((await f.store.saveDecision({...base,decisionKey:'weight-none-0001'})).target_weight_pct,null);
     await assert.rejects(liveStore.saveDecision({...base,decisionKey:'live-weight-0001',targetWeightPct:5}),{code:'LIVE_INVALID_DECISION'});
 });
+
+async function craftPlan(f,{targetChange,symbol='VTI',side='buy'}){
+    const s=await f.store.settings();
+    return {id:require('node:crypto').randomUUID(),accountKey:f.store.hash(f.account.id),policyVersion:s.version,stateSequence:s.sequence,
+        createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+60000).toISOString(),decisionKey:null,
+        nextOrder:{symbol,side,qty:1,limitPrice:100.13},targetChange};
+}
+async function policyEvents(){
+    const conn=db.getDb();
+    try { return await new Promise((resolve,reject)=>conn.all("SELECT detail_json FROM alpaca_paper_long_term_events WHERE action='policy_saved' ORDER BY id DESC LIMIT 3",(e,rows)=>e?reject(e):resolve(rows.map(r=>JSON.parse(r.detail_json))))); }
+    finally { await new Promise(resolve=>conn.close(resolve)); }
+}
+const agentVti={symbol:'VTI',weightPct:5,source:'agent',actor:'agent',previous:null};
+
+test('reservation applies the target change atomically and dispatch accepts only that version',async()=>{
+    const f=await fixture();
+    const plan=await craftPlan(f,{targetChange:agentVti});
+    const reserved=await f.store.reserveOrder(plan,plan.nextOrder,{enabled:()=>true});
+    const s=await f.store.settings();
+    assert.equal(s.version,plan.policyVersion+1);
+    assert.deepEqual(s.policy.targets.find(t=>t.symbol==='VTI'),{symbol:'VTI',weightPct:5,source:'agent'});
+    const [saved]=await policyEvents(); assert.equal(saved.actor,'agent'); assert.equal(saved.planId,plan.id); assert.equal(saved.version,plan.policyVersion+1);
+    const sent=await f.store.dispatchOrder(plan,reserved.order,{assertFresh:()=>{},submit:async()=>({id:'synthetic-broker',status:'new'})});
+    assert.equal(sent.replayed,false); assert.ok(sent.settlement);
+});
+
+test('a refused dispatch restores the previous target; a newer operator save is never overwritten',async()=>{
+    const f=await fixture();
+    const plan=await craftPlan(f,{targetChange:agentVti});
+    const reserved=await f.store.reserveOrder(plan,plan.nextOrder,{enabled:()=>true});
+    const out=await f.store.dispatchOrder(plan,reserved.order,{assertFresh:()=>{throw Object.assign(new Error('expired'),{code:'PAPER_PLAN_EXPIRED'});},submit:async()=>{throw new Error('never sent');}});
+    assert.equal(out.refused,true);
+    let s=await f.store.settings();
+    assert.equal(s.policy.targets.some(t=>t.symbol==='VTI'),false);
+    assert.equal(s.version,plan.policyVersion+2);
+    const [restored]=await policyEvents(); assert.equal(restored.actor,'system'); assert.equal(restored.reason,'order_not_sent');
+
+    const second=await craftPlan(f,{targetChange:agentVti});
+    const held=await f.store.reserveOrder(second,second.nextOrder,{enabled:()=>true});
+    const operator={...(await f.store.settings()).policy,targets:[{symbol:'AAPL',weightPct:15}]};
+    await f.service.savePolicy(operator,second.policyVersion+1,'ENABLE PAPER INVESTING');
+    const refused=await f.store.dispatchOrder(second,held.order,{assertFresh:()=>{},submit:async()=>{throw new Error('never sent');}});
+    assert.equal(refused.refused,true); assert.equal(refused.reason,'PAPER_DISPATCH_STATE_CHANGED');
+    s=await f.store.settings();
+    assert.equal(s.version,second.policyVersion+2);
+    assert.deepEqual(s.policy.targets,[{symbol:'AAPL',weightPct:15}]);
+});
+
+test('an invalid applied policy rolls back the reservation',async()=>{
+    const f=await fixture();
+    await f.service.savePolicy({...f.policy,targets:[{symbol:'AAPL',weightPct:25},{symbol:'QQQ',weightPct:25},{symbol:'SPY',weightPct:25}]},1,'ENABLE PAPER INVESTING');
+    const plan=await craftPlan(f,{targetChange:{...agentVti,weightPct:20}});
+    const before=(await f.store.orders()).length;
+    await assert.rejects(f.store.reserveOrder(plan,plan.nextOrder,{enabled:()=>true}),{code:'PAPER_INVALID_POLICY'});
+    assert.equal((await f.store.settings()).version,plan.policyVersion);
+    assert.equal((await f.store.orders()).length,before);
+});

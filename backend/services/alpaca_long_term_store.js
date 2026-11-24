@@ -1,5 +1,6 @@
 'use strict';
 const crypto = require('node:crypto');
+const { applyTargetChange } = require('./long_term_target_changes');
 
 const DEFAULT_POLICY = Object.freeze({ budget: 0, reservePct: 10, maxPositionPct: 25, maxOrderValue: 500,
     minTradeValue: 25, driftPct: 2, maxSpreadBps: 50, fractional: true, paused: true, executionMode: 'confirm', targets: [] });
@@ -123,6 +124,13 @@ async function reserveOrder(plan, order, { enabled, automatic = false, now = () 
         if (current.accountKey && current.accountKey !== plan.accountKey) throw fail('ACCOUNT_CHANGED', 'This installation is bound to a different broker account.');
         const pending = await all(c,"SELECT status FROM alpaca_investing_orders WHERE status NOT IN ('filled','canceled','expired','rejected')");
         if (pending.length) throw fail('RECONCILIATION_REQUIRED', 'Reconcile the outstanding long-term order first.');
+        if (plan.targetChange) {
+            // The reviewed target becomes part of the policy only together with its order.
+            if (environment !== 'paper') throw fail('INVALID_POLICY', 'Target changes are available only on Paper.', 400);
+            const next = validatePolicy(applyTargetChange(current.policy, plan.targetChange));
+            await run(c, 'UPDATE alpaca_investing_settings SET version=version+1,policy_json=? WHERE id=1', [JSON.stringify(next)]);
+            await event(c, 'policy_saved', { version: current.version+1, policy: next, actor: plan.targetChange.actor, planId: plan.id, decisionKey: plan.decisionKey || null });
+        }
         const stamp = new Date().toISOString();
         const id = crypto.randomUUID(); const clientId = 'lt-' + environment + '-' + crypto.randomUUID();
         await run(c,'UPDATE alpaca_investing_settings SET account_key=?,sequence=sequence+1 WHERE id=1',[plan.accountKey]);
@@ -130,6 +138,19 @@ async function reserveOrder(plan, order, { enabled, automatic = false, now = () 
         await event(c,'order_reserved',{ id, planId:plan.id, order });
         return { order: (await all(c,'SELECT * FROM alpaca_investing_orders WHERE id=?',[id]))[0], replayed:false };
     });
+}
+// A plan that changes a target was reserved one policy version later.
+const appliedVersion = plan => plan.policyVersion + (plan.targetChange ? 1 : 0);
+// Undo a reserved target change whose order was never sent, unless the
+// operator has saved a newer policy since; that policy stays authoritative.
+async function restoreTarget(c, plan) {
+    if (!plan.targetChange) return;
+    const latest = await state(c);
+    if (latest.version !== appliedVersion(plan)) return;
+    const previous = plan.targetChange.previous;
+    const restored = applyTargetChange(latest.policy, { symbol: plan.targetChange.symbol, weightPct: previous?.weightPct ?? 0, source: previous?.source });
+    await run(c, 'UPDATE alpaca_investing_settings SET version=version+1,policy_json=? WHERE id=1', [JSON.stringify(restored)]);
+    await event(c, 'policy_saved', { version: latest.version+1, policy: restored, actor: 'system', reason: 'order_not_sent', planId: plan.id, decisionKey: plan.decisionKey || null });
 }
 // Serialize the final check and the *start* of dispatch with policy/ownership
 // writes, even in another process. The durable reservation already exists before
@@ -154,7 +175,7 @@ async function dispatchOrder(plan, reserved, { automatic = false, assertFresh, s
                     || local.qty !== intent?.qty || local.limit_price !== intent?.limitPrice) {
                     throw fail('DISPATCH_INTENT_CHANGED', 'The reserved order no longer matches its reviewed intent.');
                 }
-                if (current.policy.paused || current.version !== plan.policyVersion || current.accountKey !== plan.accountKey
+                if (current.policy.paused || current.version !== appliedVersion(plan) || current.accountKey !== plan.accountKey
                     || current.sequence !== plan.stateSequence + 1 || (automatic && current.policy.executionMode !== 'automatic')) {
                     throw fail('DISPATCH_STATE_CHANGED', 'The investing policy or execution evidence changed before dispatch.');
                 }
@@ -172,6 +193,7 @@ async function dispatchOrder(plan, reserved, { automatic = false, assertFresh, s
                 await run(c, "UPDATE alpaca_investing_orders SET status='canceled',updated_at=? WHERE id=? AND status='submitting' AND broker_id IS NULL AND filled_qty=0", [new Date().toISOString(), local.id]);
                 await run(c, 'UPDATE alpaca_investing_settings SET sequence=sequence+1 WHERE id=1');
                 await event(c, 'order_not_sent', { id: local.id, planId: plan.id, code: refusal });
+                await restoreTarget(c, plan);
                 return { refused: true, reason: refusal };
             }
             // No await is allowed between the final check above and invoking
