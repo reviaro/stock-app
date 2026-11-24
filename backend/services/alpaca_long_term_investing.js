@@ -7,7 +7,7 @@ const { computeHoldings, buildSimulatorAccount } = require('./simulator_ledger')
 const { getDefaultHybridQuote } = require('./hybrid_market_data');
 const { emitSecurityEvent } = require('./security_events');
 const researchDecisions = require('./research_decisions');
-const { agentPicksUsedPct, applyTargetChange, planAgentTargetChange } = require('./long_term_target_changes');
+const { agentPicksUsedPct, applyTargetChange, planAgentTargetChange, planOperatorTargetChange } = require('./long_term_target_changes');
 const MAX_EXECUTION_EVIDENCE_AGE_MS = 10_000;
 const decisionOrderStatus = order => ['filled','partially_filled','canceled','expired','rejected','unknown'].includes(order.status) ? order.status : 'submitted';
 
@@ -148,14 +148,16 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         }
         return {value,sellFirst};
     }
-    async function preview({decisionKey=null,symbol=null,side=null,targetWeightPct=null}={}) {
+    async function preview({decisionKey=null,symbol=null,side=null,targetWeightPct=null,operatorQty=null}={}) {
         const s=await snapshot();
         // An agent-sized pick is evaluated against its proposed target; the
         // saved policy changes only when its order is reserved.
-        const targetChange=environment==='paper' && targetWeightPct!=null ? planAgentTargetChange(s.state.policy,{symbol,side,weightPct:targetWeightPct},fail) : null;
-        const p=targetChange?applyTargetChange(s.state.policy,targetChange):s.state.policy;
+        const agentChange=environment==='paper' && targetWeightPct!=null ? planAgentTargetChange(s.state.policy,{symbol,side,weightPct:targetWeightPct},fail) : null;
+        const p=agentChange?applyTargetChange(s.state.policy,agentChange):s.state.policy;
+        // Operator trades are sized by shares and skip rebalancing thresholds.
+        const operatorTrade=environment==='paper' && operatorQty!=null;
         const selectedBuy=environment==='paper' && Boolean(symbol) && side==='buy';
-        if (selectedBuy && !p.targets.some(t=>t.symbol===symbol && t.weightPct>0)) throw fail('INVALID_TARGET','Choose a saved approved buy target.',400);
+        if (selectedBuy && !operatorTrade && !p.targets.some(t=>t.symbol===symbol && t.weightPct>0)) throw fail('INVALID_TARGET','Choose a saved approved buy target.',400);
         const blockers=[...s.issues];
         if (!p.budget || !p.targets.length) blockers.push('Save a capital budget and target allocation.');
         const unmanagedValue=s.positions.filter(h=>!s.owned[h.symbol]).reduce((n,h)=>n+h.value,0);
@@ -163,7 +165,7 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         if (!(allocationCapital>0)) blockers.push('No funded capital is available within the ceiling after protecting unrelated holdings.');
         // A selected recommendation needs its target and every managed holding.
         // Unheld, unrelated targets cannot affect this order's valuation or sales.
-        const symbols=selectedBuy?[symbol]:[...new Set([...p.targets.filter(t=>!symbol||t.symbol===symbol).map(t=>t.symbol),...Object.keys(s.owned).filter(k=>s.owned[k]>1e-7)])].sort();
+        const symbols=selectedBuy || operatorTrade?[symbol]:[...new Set([...p.targets.filter(t=>!symbol||t.symbol===symbol).map(t=>t.symbol),...Object.keys(s.owned).filter(k=>s.owned[k]>1e-7)])].sort();
         const heldMarks=selectedBuy?heldBuyValuation(s,symbol,allocationCapital):null;
         const rows=[]; const capitalMarks=new Map(); let managedValue=heldMarks?.value||0;
         for (const ticker of symbols) {
@@ -194,17 +196,24 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
             capitalMarks.set(ticker,capitalValue); managedValue+=capitalValue;
             const targetValue=allocationCapital*target/100;
             const delta=targetValue-currentValue;
-            const direction=delta>=0?'buy':'sell';
+            const direction=operatorTrade?side:delta>=0?'buy':'sell';
             const limitPrice=direction==='buy'?ceilToTick(q.askPrice*1.001):floorToTick(q.bidPrice*0.999);
             const fractional=p.fractional && asset.fractionable===true;
             const factor=fractional?1e6:1;
             const positionHeadroom=Math.max(0,allocationCapital*p.maxPositionPct/100-capitalValue);
-            const rawQty=Math.min(Math.abs(delta)/limitPrice,p.maxOrderValue/limitPrice,direction==='sell'?Math.min(owned,held?.qty||0):positionHeadroom/limitPrice);
+            let rawQty=Math.min(Math.abs(delta)/limitPrice,p.maxOrderValue/limitPrice,direction==='sell'?Math.min(owned,held?.qty||0):positionHeadroom/limitPrice);
+            if (operatorTrade) {
+                const sellable=Math.min(owned,Number(held?.qty)||0);
+                rawQty=operatorQty;
+                if (!fractional && !Number.isInteger(operatorQty)) { blockers.push(ticker+': this asset trades in whole shares only.'); rawQty=0; }
+                else if (side==='sell' && operatorQty>sellable+1e-8) { blockers.push(`${ticker}: you can sell at most ${round(sellable)} app-managed shares.`); rawQty=0; }
+            }
             const qty=Math.floor((rawQty+1e-10)*factor)/factor;
             const notional=round(qty*limitPrice);
+            if (operatorTrade && notional>p.maxOrderValue) blockers.push(`${ticker}: this trade exceeds the maximum order of $${p.maxOrderValue}.`);
             const driftPct=allocationCapital?Math.abs(delta)/allocationCapital*100:0;
             rows.push({symbol:ticker,side:direction,qty,limitPrice,notional,currentQty:owned,currentValue:round(currentValue),targetWeightPct:target,
-                targetValue:round(targetValue),driftPct:round(driftPct),actionable:qty>0 && notional>=p.minTradeValue && driftPct>=p.driftPct,
+                targetValue:round(targetValue),driftPct:round(driftPct),actionable:operatorTrade?qty>0:qty>0 && notional>=p.minTradeValue && driftPct>=p.driftPct,
                 quoteAt:q.sourceTimestamp,feed:q.feed,fractional});
         }
         const spendable=Math.max(0,Math.min(s.cash,s.cashBuyingPower,allocationCapital*(1-p.reservePct/100)-managedValue));
@@ -218,11 +227,22 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         }
         if (next?.side==='buy' && next.qty*next.limitPrice>spendable+1e-8) blockers.push('This buy would exceed cash-only funding or the required reserve. Sell and reconcile first.');
         if (next?.side==='buy' && (capitalMarks.get(next.symbol)+next.qty*next.limitPrice)>allocationCapital*p.maxPositionPct/100+0.01) blockers.push('This buy would exceed the maximum position weight.');
-        if (symbol && !next && !blockers.some(b=>b.startsWith(symbol+':'))) blockers.push('This decision is outside the approved target drift or minimum trade.');
+        if (symbol && !next && !blockers.some(b=>b.startsWith(symbol+':'))) blockers.push(operatorTrade?'No order can be placed for this quantity.':'This decision is outside the approved target drift or minimum trade.');
+        let targetChange=agentChange;
+        if (operatorTrade && next) {
+            // Keep the saved target consistent with the position this trade leaves.
+            const owned=s.owned[symbol]||0;
+            const resultingWeightPct=allocationCapital>0?(owned+(side==='buy'?next.qty:-next.qty))*next.limitPrice/allocationCapital*100:0;
+            targetChange=planOperatorTargetChange(s.state.policy,{symbol,side,resultingWeightPct,sellsAll:side==='sell' && next.qty>=owned-1e-8});
+            if (targetChange) {
+                try { store.validatePolicy(applyTargetChange(s.state.policy,targetChange)); }
+                catch (e) { blockers.push(symbol+': the resulting target is outside the policy. '+e.message); }
+            }
+        }
         const decision=decisionKey?await store.getDecision(decisionKey):null;
         if(decision && decision.policy_version!==s.state.version) throw fail('POLICY_CHANGED','The policy changed. Ask the strategy agent for a new decision under the current policy.');
         const plan={id:crypto.randomUUID(),accountKey:s.accountKey,policyVersion:s.state.version,stateSequence:s.state.sequence,createdAt:now().toISOString(),
-            expiresAt:new Date(now().getTime()+60000).toISOString(),decisionKey,...(selectedBuy?{selectedBuySymbol:symbol}:{}),targetChange,rows,nextOrder:next,blockers:[...new Set(blockers)],
+            expiresAt:new Date(now().getTime()+60000).toISOString(),decisionKey,...(selectedBuy?{selectedBuySymbol:symbol}:{}),...(operatorTrade?{operatorTrade:true}:{}),targetChange,rows,nextOrder:next,blockers:[...new Set(blockers)],
             reviewExpiresAt:decision?researchDecisions.recommendationExpiresAt(decision.analysis,decision.packet_generated_at):null,
             managedValue:round(managedValue),spendableCash:round(spendable),unmanagedValue:round(unmanagedValue),allocationCapital:round(allocationCapital),
             brokerQuantities:s.positions.map(h=>[h.symbol,h.qty]).sort((a,b)=>a[0].localeCompare(b[0]))};
@@ -231,9 +251,10 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         return publicPlan(plan);
     }
     function publicPlan(plan) { const {accountKey,brokerQuantities,...safe}=plan; void accountKey; void brokerQuantities; return safe; }
-    function previewOperatorBuy(symbol) {
-        if (typeof symbol!=='string' || !/^[A-Z][A-Z0-9.\-]{0,9}$/.test(symbol)) throw fail('INVALID_TARGET','Choose a saved approved buy target.',400);
-        return preview({symbol,side:'buy'});
+    async function previewOperatorTrade(input) {
+        if (!input || typeof input.symbol!=='string' || !/^[A-Z][A-Z0-9.\-]{0,9}$/.test(input.symbol) || !['buy','sell'].includes(input.side)
+            || typeof input.qty!=='number' || !Number.isFinite(input.qty) || !(input.qty>0)) throw fail('INVALID_REQUEST','Enter a broker symbol, buy or sell, and a positive share quantity.',400);
+        return preview({symbol:input.symbol,side:input.side,operatorQty:input.qty});
     }
     async function executeReviewed(planId,{confirmation,automatic=false,refreshDecision=true,researchCheck=null}={}) {
         const row=await store.getPlan(planId);
@@ -243,7 +264,7 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         if (existing) return {order:cleanOrder(existing),replayed:true};
         if (!order || plan.blockers.length) throw fail('PLAN_BLOCKED','Resolve the preview blockers before submitting.');
         const selectedBuy=environment==='paper' && plan.selectedBuySymbol===order.symbol && order.side==='buy';
-        if (selectedBuy && !plan.decisionKey && automatic) throw fail('CONFIRMATION_REQUIRED','An operator buy requires manual confirmation.',400);
+        if ((selectedBuy || plan.operatorTrade) && !plan.decisionKey && automatic) throw fail('CONFIRMATION_REQUIRED','An operator trade requires manual confirmation.',400);
         if (!automatic && confirmation!==`${order.side.toUpperCase()} ${order.symbol} ${confirmationSuffix}`) throw fail('CONFIRMATION_REQUIRED','Type the exact order confirmation.',400);
         if(plan.decisionKey && refreshDecision) {
             // Slow research refreshes must finish before starting the short quote
@@ -293,7 +314,7 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         if (order.side==='buy' && order.qty*order.limitPrice>Math.max(0,Math.min(fresh.cash,fresh.cashBuyingPower,allocationCapital*(1-p.reservePct/100)-managed))+1e-8) throw fail('CASH_CHANGED','Cash funding or the reserve changed.');
         if (order.side==='buy' && ((fresh.owned[order.symbol]||0)*q.askPrice+order.qty*order.limitPrice)>allocationCapital*p.maxPositionPct/100+0.01) throw fail('POSITION_LIMIT','The current position would exceed the approved weight.');
         if (order.side==='sell' && (order.qty>(fresh.owned[order.symbol]||0)+1e-8 || order.qty>(fresh.positions.find(h=>h.symbol===order.symbol)?.qty||0))) throw fail('OWNERSHIP_CHANGED','The sell exceeds app-owned or verified broker shares.');
-        if (selectedBuy) {
+        if (selectedBuy && !plan.operatorTrade) {
             const weight=plan.targetChange?plan.targetChange.weightPct:(p.targets.find(t=>t.symbol===order.symbol)?.weightPct||0);
             // Match preview's bid mark for drift; size against the limit we would actually submit.
             const gap=allocationCapital*weight/100-(fresh.owned[order.symbol]||0)*q.bidPrice;
@@ -443,6 +464,6 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         const current=await store.settings();
         return store.savePolicy({...current.policy,paused:true},expectedVersion,'');
     }
-    return {overview,preview,execute,decision,previewDecision,...(environment==='paper'?{previewOperatorBuy}:{}),cancel,simulatorDraft,adopt,pause,savePolicy:store.savePolicy};
+    return {overview,preview,execute,decision,previewDecision,...(environment==='paper'?{previewOperatorTrade}:{}),cancel,simulatorDraft,adopt,pause,savePolicy:store.savePolicy};
 }
 module.exports={createLongTermInvesting,orderObservation,cleanOrder};

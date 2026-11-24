@@ -58,7 +58,7 @@ for (const [reason,shares,equity] of [['oversized',5,2800],['below drift',18,960
         await f.service.savePolicy({...f.policy,maxOrderValue:100},1,'ENABLE PAPER INVESTING');
         f.state.positions=[{symbol:'AAPL',qty:String(shares),current_price:'100',side:'long',unrealized_pl:'0'}];
         f.store.ownership=async()=>[{symbol:'AAPL',delta_qty:shares,account_key:f.store.hash(f.account.id)}];
-        const plan=await f.service.previewOperatorBuy('AAPL');
+        const plan=await f.service.preview({symbol:'AAPL',side:'buy'});
         assert.deepEqual(plan.blockers,[]);
         const reserve=t.mock.method(f.store,'reserveOrder');
         f.account.equity=String(equity);
@@ -68,10 +68,9 @@ for (const [reason,shares,equity] of [['oversized',5,2800],['below drift',18,960
     });
 }
 
-test('operator buys require an approved symbol and manual confirmation; racing previews reserve only once',async()=>{
+test('operator trades require manual confirmation; racing previews reserve only once',async()=>{
     const f=await heldFixture();
-    for(const invalid of ['',null,'OTHER']) await assert.rejects(f.service.previewOperatorBuy(invalid),{code:'PAPER_INVALID_TARGET'});
-    const plans=await Promise.all([f.service.previewOperatorBuy('AAPL'),f.service.previewOperatorBuy('AAPL')]);
+    const plans=await Promise.all([f.service.previewOperatorTrade({symbol:'AAPL',side:'buy',qty:1}),f.service.previewOperatorTrade({symbol:'AAPL',side:'buy',qty:1})]);
     assert.equal(f.state.submitted.length,0);
     await assert.rejects(f.service.execute(plans[0].id,{automatic:true}),{code:'PAPER_CONFIRMATION_REQUIRED'});
     await assert.rejects(f.service.execute(plans[0].id,{}),{code:'PAPER_CONFIRMATION_REQUIRED'});
@@ -353,4 +352,64 @@ test('a stale operator save after an agent pick is refused and the pick survives
     await f.service.decision(await agentDecision(f,{key:'pick-stale-0001',symbol:'VTI',targetWeightPct:10,policyVersion:version}));
     await assert.rejects(f.service.savePolicy({...before,maxOrderValue:400},version,'ENABLE AUTOMATIC PAPER INVESTING'),{code:'PAPER_POLICY_CHANGED'});
     assert.ok((await f.store.settings()).policy.targets.some(t=>t.symbol==='VTI' && t.source==='agent'));
+});
+
+async function heldVti(f,qty,{targets=f.policy.targets,maxOrderValue=5000}={}){
+    await f.service.savePolicy({...f.policy,maxOrderValue,targets},1,'ENABLE PAPER INVESTING');
+    f.state.positions=[{symbol:'VTI',qty:String(qty),current_price:'100',side:'long',unrealized_pl:'0'}];
+    f.store.ownership=async()=>[{symbol:'VTI',delta_qty:qty,account_key:f.store.hash(f.account.id)}];
+}
+
+test('operator trades are sized by shares, skip rebalancing thresholds and set targets on reservation',async()=>{
+    const f=await fixture();
+    await f.service.savePolicy({...f.policy,minTradeValue:400},1,'ENABLE PAPER INVESTING');
+    const buy=await f.service.previewOperatorTrade({symbol:'VTI',side:'buy',qty:2});
+    assert.equal(buy.operatorTrade,true);
+    assert.equal(buy.nextOrder.qty,2); assert.equal(buy.nextOrder.side,'buy'); assert.deepEqual(buy.blockers,[]);
+    assert.deepEqual(buy.targetChange,{symbol:'VTI',weightPct:2,actor:'operator',previous:null});
+    await assert.rejects(f.service.execute(buy.id,{automatic:true}),{code:'PAPER_CONFIRMATION_REQUIRED'});
+    await f.service.execute(buy.id,confirmation(buy));
+    assert.equal(f.state.submitted.at(-1).symbol,'VTI');
+    const s=await f.store.settings();
+    assert.equal(s.version,3); assert.deepEqual(s.policy.targets.find(t=>t.symbol==='VTI'),{symbol:'VTI',weightPct:2});
+});
+
+test('operator trade limits block with clear reasons',async()=>{
+    const f=await fixture();
+    assert.ok((await f.service.previewOperatorTrade({symbol:'VTI',side:'buy',qty:6})).blockers.some(b=>/maximum order/i.test(b)));
+    await f.service.savePolicy({...f.policy,maxOrderValue:5000},1,'ENABLE PAPER INVESTING');
+    assert.ok((await f.service.previewOperatorTrade({symbol:'VTI',side:'buy',qty:30})).blockers.some(b=>/maximum position/i.test(b)));
+    const asset=f.client.getAsset;
+    f.client.getAsset=async symbol=>({...await asset(symbol),fractionable:false});
+    assert.ok((await f.service.previewOperatorTrade({symbol:'VTI',side:'buy',qty:1.5})).blockers.some(b=>/whole shares/i.test(b)));
+    f.client.getAsset=asset;
+    f.state.marketOpen=false;
+    assert.ok((await f.service.previewOperatorTrade({symbol:'VTI',side:'buy',qty:1})).blockers.some(b=>/session is closed/i.test(b)));
+    f.state.marketOpen=true;
+    await f.service.savePolicy({...f.policy,maxOrderValue:5000,paused:true},2,'');
+    assert.ok((await f.service.previewOperatorTrade({symbol:'VTI',side:'buy',qty:1})).blockers.some(b=>/paused/i.test(b)));
+    assert.equal(f.state.submitted.length,0);
+});
+
+test('operator sells cannot exceed managed shares',async()=>{
+    const f=await fixture();await heldVti(f,3);
+    const plan=await f.service.previewOperatorTrade({symbol:'VTI',side:'sell',qty:4});
+    assert.ok(plan.blockers.some(b=>/at most 3/.test(b)));
+    assert.equal(plan.nextOrder?.qty??0,0);
+});
+
+test('selling every managed share removes the target, including fractional quantities',async()=>{
+    const f=await fixture();await heldVti(f,7.346186,{targets:[...f.policy.targets,{symbol:'VTI',weightPct:10}]});
+    const plan=await f.service.previewOperatorTrade({symbol:'VTI',side:'sell',qty:7.346186});
+    assert.deepEqual(plan.blockers,[]); assert.equal(plan.nextOrder.qty,7.346186);
+    assert.deepEqual(plan.targetChange,{symbol:'VTI',weightPct:0,actor:'operator',previous:{weightPct:10}});
+    await f.service.execute(plan.id,confirmation(plan));
+    assert.equal((await f.store.settings()).policy.targets.some(t=>t.symbol==='VTI'),false);
+});
+
+test('operator trades reject malformed input',async()=>{
+    const f=await fixture();
+    for (const bad of [null,{symbol:'',side:'buy',qty:1},{symbol:'vti',side:'buy',qty:1},{symbol:'VTI',side:'hold',qty:1},{symbol:'VTI',side:'buy',qty:0},
+        {symbol:'VTI',side:'buy',qty:-1},{symbol:'VTI',side:'buy',qty:'1'},{symbol:'VTI',side:'buy',qty:Number.NaN}])
+        await assert.rejects(f.service.previewOperatorTrade(bad),{code:'PAPER_INVALID_REQUEST'});
 });
