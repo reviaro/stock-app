@@ -471,3 +471,12 @@ test('an operator can sell the only targeted holding and then buy with no target
     const buy=await f.service.previewOperatorTrade({symbol:'VTI',side:'buy',qty:1});
     assert.deepEqual(buy.blockers,[]);
 });
+
+test('paper pause always pauses the latest policy, even from a stale view',async()=>{
+    const f=await fixture();
+    await f.service.savePolicy({...f.policy,maxOrderValue:400},1,'ENABLE PAPER INVESTING');
+    const result=await f.service.pause(1);
+    assert.equal(result.policy.paused,true);
+    const s=await f.store.settings();
+    assert.equal(s.version,3); assert.equal(s.policy.paused,true); assert.equal(s.policy.maxOrderValue,400);
+});
