@@ -111,6 +111,39 @@ describe('Long-term paper workspace', () => {
     expect(screen.getByRole('button', { name: 'Save paper policy' })).toBeEnabled()
     expect(hooks.policy.mutate).not.toHaveBeenCalled()
   })
+  it('shows the agent cap, tags and usage on Paper and saves them', () => {
+    hooks.overview.data = { ...baseline(), policy: { ...baseline().policy, budget: 1000, agentPicksMaxPct: 20,
+      targets: [{ symbol: 'AAPL', weightPct: 20 }, { symbol: 'QQQ', weightPct: 5, source: 'agent' }] } }
+    render(<AlpacaPaperPage />)
+    expect(screen.getByLabelText('Agent picks total (%)')).toHaveValue(20)
+    expect(screen.getByText('Added by agent')).toBeVisible()
+    expect(screen.getByText('Agent picks: 5% of 20%')).toBeVisible()
+    fireEvent.change(screen.getByLabelText('Agent picks total (%)'), { target: { value: '15' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save paper policy' }))
+    expect(hooks.policy.mutate).toHaveBeenCalledWith(expect.objectContaining({ policy: expect.objectContaining({ agentPicksMaxPct: 15,
+      targets: [{ symbol: 'AAPL', weightPct: 20 }, { symbol: 'QQQ', weightPct: 5, source: 'agent' }] }) }))
+  })
+  it('defaults a missing agent cap to 0 and hides the usage line without agent picks', () => {
+    render(<AlpacaPaperPage />)
+    expect(screen.getByLabelText('Agent picks total (%)')).toHaveValue(0)
+    expect(screen.queryByText(/Agent picks:/)).not.toBeInTheDocument()
+  })
+  it('editing an agent row symbol clears its tag', () => {
+    hooks.overview.data = { ...baseline(), policy: { ...baseline().policy, budget: 1000, agentPicksMaxPct: 20,
+      targets: [{ symbol: 'AAPL', weightPct: 20 }, { symbol: 'QQQ', weightPct: 5, source: 'agent' }] } }
+    render(<AlpacaPaperPage />)
+    fireEvent.change(screen.getByLabelText('Broker symbol 2'), { target: { value: 'vti' } })
+    expect(screen.queryByText('Added by agent')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Save paper policy' }))
+    expect(hooks.policy.mutate).toHaveBeenCalledWith(expect.objectContaining({ policy: expect.objectContaining({
+      targets: [{ symbol: 'AAPL', weightPct: 20 }, { symbol: 'VTI', weightPct: 5 }] }) }))
+  })
+  it('shows the requested weight on an agent decision card', () => {
+    hooks.overview.data = { ...baseline(), decisions: [{ decision_key: 'synthetic-pick', symbol: 'VTI', side: 'buy', reason: 'Synthetic thesis for a new holding.',
+      created_at: new Date().toISOString(), status: 'blocked', blockers: [], target_weight_pct: 8 }] }
+    render(<AlpacaPaperPage />)
+    expect(screen.getByText('Requested target: 8%')).toBeVisible()
+  })
   it('explains why resuming stays disabled when the saved policy has no targets', () => {
     hooks.overview.data = { ...baseline(), policy: { ...baseline().policy, budget: 1000, executionMode: 'automatic' } }
     render(<AlpacaPaperPage />)

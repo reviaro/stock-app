@@ -16,6 +16,7 @@ type Environment = 'live' | 'paper'
 export type InvestingOverview = Omit<LiveOverview, 'configuration'> & {
   configuration: Omit<LiveOverview['configuration'], 'environment'> & { environment: Environment }
   legacyHandovers?: { legacyVersion: 'v1' | 'v2'; planId: number; symbol: string; qty: number }[]
+  agentPicksUsedPct?: number
 }
 type InvestingHooks = Omit<ReturnType<typeof useAlpacaLive>, 'security' | 'overview'> & {
   overview: { data?: InvestingOverview; isLoading: boolean; isFetching: boolean; error: Error | null; refetch: () => unknown }
@@ -23,7 +24,8 @@ type InvestingHooks = Omit<ReturnType<typeof useAlpacaLive>, 'security' | 'overv
 type SectionProps = { data: InvestingOverview; hooks: InvestingHooks; verified: boolean; environment: Environment }
 
 function PolicyEditor({ data, hooks, verified, environment }: SectionProps) {
-  const [policy, setPolicy] = useState<LivePolicy>(() => structuredClone(data.policy))
+  const [policy, setPolicy] = useState<LivePolicy>(() => environment === 'paper'
+    ? { ...structuredClone(data.policy), agentPicksMaxPct: data.policy.agentPicksMaxPct ?? 0 } : structuredClone(data.policy))
   const [confirmation, setConfirmation] = useState('')
   const [importNote, setImportNote] = useState('')
   const phrase = `ENABLE ${policy.executionMode === 'automatic' ? 'AUTOMATIC ' : ''}${environment.toUpperCase()} INVESTING`
@@ -35,11 +37,14 @@ function PolicyEditor({ data, hooks, verified, environment }: SectionProps) {
     { key: 'budget', label: 'Capital ceiling ($)', min: 0, max: 1e9, step: '0.01' },
     { key: 'reservePct', label: 'Cash reserve (%)', min: 0, max: 100, step: '0.1' },
     { key: 'maxPositionPct', label: 'Maximum position (%)', min: 1, max: 100, step: '0.1' },
+    ...(environment === 'paper' ? [{ key: 'agentPicksMaxPct' as const, label: 'Agent picks total (%)', min: 0, max: 100, step: '0.1' }] : []),
     { key: 'maxOrderValue', label: 'Maximum order ($)', min: 1, max: 1e7, step: '0.01' },
     { key: 'minTradeValue', label: 'Minimum trade ($)', min: 1, max: 1e6, step: '0.01' },
     { key: 'driftPct', label: 'Minimum allocation drift (%)', min: 0.1, max: 20, step: '0.1' },
     { key: 'maxSpreadBps', label: 'Maximum spread (bps)', min: 1, max: 100, step: '1' },
   ]
+  const agentCap = Number.isFinite(policy.agentPicksMaxPct) ? policy.agentPicksMaxPct ?? 0 : 0
+  const agentUsed = Math.round(policy.targets.filter(t => t.source === 'agent').reduce((n, t) => n + (Number.isFinite(t.weightPct) ? t.weightPct : 0), 0) * 100) / 100
   async function importDraft() {
     try {
       const draft = await hooks.draft.mutateAsync()
@@ -69,13 +74,15 @@ function PolicyEditor({ data, hooks, verified, environment }: SectionProps) {
       </div>
       <p className="text-xs text-muted-foreground">Importing changes this draft only. Review every broker symbol: a mutual fund such as FXAIX is never silently replaced with an ETF. Target weights must leave the cash reserve.</p>
       {importNote && <p role="status" className="text-sm text-muted-foreground">{importNote}</p>}
+      {environment === 'paper' && (agentCap > 0 || agentUsed > 0) && <p className="text-sm text-muted-foreground">Agent picks: {agentUsed}% of {agentCap}%</p>}
       {!policy.targets.length && <p className="text-sm text-muted-foreground">Import the simulator allocation or add a target to begin.</p>}
       <div className="space-y-2">{policy.targets.map((target, index) => <div key={index} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end gap-2">
         <label className="min-w-0 text-xs">Broker symbol {index + 1}<input className={inputClass} required value={target.symbol} maxLength={10}
-          onChange={e => setPolicy(old => ({ ...old, targets: old.targets.map((t, i) => i === index ? { ...t, symbol: e.target.value.toUpperCase().trim() } : t) }))} /></label>
+          onChange={e => setPolicy(old => ({ ...old, targets: old.targets.map((t, i) => i === index ? { symbol: e.target.value.toUpperCase().trim(), weightPct: t.weightPct } : t) }))} /></label>
         <label className="min-w-0 text-xs">Target weight (%) {index + 1}<input className={inputClass} required type="number" min="0.01" max={policy.maxPositionPct} step="0.01" value={Number.isNaN(target.weightPct) ? '' : target.weightPct}
           onChange={e => setPolicy(old => ({ ...old, targets: old.targets.map((t, i) => i === index ? { ...t, weightPct: e.target.value === '' ? Number.NaN : Number(e.target.value) } : t) }))} /></label>
-        <Button type="button" variant="ghost" aria-label={'Remove target ' + (index + 1)} onClick={() => setPolicy(old => ({ ...old, targets: old.targets.filter((_, i) => i !== index) }))}>Remove</Button>
+        <div className="flex items-center gap-2">{target.source === 'agent' && <span className="whitespace-nowrap rounded border border-border px-2 py-1 text-xs text-muted-foreground">Added by agent</span>}
+          <Button type="button" variant="ghost" aria-label={'Remove target ' + (index + 1)} onClick={() => setPolicy(old => ({ ...old, targets: old.targets.filter((_, i) => i !== index) }))}>Remove</Button></div>
       </div>)}</div>
       <Button type="button" variant="outline" disabled={policy.targets.length >= 30} onClick={() => setPolicy(old => ({ ...old, targets: [...old.targets, { symbol: '', weightPct: 0 }] }))}>Add target</Button>
       <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={policy.fractional} onChange={e => setPolicy(old => ({ ...old, fractional: e.target.checked }))} />Allow fractional shares when the broker asset supports them</label>
@@ -176,6 +183,7 @@ export function LongTermInvestingWorkspace({ hooks, environment, verified, verif
             return <article key={d.decision_key} className="rounded-lg border border-border bg-card p-4">
               <div className="flex flex-wrap items-center justify-between gap-3"><strong>{d.side.toUpperCase()} {d.symbol}</strong><span className="text-xs text-muted-foreground">{decisionLabels[status]}</span></div>
               <p className="mt-2 whitespace-pre-wrap break-words text-sm text-muted-foreground">{d.reason}</p>
+              {d.target_weight_pct != null && <p className="mt-1 text-xs text-muted-foreground">Requested target: {d.target_weight_pct}%</p>}
               {!!d.blockers?.length && <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-amber-700 dark:text-amber-300">{d.blockers.map(b => <li key={b}>{b}</li>)}</ul>}
               {d.expiresAt && !order && <p className="mt-2 text-xs text-muted-foreground">Recommendation review deadline: {new Date(d.expiresAt).toLocaleString()}</p>}
               {d.checkedAt && <p className="mt-1 text-xs text-muted-foreground">Last execution check: {new Date(d.checkedAt).toLocaleString()}</p>}
