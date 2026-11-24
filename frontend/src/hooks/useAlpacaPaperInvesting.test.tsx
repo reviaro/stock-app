@@ -24,9 +24,9 @@ test('paper allocation import and confirmed submission use only the paper endpoi
     const draft = await hook.result.current.draft.mutateAsync()
     expect(draft.sourceAccountId).toBe(1)
   })
-  await act(async () => { await hook.result.current.manualPreview.mutateAsync('SPY') })
-  expect(fetcher).toHaveBeenCalledWith('/api/alpaca-paper/long-term/manual-buy/preview', {
-    method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{"symbol":"SPY"}',
+  await act(async () => { await hook.result.current.manualPreview.mutateAsync({ symbol: 'SPY', side: 'buy', qty: 2 }) })
+  expect(fetcher).toHaveBeenCalledWith('/api/alpaca-paper/long-term/manual-trade/preview', {
+    method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{"symbol":"SPY","side":"buy","qty":2}',
   })
   expect(fetcher.mock.calls.some(([url]) => String(url).endsWith('/execute'))).toBe(false)
   expect(fetcher.mock.calls.some(([url]) => String(url).endsWith('/policy'))).toBe(false)

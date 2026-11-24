@@ -48,7 +48,7 @@ function EquityChart({ data }: { data: PaperPortfolio }) {
   </div>
 }
 
-function PortfolioContent({ data }: { data: PaperPortfolio }) {
+function PortfolioContent({ data, onSell }: { data: PaperPortfolio; onSell?: (symbol: string, qty: number) => void }) {
   const [symbol, setSymbol] = useState(''), [side, setSide] = useState('all'), [limit, setLimit] = useState(20)
   const trades = data.trades.filter(t => (!symbol || t.symbol.includes(symbol.toUpperCase())) && (side === 'all' || t.side === side))
   const largest = data.positions.filter(p => p.weightPct !== null).reduce<PaperPortfolio['positions'][number] | null>((a, p) => !a || p.weightPct! > a.weightPct! ? p : a, null)
@@ -74,11 +74,12 @@ function PortfolioContent({ data }: { data: PaperPortfolio }) {
       <CardContent className="px-3 pb-4">
         {!data.positions.length ? <p className="text-sm text-muted-foreground">No open Alpaca paper positions.</p> : <div className="overflow-x-auto" role="region" aria-label="Alpaca paper holdings" tabIndex={0}>
           <table className="w-full whitespace-nowrap text-right text-xs tabular-nums"><caption className="sr-only">Alpaca paper holdings with cost, daily price movement and unrealized profit and loss</caption>
-            <thead className="border-b border-border text-muted-foreground"><tr>{['Symbol', 'Shares', 'Avg Cost', 'Price', 'Today', 'Value', 'P&L', 'P&L%', 'Held · estimate', 'Managed shares'].map(label => <th key={label} scope="col" className="px-2 py-2 first:text-left font-medium">{label}</th>)}</tr></thead>
+            <thead className="border-b border-border text-muted-foreground"><tr>{['Symbol', 'Shares', 'Avg Cost', 'Price', 'Today', 'Value', 'P&L', 'P&L%', 'Held · estimate', 'Managed shares', ...(onSell ? ['Trade'] : [])].map(label => <th key={label} scope="col" className="px-2 py-2 first:text-left font-medium">{label}</th>)}</tr></thead>
             <tbody>{data.positions.map(p => <tr key={p.symbol} className="data-hover border-b border-border/50">
               <th scope="row" className="px-2 py-3 text-left font-semibold">{p.symbol}</th><td className="px-2">{number(p.qty, 8)}</td><td className="px-2">{money(p.avgCost)}</td><td className="px-2">{money(p.price)}</td>
               <td className={`px-2 ${move(p.priceChange)}`}>{signedMoney(p.priceChange)} ({pct(p.priceChangePct)})</td><td className="px-2">{money(p.value)}</td><td className={`px-2 ${move(p.unrealizedPnl)}`}>{signedMoney(p.unrealizedPnl)}</td><td className={`px-2 ${move(p.unrealizedPnlPct)}`}>{pct(p.unrealizedPnlPct)}</td>
               <td className="px-2 text-muted-foreground" title={p.heldSince ? `Earliest remaining recorded fill: ${new Date(p.heldSince).toLocaleString()}` : 'Insufficient reconciled fill history'}>{held(p.heldSince, data.checkedAt)}</td><td className="px-2 text-muted-foreground">{p.managedQty > 0 ? number(p.managedQty, 8) : 'External holding'}</td>
+              {onSell && <td className="px-2">{p.managedQty > 0 && <Button type="button" size="sm" variant="outline" aria-label={`Sell ${p.symbol}`} onClick={() => onSell(p.symbol, p.managedQty)}>Sell</Button>}</td>}
             </tr>)}</tbody>
           </table>
         </div>}
@@ -123,13 +124,13 @@ function PortfolioContent({ data }: { data: PaperPortfolio }) {
   </>
 }
 
-export function PaperPortfolioPanels() {
+export function PaperPortfolioPanels({ onSell }: { onSell?: (symbol: string, qty: number) => void } = {}) {
   const [period, setPeriod] = useState<PortfolioPeriod>('1M')
   const query = useQuery({ queryKey: ['alpaca-paper', 'long-term', 'portfolio', period], queryFn: () => paperInvestingRequest<PaperPortfolio>(`/portfolio?period=${period}`), staleTime: 30_000, retry: false, refetchOnWindowFocus: false })
   return <section aria-label="Alpaca paper portfolio review" className="min-w-0 space-y-4">
     <div className="flex flex-wrap items-end justify-between gap-3"><label className="flex flex-col gap-1 text-xs text-muted-foreground">Equity history period<select className={inputClass} value={period} onChange={e => setPeriod(e.target.value as PortfolioPeriod)}>{Object.entries(periods).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><Button variant="outline" disabled={query.isFetching} onClick={() => void query.refetch()}>{query.isFetching ? 'Reading broker data…' : 'Refresh portfolio'}</Button></div>
     {query.isLoading && <p role="status" className="text-sm text-muted-foreground">Loading Alpaca paper holdings, review and fills…</p>}
     {query.error && <p role="alert" className="text-sm text-destructive">{query.error.message}{query.data ? ' Showing the last successful snapshot; its checked time is shown below.' : ''}</p>}
-    {query.data && <PortfolioContent data={query.data} />}
+    {query.data && <PortfolioContent data={query.data} onSell={onSell} />}
   </section>
 }

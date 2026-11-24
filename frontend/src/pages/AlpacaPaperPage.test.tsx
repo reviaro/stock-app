@@ -10,13 +10,18 @@ const { hooks } = vi.hoisted(() => {
     security: { data: { authenticated: true, mfaConfigured: true, recentMfa: true, recentAuthUntil: new Date(Date.now() + 300000).toISOString() }, error: null, refetch: vi.fn() },
     manualPreview: mutation(), manualExecute: mutation(), policy: mutation(), pause: mutation(), preview: mutation(), execute: mutation(), cancel: mutation(), draft: mutation(), ownership: mutation() } }
 })
-vi.mock('@/hooks/useAlpacaPaperInvesting', () => ({ useAlpacaPaperInvesting: () => hooks }))
+vi.mock('@/hooks/useAlpacaPaperInvesting', () => ({ useAlpacaPaperInvesting: () => hooks, usePaperTradePrice: (symbol: string) => ({ data: symbol ? 100.5 : undefined }) }))
 vi.mock('@/components/investing/LegacyPaperArchive', () => ({ LegacyPaperArchive: () => <div>Legacy recovery</div> }))
-vi.mock('@/components/investing/PaperPortfolioPanels', () => ({ PaperPortfolioPanels: () => <div>Paper portfolio review</div> }))
+vi.mock('@/components/investing/PaperPortfolioPanels', () => ({ PaperPortfolioPanels: ({ onSell }: { onSell?: (symbol: string, qty: number) => void }) =>
+  <div>Paper portfolio review<button type="button" onClick={() => onSell?.('VTI', 3)}>Mock sell VTI</button></div> }))
 const baseline = (): InvestingOverview => ({ configuration: { configured: false, accountBound: false, tradingEnabled: false, environment: 'paper' },
   version: 0, policy: { budget: 0, reservePct: 10, maxPositionPct: 25, maxOrderValue: 500, minTradeValue: 25, driftPct: 2,
     maxSpreadBps: 50, fractional: true, paused: true, executionMode: 'confirm', targets: [] },
   connected: false, blockers: ['Add separate paper credentials on the server.'], positions: [], orders: [], decisions: [] })
+const fillTrade = (symbol: string, shares: string) => {
+  fireEvent.change(screen.getByLabelText('Trade symbol'), { target: { value: symbol } })
+  fireEvent.change(screen.getByLabelText('Shares'), { target: { value: shares } })
+}
 describe('Long-term paper workspace', () => {
   beforeEach(() => {
     vi.clearAllMocks(); hooks.manualPreview.mutateAsync.mockReset(); hooks.manualExecute.mutateAsync.mockReset(); hooks.overview.data = baseline()
@@ -33,7 +38,7 @@ describe('Long-term paper workspace', () => {
     expect(screen.getByText('Paper portfolio review')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Broker holdings' })).not.toBeInTheDocument()
   })
-  it.each(['accepted', 'timeout', 'PAPER_ORDER_UNKNOWN'])('reviews a selected saved target once, then reconciles %s', async outcome => {
+  it.each(['accepted', 'timeout', 'PAPER_ORDER_UNKNOWN'])('reviews a shares-based trade once, then reconciles %s', async outcome => {
     const data = baseline()
     data.connected = data.configuration.tradingEnabled = true
     data.blockers = []; data.policy.paused = false; data.policy.executionMode = 'automatic'
@@ -44,12 +49,10 @@ describe('Long-term paper workspace', () => {
     else if (outcome === 'PAPER_ORDER_UNKNOWN') hooks.manualExecute.mutateAsync.mockRejectedValue(Object.assign(new Error('PAPER_PRICE_CHANGED'), { code: outcome }))
     else hooks.manualExecute.mutateAsync.mockResolvedValue({ order: { status: 'accepted', filledQty: 0, planId: 'manual' } })
     const view = render(<AlpacaPaperPage />)
-    const select = screen.getByRole('combobox', { name: 'Saved policy target' })
-    expect(within(select).getByRole('option', { name: /SPY.*15%/ })).toBeInTheDocument()
-    fireEvent.change(select, { target: { value: 'SPY' } })
-    const preview = screen.getByRole('button', { name: 'Preview selected buy' }); fireEvent.click(preview)
-    expect(hooks.manualPreview.mutateAsync).toHaveBeenCalledWith('SPY')
-    const submit = await screen.findByRole('button', { name: 'Submit selected paper buy' })
+    fillTrade('spy', '2')
+    const preview = screen.getByRole('button', { name: 'Preview trade' }); fireEvent.click(preview)
+    expect(hooks.manualPreview.mutateAsync).toHaveBeenCalledWith({ symbol: 'SPY', side: 'buy', qty: 2 })
+    const submit = await screen.findByRole('button', { name: 'Submit paper buy' })
     expect(screen.getByText(/2 shares.*\$100.00.*\$200.00/)).toBeVisible()
     expect(submit).toBeDisabled(); expect(hooks.manualExecute.mutateAsync).not.toHaveBeenCalled()
     fireEvent.change(screen.getByLabelText('Type BUY SPY PAPER'), { target: { value: 'BUY SPY PAPER' } })
@@ -71,11 +74,11 @@ describe('Long-term paper workspace', () => {
     hooks.manualPreview.mutateAsync.mockResolvedValueOnce({ ...plan, id: 'old' }).mockResolvedValueOnce({ ...plan, id: 'fresh' })
     hooks.manualExecute.mutateAsync.mockRejectedValueOnce(Object.assign(new Error('Review changed.'), { code }))
     render(<AlpacaPaperPage />)
-    fireEvent.change(screen.getByLabelText('Saved policy target'), { target: { value: 'SPY' } })
-    const preview = screen.getByRole('button', { name: 'Preview selected buy' })
+    fillTrade('SPY', '1')
+    const preview = screen.getByRole('button', { name: 'Preview trade' })
     fireEvent.click(preview)
     fireEvent.change(await screen.findByLabelText('Type BUY SPY PAPER'), { target: { value: 'BUY SPY PAPER' } })
-    const submitName = { name: 'Submit selected paper buy' }
+    const submitName = { name: 'Submit paper buy' }
     fireEvent.click(screen.getByRole('button', submitName))
     expect(await screen.findByText(/Review changed\./)).toBeVisible()
     expect(screen.queryByRole('button', submitName)).not.toBeInTheDocument()
@@ -84,20 +87,63 @@ describe('Long-term paper workspace', () => {
     expect(screen.getByRole('button', submitName)).toBeDisabled()
     expect(hooks.manualExecute.mutateAsync).toHaveBeenCalledExactlyOnceWith({ planId: 'old', confirmation: 'BUY SPY PAPER' })
   })
-  it.each(['expired', 'blocked', 'wrong target'])('refuses a %s selected buy plan despite exact confirmation', async reason => {
+  it.each(['expired', 'blocked', 'wrong target'])('refuses a %s trade plan despite exact confirmation', async reason => {
     const data = baseline(); data.connected = data.configuration.tradingEnabled = true
     data.blockers = []; data.policy.paused = false; data.policy.targets = [{ symbol: 'SPY', weightPct: 15 }]; hooks.overview.data = data
     hooks.manualPreview.mutateAsync.mockResolvedValue({ id: 'manual', policyVersion: data.version,
       blockers: reason === 'blocked' ? ['Spread exceeds policy'] : [], expiresAt: new Date(Date.now() + (reason === 'expired' ? -1 : 60000)).toISOString(),
       nextOrder: { side: 'buy', symbol: reason === 'wrong target' ? 'QQQ' : 'SPY', qty: 1, limitPrice: 100, notional: 100 } })
     render(<AlpacaPaperPage />)
-    fireEvent.change(screen.getByRole('combobox', { name: 'Saved policy target' }), { target: { value: 'SPY' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Preview selected buy' }))
+    fillTrade('SPY', '1')
+    fireEvent.click(screen.getByRole('button', { name: 'Preview trade' }))
     fireEvent.change(await screen.findByLabelText('Type BUY SPY PAPER'), { target: { value: 'BUY SPY PAPER' } })
     if (reason === 'blocked') expect(screen.getByText('Spread exceeds policy')).toBeVisible()
     if (reason === 'expired') expect(screen.getByText(/— expired/)).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Submit selected paper buy' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Submit paper buy' })).toBeDisabled()
     expect(hooks.manualExecute.mutateAsync).not.toHaveBeenCalled()
+  })
+  it('previews a sell with the target outcome and shows the display price', async () => {
+    const data = baseline(); data.connected = data.configuration.tradingEnabled = true
+    data.blockers = []; data.policy.paused = false; hooks.overview.data = data
+    hooks.manualPreview.mutateAsync.mockResolvedValue({ id: 'sell-plan', policyVersion: data.version, blockers: [], operatorTrade: true,
+      expiresAt: new Date(Date.now() + 60000).toISOString(), nextOrder: { side: 'sell', symbol: 'VTI', qty: 3, limitPrice: 99.9, notional: 299.7 },
+      targetChange: { symbol: 'VTI', weightPct: 0, actor: 'operator', previous: { weightPct: 10 } } })
+    render(<AlpacaPaperPage />)
+    expect(screen.queryByText('Buy a saved Paper target')).not.toBeInTheDocument()
+    fillTrade('VTI', '3')
+    expect(screen.getByText('Current price: $100.50')).toBeVisible()
+    fireEvent.click(screen.getByRole('radio', { name: 'Sell' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Preview trade' }))
+    expect(hooks.manualPreview.mutateAsync).toHaveBeenCalledWith({ symbol: 'VTI', side: 'sell', qty: 3 })
+    expect(await screen.findByText('Target removed (was 10%)')).toBeVisible()
+    fireEvent.change(screen.getByLabelText('Type SELL VTI PAPER'), { target: { value: 'SELL VTI PAPER' } })
+    expect(screen.getByRole('button', { name: 'Submit paper sell' })).toBeEnabled()
+  })
+  it('shows the new target after a buy preview', async () => {
+    const data = baseline(); data.connected = data.configuration.tradingEnabled = true
+    data.blockers = []; data.policy.paused = false; hooks.overview.data = data
+    hooks.manualPreview.mutateAsync.mockResolvedValue({ id: 'buy-plan', policyVersion: data.version, blockers: [], operatorTrade: true,
+      expiresAt: new Date(Date.now() + 60000).toISOString(), nextOrder: { side: 'buy', symbol: 'VTI', qty: 2, limitPrice: 100.13, notional: 200.26 },
+      targetChange: { symbol: 'VTI', weightPct: 2, actor: 'operator', previous: null } })
+    render(<AlpacaPaperPage />)
+    fillTrade('VTI', '2')
+    fireEvent.click(screen.getByRole('button', { name: 'Preview trade' }))
+    expect(await screen.findByText('Target after trade: 2%')).toBeVisible()
+  })
+  it('Sell on a managed holding prefills the trade panel', () => {
+    render(<AlpacaPaperPage />)
+    fireEvent.click(screen.getByRole('button', { name: 'Mock sell VTI' }))
+    expect(screen.getByLabelText('Trade symbol')).toHaveValue('VTI')
+    expect(screen.getByLabelText('Shares')).toHaveValue(3)
+    expect(screen.getByRole('radio', { name: 'Sell' })).toBeChecked()
+  })
+  it('keeps preview disabled until a symbol and positive shares are entered', () => {
+    const data = baseline(); data.connected = data.configuration.tradingEnabled = true; hooks.overview.data = data
+    render(<AlpacaPaperPage />)
+    const preview = screen.getByRole('button', { name: 'Preview trade' })
+    expect(preview).toBeDisabled()
+    fillTrade('VTI', '0'); expect(preview).toBeDisabled()
+    fillTrade('VTI', '1'); expect(preview).toBeEnabled()
   })
   it('makes automatic mode a deliberate policy choice with exact activation confirmation', () => {
     hooks.overview.data = { ...baseline(), policy: { ...baseline().policy, budget: 1000, targets: [{ symbol: 'AAPL', weightPct: 20 }] } }
