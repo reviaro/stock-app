@@ -69,12 +69,17 @@ async function init() {
             await run(c, `CREATE TABLE IF NOT EXISTS alpaca_investing_legacy_handovers (id INTEGER PRIMARY KEY AUTOINCREMENT, account_key TEXT NOT NULL, symbol TEXT NOT NULL, legacy_version TEXT NOT NULL, plan_id INTEGER NOT NULL, plan_state TEXT NOT NULL, evidence_hash TEXT NOT NULL, evidence_json TEXT NOT NULL, transferred_qty REAL NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(legacy_version,plan_id))`);
             for (const action of ['UPDATE','DELETE']) await run(c, `CREATE TRIGGER IF NOT EXISTS alpaca_investing_legacy_handovers_no_${action.toLowerCase()} BEFORE ${action} ON alpaca_investing_legacy_handovers BEGIN SELECT RAISE(ABORT,'legacy handover history is immutable'); END`);
         }
+        if (environment === 'paper') {
+            // Paper agent picks carry an optional requested weight; live keeps its schema.
+            const decisionColumns = new Set((await all(c, 'PRAGMA table_info(alpaca_investing_decisions)')).map(row => row.name));
+            if (!decisionColumns.has('target_weight_pct')) await run(c, 'ALTER TABLE alpaca_investing_decisions ADD COLUMN target_weight_pct REAL');
+        }
         await run(c, 'INSERT OR IGNORE INTO alpaca_investing_settings(id,version,policy_json,account_key) VALUES (1,0,?,NULL)', [JSON.stringify(DEFAULT_POLICY)]);
         for (const [table,required] of Object.entries({
             alpaca_investing_settings:['id','version','policy_json','account_key','sequence'],
             alpaca_investing_plans:['id','account_key','policy_version','expires_at','plan_json'],
             alpaca_investing_orders:['id','plan_id','decision_key','account_key','client_order_id','symbol','side','qty','limit_price','status','broker_id','filled_qty','filled_avg_price','created_at','updated_at'],
-            alpaca_investing_decisions:['decision_key','symbol','side','reason','policy_version','created_at'],
+            alpaca_investing_decisions:['decision_key','symbol','side','reason','policy_version','created_at',...(environment === 'paper' ? ['target_weight_pct'] : [])],
             alpaca_investing_ownership:['id','account_key','symbol','delta_qty','broker_qty','reason','created_at'],
             alpaca_investing_events:['id','action','detail_json','created_at'],
             ...(environment === 'paper' ? {alpaca_investing_legacy_handovers:['id','account_key','symbol','legacy_version','plan_id','plan_state','evidence_hash','evidence_json','transferred_qty','reason','created_at']} : {}),
@@ -199,13 +204,18 @@ async function updateOrder(id, patch) {
 }
 async function saveDecision(input) {
     if (typeof input?.decisionKey !== 'string' || !/^[A-Za-z0-9_-]{8,80}$/.test(input.decisionKey) || typeof input.symbol !== 'string' || !/^[A-Z][A-Z0-9.\-]{0,9}$/.test(input.symbol) || !['buy','sell'].includes(input.side) || typeof input.reason !== 'string' || input.reason.trim().length < 10 || input.reason.length > 1000 || !Number.isSafeInteger(input.policyVersion) || input.policyVersion<0) throw fail('INVALID_DECISION','Provide a unique decisionKey, current policyVersion, symbol, side and analysis reason (10–1000 characters).',400);
+    const weight = input.targetWeightPct ?? null;
+    if (input.targetWeightPct !== undefined && (environment !== 'paper' || typeof weight !== 'number' || !Number.isFinite(weight) || weight < 0 || weight > 100)) throw fail('INVALID_DECISION', 'targetWeightPct must be a number from 0 to 100 and is available only on Paper.', 400);
     return transaction(async c => {
         const existing = (await all(c,'SELECT * FROM alpaca_investing_decisions WHERE decision_key=?',[input.decisionKey]))[0];
         if (existing) {
-            if (existing.symbol !== input.symbol || existing.side !== input.side || existing.reason !== input.reason || existing.policy_version!==input.policyVersion) throw fail('DECISION_CONFLICT','A decision key cannot be reused with different analysis.');
+            if (existing.symbol !== input.symbol || existing.side !== input.side || existing.reason !== input.reason || existing.policy_version!==input.policyVersion
+                || (existing.target_weight_pct ?? null) !== weight) throw fail('DECISION_CONFLICT','A decision key cannot be reused with different analysis.');
             return existing;
         }
-        await run(c,'INSERT INTO alpaca_investing_decisions VALUES(?,?,?,?,?,?)',[input.decisionKey,input.symbol,input.side,input.reason,input.policyVersion,new Date().toISOString()]);
+        const columns = ['decision_key','symbol','side','reason','policy_version','created_at',...(environment === 'paper' ? ['target_weight_pct'] : [])];
+        const values = [input.decisionKey,input.symbol,input.side,input.reason,input.policyVersion,new Date().toISOString(),...(environment === 'paper' ? [weight] : [])];
+        await run(c,`INSERT INTO alpaca_investing_decisions(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')})`,values);
         return (await all(c,'SELECT * FROM alpaca_investing_decisions WHERE decision_key=?',[input.decisionKey]))[0];
     });
 }

@@ -223,3 +223,18 @@ test('paper policy without the agent cap field reads as 0',async()=>{
     const f=await fixture();
     assert.equal((await f.store.settings()).policy.agentPicksMaxPct,0);
 });
+
+test('decision weights are validated, paper-only, stored and part of replay identity',async()=>{
+    const f=await fixture();
+    const base={decisionKey:'weight-check-0001',symbol:'VTI',side:'buy',reason:'Synthetic thesis for a new holding.',policyVersion:1};
+    let n=0;
+    for (const bad of ['5',-1,Number.NaN,101,null]) await assert.rejects(f.store.saveDecision({...base,decisionKey:'weight-bad-000'+(++n),targetWeightPct:bad}),{code:'PAPER_INVALID_DECISION'});
+    assert.equal((await f.store.getDecision('weight-bad-0001')),null);
+    const row=await f.store.saveDecision({...base,targetWeightPct:5});
+    assert.equal(row.target_weight_pct,5);
+    await assert.rejects(f.store.saveDecision({...base,targetWeightPct:6}),{code:'PAPER_DECISION_CONFLICT'});
+    await assert.rejects(f.store.saveDecision({...base}),{code:'PAPER_DECISION_CONFLICT'});
+    assert.equal((await f.store.saveDecision({...base,targetWeightPct:5})).target_weight_pct,5);
+    assert.equal((await f.store.saveDecision({...base,decisionKey:'weight-none-0001'})).target_weight_pct,null);
+    await assert.rejects(liveStore.saveDecision({...base,decisionKey:'live-weight-0001',targetWeightPct:5}),{code:'LIVE_INVALID_DECISION'});
+});
