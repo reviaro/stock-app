@@ -204,3 +204,22 @@ test('paper automatic refusals report blockers instead of asking the operator to
     const saved=(await f.service.overview()).decisions.find(d=>d.decision_key==='paper-spread-refusal');
     assert.equal(saved.status,'blocked');assert.deepEqual(saved.blockers,result.blockers);
 });
+
+test('paper policy keeps agent tags and the agent cap; operator may lower the cap',async()=>{
+    const f=await fixture();
+    const saved=await f.service.savePolicy({...f.policy,agentPicksMaxPct:20,targets:[{symbol:'AAPL',weightPct:20},{symbol:'QQQ',weightPct:5,source:'agent'}]},1,'ENABLE PAPER INVESTING');
+    assert.equal(saved.policy.agentPicksMaxPct,20);
+    assert.deepEqual(saved.policy.targets.find(t=>t.symbol==='QQQ'),{symbol:'QQQ',weightPct:5,source:'agent'});
+    assert.deepEqual(saved.policy.targets.find(t=>t.symbol==='AAPL'),{symbol:'AAPL',weightPct:20});
+    assert.equal((await f.store.settings()).policy.agentPicksMaxPct,20);
+    for (const bad of [-1,101,Number.NaN,'5']) await assert.rejects(f.service.savePolicy({...f.policy,agentPicksMaxPct:bad},2,'ENABLE PAPER INVESTING'),{code:'PAPER_INVALID_POLICY'});
+    await assert.rejects(f.service.savePolicy({...f.policy,targets:[{symbol:'AAPL',weightPct:20,source:'operator'}]},2,'ENABLE PAPER INVESTING'),{code:'PAPER_INVALID_POLICY'});
+    const lowered=await f.service.savePolicy({...saved.policy,agentPicksMaxPct:0},2,'ENABLE PAPER INVESTING');
+    assert.equal(lowered.policy.agentPicksMaxPct,0);
+    assert.ok(lowered.policy.targets.some(t=>t.source==='agent'));
+});
+
+test('paper policy without the agent cap field reads as 0',async()=>{
+    const f=await fixture();
+    assert.equal((await f.store.settings()).policy.agentPicksMaxPct,0);
+});

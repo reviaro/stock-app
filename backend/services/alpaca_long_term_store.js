@@ -35,9 +35,16 @@ function validatePolicy(input) {
     p.paused = input.paused; p.fractional = input.fractional;
     if (!['confirm','automatic'].includes(input.executionMode)) throw fail('INVALID_POLICY','Choose confirmation or automatic execution.',400);
     p.executionMode = input.executionMode;
+    // Agent picks are a Paper-only capability; live keeps its original policy shape.
+    if (environment === 'paper') {
+        const cap = input.agentPicksMaxPct ?? 0;
+        if (typeof cap !== 'number' || !Number.isFinite(cap) || cap < 0 || cap > 100) throw fail('INVALID_POLICY', 'Invalid agentPicksMaxPct.', 400);
+        p.agentPicksMaxPct = cap;
+    } else if (input.agentPicksMaxPct !== undefined && input.agentPicksMaxPct !== 0) throw fail('INVALID_POLICY', 'Agent picks are unavailable for this environment.', 400);
     p.targets = input.targets.map(t => {
         if (typeof t?.symbol !== 'string' || !/^[A-Z][A-Z0-9.\-]{0,9}$/.test(t.symbol) || typeof t.weightPct !== 'number' || !Number.isFinite(t.weightPct) || t.weightPct <= 0 || t.weightPct > p.maxPositionPct) throw fail('INVALID_POLICY', 'Each target needs a broker symbol and a weight within the position limit.', 400);
-        return { symbol: t.symbol, weightPct: t.weightPct };
+        if (t.source !== undefined && (environment !== 'paper' || t.source !== 'agent')) throw fail('INVALID_POLICY', 'Unsupported target source.', 400);
+        return { symbol: t.symbol, weightPct: t.weightPct, ...(t.source ? { source: t.source } : {}) };
     }).sort((a,b) => a.symbol.localeCompare(b.symbol));
     if (new Set(p.targets.map(t => t.symbol)).size !== p.targets.length || p.targets.reduce((n,t) => n+t.weightPct,0) > 100-p.reservePct+1e-8 || p.minTradeValue > p.maxOrderValue) throw fail('INVALID_POLICY', 'Targets must be unique and leave the configured cash reserve; minimum trade cannot exceed the order limit.', 400);
     if (!p.paused && (!p.budget || !p.targets.length)) throw fail('INVALID_POLICY', 'Set a funded budget and targets before unpausing.', 400);
@@ -80,7 +87,8 @@ async function init() {
 async function state(c) {
     const row = (await all(c, 'SELECT * FROM alpaca_investing_settings WHERE id=1'))[0];
     if (!row) throw fail('SCHEMA_UNAVAILABLE', 'Long-term investing needs database initialization.', 503);
-    return { version: row.version, policy: JSON.parse(row.policy_json), accountKey: row.account_key, sequence:row.sequence };
+    const policy = JSON.parse(row.policy_json);
+    return { version: row.version, policy: environment === 'paper' ? { agentPicksMaxPct: 0, ...policy } : policy, accountKey: row.account_key, sequence:row.sequence };
 }
 const event = (c, action, detail) => run(c, 'INSERT INTO alpaca_investing_events(action,detail_json,created_at) VALUES(?,?,?)', [action, JSON.stringify(detail), new Date().toISOString()]);
 async function savePolicy(input, expectedVersion, confirmation) {

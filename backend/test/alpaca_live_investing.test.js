@@ -533,3 +533,11 @@ test('recommendation approval cannot move a reviewed order to a different broker
     await assert.rejects(service.execute(plan.id,confirms(plan)),{code:'LIVE_ACCOUNT_CHANGED'});
     assert.equal(f.state.submitted.length,0);
 });
+
+test('live policy refuses agent caps and agent target tags',()=>{
+    const valid={...baseStore.DEFAULT_POLICY,budget:1000,targets:[{symbol:'AAPL',weightPct:20}]};
+    assert.throws(()=>baseStore.validatePolicy({...valid,agentPicksMaxPct:5}),{code:'LIVE_INVALID_POLICY'});
+    assert.throws(()=>baseStore.validatePolicy({...valid,targets:[{symbol:'AAPL',weightPct:20,source:'agent'}]}),{code:'LIVE_INVALID_POLICY'});
+    assert.equal('agentPicksMaxPct' in baseStore.validatePolicy({...valid,agentPicksMaxPct:0}),false);
+    assert.equal('agentPicksMaxPct' in baseStore.validatePolicy(valid),false);
+});
