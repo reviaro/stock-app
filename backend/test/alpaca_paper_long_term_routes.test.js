@@ -7,7 +7,7 @@ const {createPaperLongTermRouter}=require('../routes/alpaca_paper_long_term');
 test('paper investing routes enforce operator and narrowly scoped paper-agent access',async()=>{
     const calls=[];const service=Object.fromEntries(['overview','portfolio','simulatorDraft','savePolicy','pause','preview','execute','decision','cancel','adopt'].map(name=>[name,async(...args)=>{calls.push({name,args});return {ok:true};}]));
     const plan={id:'synthetic-manual',nextOrder:null,rows:[],blockers:['No current buy']};
-    service.previewOperatorBuy=async symbol=>{calls.push({name:'previewOperatorBuy',args:[symbol]});return plan;};
+    service.previewOperatorTrade=async input=>{calls.push({name:'previewOperatorTrade',args:[input]});return plan;};
     const reconciliation={checked:2,updated:1,unchanged:1,failures:0,plans:{checked:1,reconciled:1,closed:1,cancelled:0,blocked:0,skipped:0,blockers:[]}};
     service.legacyReconcile=async()=>{calls.push({name:'legacyReconcile',args:[]});return reconciliation;};
     const app=express();app.use(express.json());
@@ -29,15 +29,17 @@ test('paper investing routes enforce operator and narrowly scoped paper-agent ac
         assert.equal((await send(operator,'/execute','POST',{planId:'synthetic-plan',confirmation:'BUY AAPL PAPER',automatic:true})).status,200);
         assert.deepEqual(calls.at(-1),{name:'execute',args:['synthetic-plan',{confirmation:'BUY AAPL PAPER'}]});
         const start=calls.length;
-        const path='/manual-buy/preview';
+        const path='/manual-trade/preview';
+        const trade={symbol:'AAPL',side:'buy',qty:2};
         for(const principal of [agent,null,{type:'token',role:'operator'},{type:'session',role:'reader'}])
-            assert.equal((await send(principal,path,'POST',{symbol:'AAPL'})).status,403);
-        for(const body of [undefined,[],{}, {symbol:''},{symbol:['AAPL']},{symbol:'AAPL',qty:1},{symbol:'AAPL',automatic:true}])
+            assert.equal((await send(principal,path,'POST',trade)).status,403);
+        for(const body of [undefined,[],{},{symbol:'AAPL'},{symbol:'AAPL',side:'buy'},{...trade,automatic:true},{...trade,planId:'x'}])
             assert.equal((await send(operator,path,'POST',body)).status,400);
-        const preview=await send(operator,path,'POST',{symbol:'AAPL'});
+        assert.equal((await send(operator,'/manual-buy/preview','POST',{symbol:'AAPL'})).status,404);
+        const preview=await send(operator,path,'POST',trade);
         assert.equal(preview.status,200);
         assert.deepEqual(await preview.json(),{status:'success',data:plan});
-        assert.deepEqual(calls.slice(start),[{name:'previewOperatorBuy',args:['AAPL']}]);
+        assert.deepEqual(calls.slice(start),[{name:'previewOperatorTrade',args:[trade]}]);
         const recovered=await send(operator,'/legacy-reconcile','POST',{});
         assert.equal(recovered.status,200);assert.deepEqual(await recovered.json(),{status:'success',data:reconciliation});
         assert.deepEqual(calls.at(-1),{name:'legacyReconcile',args:[]});

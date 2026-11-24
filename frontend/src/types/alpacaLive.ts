@@ -1,8 +1,9 @@
-export interface LiveTarget { symbol: string; weightPct: number }
+export interface LiveTarget { symbol: string; weightPct: number; source?: 'agent' }
 export interface LivePolicy {
   budget: number; reservePct: number; maxPositionPct: number; maxOrderValue: number
   minTradeValue: number; driftPct: number; maxSpreadBps: number
   fractional: boolean; paused: boolean; executionMode: 'confirm' | 'automatic'; targets: LiveTarget[]
+  agentPicksMaxPct?: number
 }
 export interface LiveOrder {
   id: string; planId: string; decisionKey: string | null; symbol: string; side: 'buy' | 'sell'
@@ -12,7 +13,7 @@ export interface LiveOrder {
 export type InvestmentDecisionStatus = 'needs_review' | 'needs_reanalysis' | 'blocked' | 'ready' | 'awaiting_confirmation' | 'submitted' | 'partially_filled' | 'filled' | 'canceled' | 'expired' | 'rejected' | 'unknown'
 export interface InvestmentDecision {
   decision_key: string; symbol: string; side: string; reason: string; created_at: string
-  policy_version?: number; status?: InvestmentDecisionStatus; blockers?: string[]; expiresAt?: string | null; checkedAt?: string | null; orderId?: string | null
+  policy_version?: number; target_weight_pct?: number | null; status?: InvestmentDecisionStatus; blockers?: string[]; expiresAt?: string | null; checkedAt?: string | null; orderId?: string | null
   analysis?: { strategyVersion: string; model: string; analyzedAt: string; invalidation: string; assumptions?: string[]; alternatives?: string[]; claims?: { path: string; value: string | number | boolean }[] } | null
 }
 export interface LiveOverview {
@@ -28,9 +29,13 @@ export interface LivePlanRow {
   currentQty: number; currentValue: number; targetWeightPct: number; targetValue: number
   driftPct: number; actionable: boolean; quoteAt: string; feed: string; fractional: boolean
 }
+export interface TargetChange {
+  symbol: string; weightPct: number; source?: 'agent'; actor: 'agent' | 'operator' | 'system'
+  previous: { weightPct: number; source?: 'agent' } | null
+}
 export interface LivePlan {
   id: string; policyVersion: number; createdAt: string; expiresAt: string; decisionKey: string | null
-  reviewExpiresAt?: string | null
+  reviewExpiresAt?: string | null; targetChange?: TargetChange | null; operatorTrade?: boolean
   nextOrder: LivePlanRow | null; rows: LivePlanRow[]; blockers: string[]
   managedValue: number; spendableCash: number; unmanagedValue: number; allocationCapital: number
 }

@@ -29,6 +29,11 @@ describe('Long-Term Live workspace', () => {
     expect(screen.getByRole('checkbox', { name: 'Pause new live orders' })).toBeChecked()
     expect(screen.queryByLabelText(/secret/i)).not.toBeInTheDocument()
   })
+  it('never offers agent picks on live', () => {
+    render(<AlpacaLivePage />)
+    expect(screen.queryByLabelText('Agent picks total (%)')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Agent picks:/)).not.toBeInTheDocument()
+  })
   it('makes automatic mode a deliberate policy choice with exact activation confirmation', () => {
     hooks.overview.data = { ...baseline(), policy: { ...baseline().policy, budget: 1000, targets: [{ symbol: 'AAPL', weightPct: 20 }] } }
     render(<AlpacaLivePage />)

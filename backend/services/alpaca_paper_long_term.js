@@ -81,6 +81,15 @@ function createPaperLongTermInvesting(options = {}) {
         const blockers = await guard();
         if (blockers.length) throw fail('PAPER_LEGACY_RECONCILIATION_REQUIRED',blockers.join(' '));
     };
+    const pause = service.pause;
+    // Pausing is always the safe direction, and agent picks or trades can move the
+    // version in the background, so Paper pauses whatever policy is current.
+    service.pause = async () => {
+        for (let attempt = 0; ; attempt++) {
+            try { return await pause((await paperStore.settings()).version); }
+            catch (error) { if (error.code !== 'PAPER_POLICY_CHANGED' || attempt >= 2) throw error; }
+        }
+    };
     const savePolicy = service.savePolicy;
     service.savePolicy = async (...args) => { if (args[0]?.paused === false) await requireTransition(); return savePolicy(...args); };
     const adopt = service.adopt;

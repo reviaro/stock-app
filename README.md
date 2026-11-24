@@ -423,9 +423,45 @@ The API is rooted at `/api/alpaca-paper/long-term`: `GET /overview`,
 `STOCK_DASHBOARD_PAPER_INVESTING_TOKEN` may read research, simulator account 1 and
 the paper overview, and submit account-1 decisions. Use the same research-backed
 decision shape documented for live investing below, with the paper policy version
-and paper endpoint. The credential cannot change policy, adopt holdings, cancel
-orders, or access live trading. Automatic execution acts on eligible decisions;
-it does not schedule trades on its own.
+and paper endpoint. The credential cannot save policy settings, adopt holdings,
+cancel orders, or access live trading; in automatic mode its decisions may add or
+adjust only agent-tagged targets, as described below. Automatic execution acts on
+eligible decisions; it does not schedule trades on its own.
+
+**Agent-sized picks (Paper automatic mode only).** A paper decision may include
+`targetWeightPct` to buy a stock that has no saved target, or to raise, lower or
+exit (`0`) a target the agent added earlier. The weight must stay within
+`maxPositionPct`, the operator's `agentPicksMaxPct` (the combined weight of
+agent-added targets; default `0`, which turns the feature off), and leave the
+cash reserve across all targets. Lowering a pick is allowed even above a reduced
+cap. The server still sizes the order from that weight, fresh quotes and cash
+limits, so a weight that does not clear the minimum allocation drift or minimum
+trade cannot trade. The target is saved, tagged `"source": "agent"`, only when its
+order is reserved: a refused or blocked decision leaves the policy unchanged. If
+the reserved order is refused before dispatch, or ends rejected, canceled or
+expired with nothing filled, the previous target is restored, unless the policy
+was saved again in the meantime. An uncertain outcome keeps the target until it
+reconciles. Each pick
+creates a new policy version, so read the overview again before the next
+decision. Refusal codes are `PAPER_AGENT_TARGET_MODE` (not unpaused automatic
+mode), `PAPER_AGENT_TARGET_OPERATOR` (an operator-set target),
+`PAPER_AGENT_TARGET_SIDE` (a buy must create or raise; a sell must lower an
+existing agent target) and `PAPER_AGENT_TARGET_LIMIT`. The overview reports
+`agentPicksUsedPct`. A managed holding without a target is a sell candidate and
+blocks buys until it is sold; exit it with sell decisions.
+
+**Trade panel.** Operators can buy or sell any eligible stock by shares:
+`POST /manual-trade/preview` with exactly `{ "symbol", "side", "qty" }`, then
+`POST /execute` with the exact confirmation (`BUY AAPL PAPER` or `SELL AAPL PAPER`).
+Maximum order, maximum position, capital ceiling, cash reserve, spread, asset
+eligibility and sell-first still apply; minimum trade and minimum allocation drift
+do not. A buy raises the saved target to at least the resulting weight; a sell
+lowers it to at most the resulting weight, and selling every managed share removes
+it, even the last target. The same restore rule applies when the order ends with
+nothing filled. A trade that changes a target saves a new policy version, so
+pending agent recommendations then need fresh analysis; the preview says so. Sell
+buttons appear only on app-managed holdings. Operator trades always need
+the typed confirmation and never execute automatically.
 
 Orders are cash-funded, long-only stock/ETF DAY limit orders. DAY controls how
 long an unfilled order is active; it does not close a filled holding at the end

@@ -23,7 +23,7 @@ export function useAlpacaPaperInvesting() {
   const policy = useMutation({ mutationFn: (body: { policy: LivePolicy; expectedVersion: number; confirmation: string }) => paperInvestingRequest('/policy', body, 'PUT'), onSuccess: refresh })
   const pause = useMutation({ mutationFn: (expectedVersion: number) => paperInvestingRequest('/pause', { expectedVersion }), onSettled: refresh })
   const preview = useMutation({ mutationFn: (body: { decisionKey?: string }) => paperInvestingRequest<LivePlan>('/preview', body), onSettled: refresh })
-  const manualPreview = useMutation({ retry: false, mutationFn: (symbol: string) => paperInvestingRequest<LivePlan>('/manual-buy/preview', { symbol }) })
+  const manualPreview = useMutation({ retry: false, mutationFn: (body: { symbol: string; side: 'buy' | 'sell'; qty: number }) => paperInvestingRequest<LivePlan>('/manual-trade/preview', body) })
   const executeOrder = (body: { planId: string; confirmation: string }) => paperInvestingRequest<{ order: LiveOrder }>('/execute', body)
   const execute = useMutation({ mutationFn: executeOrder, onSettled: refresh })
   const manualExecute = useMutation({ mutationFn: executeOrder, retry: false, onSettled: refresh })
@@ -31,6 +31,20 @@ export function useAlpacaPaperInvesting() {
   const draft = useMutation({ mutationFn: () => paperInvestingRequest<SimulatorAllocationDraft>('/simulator-draft') })
   const ownership = useMutation({ mutationFn: (body: { symbol: string; qty: number; confirmation: string; reason: string }) => paperInvestingRequest('/ownership', body), onSuccess: refresh })
   return { overview, manualPreview, manualExecute, policy, pause, preview, execute, cancel, draft, ownership }
+}
+
+// Display-only quote for the Trade panel; orders are always sized from fresh broker evidence.
+export function usePaperTradePrice(symbol: string) {
+  return useQuery({
+    queryKey: ['stock-price', symbol],
+    queryFn: async () => {
+      const response = await fetch(`/api/stock/${encodeURIComponent(symbol)}`, { credentials: 'same-origin' })
+      if (!response.ok) return null
+      const json = await response.json()
+      return typeof json?.data?.price === 'number' ? json.data.price as number : null
+    },
+    enabled: /^[A-Z][A-Z0-9.-]{0,9}$/.test(symbol), staleTime: 60_000, retry: false, refetchOnWindowFocus: false,
+  })
 }
 
 export function useRetirePaperDayTrading() {

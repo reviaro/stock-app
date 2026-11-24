@@ -16,9 +16,9 @@ const fixture = (): PaperPortfolio => ({
   actions: [], fillHistoryComplete: true, fillsAvailable: true, warnings: [],
 })
 const ok = (data: unknown) => new Response(JSON.stringify({ status: 'success', data }), { status: 200 })
-function mount() {
+function mount(onSell?: (symbol: string, qty: number) => void) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(<QueryClientProvider client={client}><PaperPortfolioPanels /></QueryClientProvider>)
+  return render(<QueryClientProvider client={client}><PaperPortfolioPanels onSell={onSell} /></QueryClientProvider>)
 }
 afterEach(() => vi.restoreAllMocks())
 
@@ -86,4 +86,16 @@ test('CSV preserves fractional fills, quotes notes and neutralizes spreadsheet f
   expect(csv).toContain('"3.125","100","312.5"')
   expect(csv).toContain('"\' =SUM(1,2)\n""synthetic"""')
   expect(csv).toContain('Date (UTC)')
+})
+
+test('offers Sell only on app-managed holdings and passes the managed quantity', async () => {
+  const data = fixture()
+  data.positions = [...data.positions, { ...data.positions[0], symbol: 'EXT', managedQty: 0 }]
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok(data))
+  const onSell = vi.fn()
+  mount(onSell); await screen.findByText('Simulated Holdings')
+  const holdings = within(screen.getByRole('region', { name: 'Alpaca paper holdings' }))
+  expect(holdings.queryByRole('button', { name: 'Sell EXT' })).not.toBeInTheDocument()
+  fireEvent.click(holdings.getByRole('button', { name: 'Sell TEST' }))
+  expect(onSell).toHaveBeenCalledExactlyOnceWith('TEST', 3.125)
 })

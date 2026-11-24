@@ -58,7 +58,7 @@ for (const [reason,shares,equity] of [['oversized',5,2800],['below drift',18,960
         await f.service.savePolicy({...f.policy,maxOrderValue:100},1,'ENABLE PAPER INVESTING');
         f.state.positions=[{symbol:'AAPL',qty:String(shares),current_price:'100',side:'long',unrealized_pl:'0'}];
         f.store.ownership=async()=>[{symbol:'AAPL',delta_qty:shares,account_key:f.store.hash(f.account.id)}];
-        const plan=await f.service.previewOperatorBuy('AAPL');
+        const plan=await f.service.preview({symbol:'AAPL',side:'buy'});
         assert.deepEqual(plan.blockers,[]);
         const reserve=t.mock.method(f.store,'reserveOrder');
         f.account.equity=String(equity);
@@ -68,10 +68,9 @@ for (const [reason,shares,equity] of [['oversized',5,2800],['below drift',18,960
     });
 }
 
-test('operator buys require an approved symbol and manual confirmation; racing previews reserve only once',async()=>{
+test('operator trades require manual confirmation; racing previews reserve only once',async()=>{
     const f=await heldFixture();
-    for(const invalid of ['',null,'OTHER']) await assert.rejects(f.service.previewOperatorBuy(invalid),{code:'PAPER_INVALID_TARGET'});
-    const plans=await Promise.all([f.service.previewOperatorBuy('AAPL'),f.service.previewOperatorBuy('AAPL')]);
+    const plans=await Promise.all([f.service.previewOperatorTrade({symbol:'AAPL',side:'buy',qty:1}),f.service.previewOperatorTrade({symbol:'AAPL',side:'buy',qty:1})]);
     assert.equal(f.state.submitted.length,0);
     await assert.rejects(f.service.execute(plans[0].id,{automatic:true}),{code:'PAPER_CONFIRMATION_REQUIRED'});
     await assert.rejects(f.service.execute(plans[0].id,{}),{code:'PAPER_CONFIRMATION_REQUIRED'});
@@ -203,4 +202,281 @@ test('paper automatic refusals report blockers instead of asking the operator to
     assert.ok(result.blockers.some(b=>b.startsWith('AAPL:')));assert.deepEqual(seen,['AAPL']);assert.equal(f.state.submitted.length,0);
     const saved=(await f.service.overview()).decisions.find(d=>d.decision_key==='paper-spread-refusal');
     assert.equal(saved.status,'blocked');assert.deepEqual(saved.blockers,result.blockers);
+});
+
+test('paper policy keeps agent tags and the agent cap; operator may lower the cap',async()=>{
+    const f=await fixture();
+    const saved=await f.service.savePolicy({...f.policy,agentPicksMaxPct:20,targets:[{symbol:'AAPL',weightPct:20},{symbol:'QQQ',weightPct:5,source:'agent'}]},1,'ENABLE PAPER INVESTING');
+    assert.equal(saved.policy.agentPicksMaxPct,20);
+    assert.deepEqual(saved.policy.targets.find(t=>t.symbol==='QQQ'),{symbol:'QQQ',weightPct:5,source:'agent'});
+    assert.deepEqual(saved.policy.targets.find(t=>t.symbol==='AAPL'),{symbol:'AAPL',weightPct:20});
+    assert.equal((await f.store.settings()).policy.agentPicksMaxPct,20);
+    for (const bad of [-1,101,Number.NaN,'5']) await assert.rejects(f.service.savePolicy({...f.policy,agentPicksMaxPct:bad},2,'ENABLE PAPER INVESTING'),{code:'PAPER_INVALID_POLICY'});
+    await assert.rejects(f.service.savePolicy({...f.policy,targets:[{symbol:'AAPL',weightPct:20,source:'operator'}]},2,'ENABLE PAPER INVESTING'),{code:'PAPER_INVALID_POLICY'});
+    const lowered=await f.service.savePolicy({...saved.policy,agentPicksMaxPct:0},2,'ENABLE PAPER INVESTING');
+    assert.equal(lowered.policy.agentPicksMaxPct,0);
+    assert.ok(lowered.policy.targets.some(t=>t.source==='agent'));
+});
+
+test('paper policy without the agent cap field reads as 0',async()=>{
+    const f=await fixture();
+    assert.equal((await f.store.settings()).policy.agentPicksMaxPct,0);
+});
+
+test('decision weights are validated, paper-only, stored and part of replay identity',async()=>{
+    const f=await fixture();
+    const base={decisionKey:'weight-check-0001',symbol:'VTI',side:'buy',reason:'Synthetic thesis for a new holding.',policyVersion:1};
+    let n=0;
+    for (const bad of ['5',-1,Number.NaN,101,null]) await assert.rejects(f.store.saveDecision({...base,decisionKey:'weight-bad-000'+(++n),targetWeightPct:bad}),{code:'PAPER_INVALID_DECISION'});
+    assert.equal((await f.store.getDecision('weight-bad-0001')),null);
+    const row=await f.store.saveDecision({...base,targetWeightPct:5});
+    assert.equal(row.target_weight_pct,5);
+    await assert.rejects(f.store.saveDecision({...base,targetWeightPct:6}),{code:'PAPER_DECISION_CONFLICT'});
+    await assert.rejects(f.store.saveDecision({...base}),{code:'PAPER_DECISION_CONFLICT'});
+    assert.equal((await f.store.saveDecision({...base,targetWeightPct:5})).target_weight_pct,5);
+    assert.equal((await f.store.saveDecision({...base,decisionKey:'weight-none-0001'})).target_weight_pct,null);
+    await assert.rejects(liveStore.saveDecision({...base,decisionKey:'live-weight-0001',targetWeightPct:5}),{code:'LIVE_INVALID_DECISION'});
+});
+
+async function craftPlan(f,{targetChange,symbol='VTI',side='buy'}){
+    const s=await f.store.settings();
+    const plan={id:require('node:crypto').randomUUID(),accountKey:f.store.hash(f.account.id),policyVersion:s.version,stateSequence:s.sequence,
+        createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+60000).toISOString(),decisionKey:null,
+        nextOrder:{symbol,side,qty:1,limitPrice:100.13},targetChange};
+    await f.store.savePlan(plan);
+    return plan;
+}
+async function policyEvents(){
+    const conn=db.getDb();
+    try { return await new Promise((resolve,reject)=>conn.all("SELECT detail_json FROM alpaca_paper_long_term_events WHERE action='policy_saved' ORDER BY id DESC LIMIT 3",(e,rows)=>e?reject(e):resolve(rows.map(r=>JSON.parse(r.detail_json))))); }
+    finally { await new Promise(resolve=>conn.close(resolve)); }
+}
+const agentVti={symbol:'VTI',weightPct:5,source:'agent',actor:'agent',previous:null};
+
+test('reservation applies the target change atomically and dispatch accepts only that version',async()=>{
+    const f=await fixture();
+    const plan=await craftPlan(f,{targetChange:agentVti});
+    const reserved=await f.store.reserveOrder(plan,plan.nextOrder,{enabled:()=>true});
+    const s=await f.store.settings();
+    assert.equal(s.version,plan.policyVersion+1);
+    assert.deepEqual(s.policy.targets.find(t=>t.symbol==='VTI'),{symbol:'VTI',weightPct:5,source:'agent'});
+    const [saved]=await policyEvents(); assert.equal(saved.actor,'agent'); assert.equal(saved.planId,plan.id); assert.equal(saved.version,plan.policyVersion+1);
+    const sent=await f.store.dispatchOrder(plan,reserved.order,{assertFresh:()=>{},submit:async()=>({id:'synthetic-broker',status:'new'})});
+    assert.equal(sent.replayed,false); assert.ok(sent.settlement);
+});
+
+test('a refused dispatch restores the previous target; a newer operator save is never overwritten',async()=>{
+    const f=await fixture();
+    const plan=await craftPlan(f,{targetChange:agentVti});
+    const reserved=await f.store.reserveOrder(plan,plan.nextOrder,{enabled:()=>true});
+    const out=await f.store.dispatchOrder(plan,reserved.order,{assertFresh:()=>{throw Object.assign(new Error('expired'),{code:'PAPER_PLAN_EXPIRED'});},submit:async()=>{throw new Error('never sent');}});
+    assert.equal(out.refused,true);
+    let s=await f.store.settings();
+    assert.equal(s.policy.targets.some(t=>t.symbol==='VTI'),false);
+    assert.equal(s.version,plan.policyVersion+2);
+    const [restored]=await policyEvents(); assert.equal(restored.actor,'system'); assert.equal(restored.reason,'order_not_sent');
+
+    const second=await craftPlan(f,{targetChange:agentVti});
+    const held=await f.store.reserveOrder(second,second.nextOrder,{enabled:()=>true});
+    const operator={...(await f.store.settings()).policy,targets:[{symbol:'AAPL',weightPct:15}]};
+    await f.service.savePolicy(operator,second.policyVersion+1,'ENABLE PAPER INVESTING');
+    const refused=await f.store.dispatchOrder(second,held.order,{assertFresh:()=>{},submit:async()=>{throw new Error('never sent');}});
+    assert.equal(refused.refused,true); assert.equal(refused.reason,'PAPER_DISPATCH_STATE_CHANGED');
+    s=await f.store.settings();
+    assert.equal(s.version,second.policyVersion+2);
+    assert.deepEqual(s.policy.targets,[{symbol:'AAPL',weightPct:15}]);
+});
+
+test('an invalid applied policy rolls back the reservation',async()=>{
+    const f=await fixture();
+    await f.service.savePolicy({...f.policy,targets:[{symbol:'AAPL',weightPct:25},{symbol:'QQQ',weightPct:25},{symbol:'SPY',weightPct:25}]},1,'ENABLE PAPER INVESTING');
+    const plan=await craftPlan(f,{targetChange:{...agentVti,weightPct:20}});
+    const before=(await f.store.orders()).length;
+    await assert.rejects(f.store.reserveOrder(plan,plan.nextOrder,{enabled:()=>true}),{code:'PAPER_INVALID_POLICY'});
+    assert.equal((await f.store.settings()).version,plan.policyVersion);
+    assert.equal((await f.store.orders()).length,before);
+});
+
+async function agentDecision(f,{key,symbol,side='buy',targetWeightPct,policyVersion}){
+    const research=require('../services/research_store');
+    const packet=await research.savePacket({symbol,generatedAt:new Date().toISOString(),accountScope:'research_only',eligibleForDecision:true,data:{info:{price:100}}});
+    const analysis={packetId:packet.id,contentHash:packet.contentHash,strategyVersion:'synthetic-paper-v1',analyzedAt:new Date().toISOString(),model:'synthetic-model',
+        claims:[{path:'data.info.price',value:100}],assumptions:['Synthetic thesis remains valid'],alternatives:['Wait and retain cash'],invalidation:'The thesis fails the next review.'};
+    return {account_id:1,policyVersion,decisionKey:key,symbol,side,reason:'Synthetic thesis for an agent-sized holding.',analysis,...(targetWeightPct===undefined?{}:{targetWeightPct})};
+}
+async function automaticWithCap(f,cap=20){
+    const saved=await f.service.savePolicy({...f.policy,executionMode:'automatic',agentPicksMaxPct:cap},1,'ENABLE AUTOMATIC PAPER INVESTING');
+    return saved.version;
+}
+
+test('automatic agent pick buys an untargeted symbol and saves it as an agent target',async()=>{
+    const f=await fixture();const version=await automaticWithCap(f);
+    const r=await f.service.decision(await agentDecision(f,{key:'pick-new-0001',symbol:'VTI',targetWeightPct:10,policyVersion:version}));
+    assert.ok(r.order); assert.equal(f.state.submitted.at(-1).symbol,'VTI'); assert.equal(f.state.submitted.at(-1).side,'buy');
+    const s=await f.store.settings();
+    assert.equal(s.version,version+1);
+    assert.deepEqual(s.policy.targets.find(t=>t.symbol==='VTI'),{symbol:'VTI',weightPct:10,source:'agent'});
+    const overview=await f.service.overview();
+    assert.equal(overview.agentPicksUsedPct,10);
+    assert.notEqual(overview.decisions.find(d=>d.decision_key==='pick-new-0001').status,'needs_reanalysis');
+});
+
+test('agent picks are refused in confirm mode, over the cap and on operator targets with the policy unchanged',async()=>{
+    const f=await fixture();
+    await assert.rejects(f.service.decision(await agentDecision(f,{key:'pick-confirm-0001',symbol:'VTI',targetWeightPct:5,policyVersion:1})),{code:'PAPER_AGENT_TARGET_MODE'});
+    assert.equal(await f.store.getDecision('pick-confirm-0001'),null);
+    const version=await automaticWithCap(f);
+    await assert.rejects(f.service.decision(await agentDecision(f,{key:'pick-overcap-0001',symbol:'VTI',targetWeightPct:21,policyVersion:version})),{code:'PAPER_AGENT_TARGET_LIMIT'});
+    await assert.rejects(f.service.decision(await agentDecision(f,{key:'pick-operator-001',symbol:'AAPL',targetWeightPct:22,policyVersion:version})),{code:'PAPER_AGENT_TARGET_OPERATOR'});
+    assert.equal(await f.store.getDecision('pick-overcap-0001'),null);
+    assert.equal((await f.store.settings()).version,version);
+    assert.equal(f.state.submitted.length,0);
+});
+
+test('a blocked agent pick leaves no target',async()=>{
+    const f=await fixture();const version=await automaticWithCap(f);
+    const quote=f.client.getLatestQuote;
+    f.client.getLatestQuote=async symbol=>symbol==='VTI'?{symbol,quote:{bp:100,ap:101,bs:100,as:100,t:new Date(Date.now()-100).toISOString()}}:quote(symbol);
+    const r=await f.service.decision(await agentDecision(f,{key:'pick-blocked-0001',symbol:'VTI',targetWeightPct:10,policyVersion:version}));
+    assert.equal(r.status,'blocked'); assert.equal(f.state.submitted.length,0);
+    const s=await f.store.settings();
+    assert.equal(s.version,version); assert.equal(s.policy.targets.some(t=>t.symbol==='VTI'),false);
+});
+
+test('plain decisions without a weight still require a saved target',async()=>{
+    const f=await fixture();const version=await automaticWithCap(f);
+    await assert.rejects(f.service.decision(await agentDecision(f,{key:'pick-plain-0001',symbol:'VTI',policyVersion:version})),{code:'PAPER_INVALID_TARGET'});
+});
+
+test('a stale operator save after an agent pick is refused and the pick survives',async()=>{
+    const f=await fixture();const version=await automaticWithCap(f);
+    const before=(await f.store.settings()).policy;
+    await f.service.decision(await agentDecision(f,{key:'pick-stale-0001',symbol:'VTI',targetWeightPct:10,policyVersion:version}));
+    await assert.rejects(f.service.savePolicy({...before,maxOrderValue:400},version,'ENABLE AUTOMATIC PAPER INVESTING'),{code:'PAPER_POLICY_CHANGED'});
+    assert.ok((await f.store.settings()).policy.targets.some(t=>t.symbol==='VTI' && t.source==='agent'));
+});
+
+async function heldVti(f,qty,{targets=f.policy.targets,maxOrderValue=5000}={}){
+    await f.service.savePolicy({...f.policy,maxOrderValue,targets},1,'ENABLE PAPER INVESTING');
+    f.state.positions=[{symbol:'VTI',qty:String(qty),current_price:'100',side:'long',unrealized_pl:'0'}];
+    f.store.ownership=async()=>[{symbol:'VTI',delta_qty:qty,account_key:f.store.hash(f.account.id)}];
+}
+
+test('operator trades are sized by shares, skip rebalancing thresholds and set targets on reservation',async()=>{
+    const f=await fixture();
+    await f.service.savePolicy({...f.policy,minTradeValue:400},1,'ENABLE PAPER INVESTING');
+    const buy=await f.service.previewOperatorTrade({symbol:'VTI',side:'buy',qty:2});
+    assert.equal(buy.operatorTrade,true);
+    assert.equal(buy.nextOrder.qty,2); assert.equal(buy.nextOrder.side,'buy'); assert.deepEqual(buy.blockers,[]);
+    assert.deepEqual(buy.targetChange,{symbol:'VTI',weightPct:2,actor:'operator',previous:null});
+    await assert.rejects(f.service.execute(buy.id,{automatic:true}),{code:'PAPER_CONFIRMATION_REQUIRED'});
+    await f.service.execute(buy.id,confirmation(buy));
+    assert.equal(f.state.submitted.at(-1).symbol,'VTI');
+    const s=await f.store.settings();
+    assert.equal(s.version,3); assert.deepEqual(s.policy.targets.find(t=>t.symbol==='VTI'),{symbol:'VTI',weightPct:2});
+});
+
+test('operator trade limits block with clear reasons',async()=>{
+    const f=await fixture();
+    assert.ok((await f.service.previewOperatorTrade({symbol:'VTI',side:'buy',qty:6})).blockers.some(b=>/maximum order/i.test(b)));
+    await f.service.savePolicy({...f.policy,maxOrderValue:5000},1,'ENABLE PAPER INVESTING');
+    assert.ok((await f.service.previewOperatorTrade({symbol:'VTI',side:'buy',qty:30})).blockers.some(b=>/maximum position/i.test(b)));
+    const asset=f.client.getAsset;
+    f.client.getAsset=async symbol=>({...await asset(symbol),fractionable:false});
+    assert.ok((await f.service.previewOperatorTrade({symbol:'VTI',side:'buy',qty:1.5})).blockers.some(b=>/whole shares/i.test(b)));
+    f.client.getAsset=asset;
+    f.state.marketOpen=false;
+    assert.ok((await f.service.previewOperatorTrade({symbol:'VTI',side:'buy',qty:1})).blockers.some(b=>/session is closed/i.test(b)));
+    f.state.marketOpen=true;
+    await f.service.savePolicy({...f.policy,maxOrderValue:5000,paused:true},2,'');
+    assert.ok((await f.service.previewOperatorTrade({symbol:'VTI',side:'buy',qty:1})).blockers.some(b=>/paused/i.test(b)));
+    assert.equal(f.state.submitted.length,0);
+});
+
+test('operator sells cannot exceed managed shares',async()=>{
+    const f=await fixture();await heldVti(f,3);
+    const plan=await f.service.previewOperatorTrade({symbol:'VTI',side:'sell',qty:4});
+    assert.ok(plan.blockers.some(b=>/at most 3/.test(b)));
+    assert.equal(plan.nextOrder?.qty??0,0);
+});
+
+test('selling every managed share removes the target, including fractional quantities',async()=>{
+    const f=await fixture();await heldVti(f,7.346186,{targets:[...f.policy.targets,{symbol:'VTI',weightPct:10}]});
+    const plan=await f.service.previewOperatorTrade({symbol:'VTI',side:'sell',qty:7.346186});
+    assert.deepEqual(plan.blockers,[]); assert.equal(plan.nextOrder.qty,7.346186);
+    assert.deepEqual(plan.targetChange,{symbol:'VTI',weightPct:0,actor:'operator',previous:{weightPct:10}});
+    await f.service.execute(plan.id,confirmation(plan));
+    assert.equal((await f.store.settings()).policy.targets.some(t=>t.symbol==='VTI'),false);
+});
+
+test('operator trades reject malformed input',async()=>{
+    const f=await fixture();
+    for (const bad of [null,{symbol:'',side:'buy',qty:1},{symbol:'vti',side:'buy',qty:1},{symbol:'VTI',side:'hold',qty:1},{symbol:'VTI',side:'buy',qty:0},
+        {symbol:'VTI',side:'buy',qty:-1},{symbol:'VTI',side:'buy',qty:'1'},{symbol:'VTI',side:'buy',qty:Number.NaN}])
+        await assert.rejects(f.service.previewOperatorTrade(bad),{code:'PAPER_INVALID_REQUEST'});
+});
+
+test('malformed agent weights are refused as invalid decisions before anything is stored',async()=>{
+    const f=await fixture();const version=await automaticWithCap(f);
+    let n=0;
+    for (const bad of ['5',-1,Number.NaN,101,null]) {
+        const key='pick-malformed-0'+(++n);
+        await assert.rejects(f.service.decision({...await agentDecision(f,{key,symbol:'VTI',policyVersion:version}),targetWeightPct:bad}),{code:'PAPER_INVALID_DECISION'});
+        assert.equal(await f.store.getDecision(key),null);
+    }
+    await assert.rejects(f.service.decision({...await agentDecision(f,{key:'pick-badside-0001',symbol:'VTI',targetWeightPct:5,policyVersion:version}),side:'hold'}),{code:'PAPER_INVALID_DECISION'});
+});
+
+test('a terminal zero-fill outcome restores the target; a partial fill keeps it',async()=>{
+    const f=await fixture();
+    const plan=await craftPlan(f,{targetChange:agentVti});
+    const reserved=await f.store.reserveOrder(plan,plan.nextOrder,{enabled:()=>true});
+    await f.store.dispatchOrder(plan,reserved.order,{assertFresh:()=>{},submit:async()=>({id:'synthetic-rejected',status:'new'})});
+    await f.store.updateOrder(reserved.order.id,{status:'rejected'});
+    let s=await f.store.settings();
+    assert.equal(s.policy.targets.some(t=>t.symbol==='VTI'),false);
+    assert.equal(s.version,plan.policyVersion+2);
+    const [restored]=await policyEvents(); assert.equal(restored.actor,'system'); assert.equal(restored.reason,'order_unfilled');
+    const second=await craftPlan(f,{targetChange:agentVti});
+    const held=await f.store.reserveOrder(second,second.nextOrder,{enabled:()=>true});
+    await f.store.dispatchOrder(second,held.order,{assertFresh:()=>{},submit:async()=>({id:'synthetic-partial',status:'new'})});
+    await f.store.updateOrder(held.order.id,{status:'partially_filled',filled_qty:0.5});
+    await f.store.updateOrder(held.order.id,{status:'canceled'});
+    s=await f.store.settings();
+    assert.deepEqual(s.policy.targets.find(t=>t.symbol==='VTI'),{symbol:'VTI',weightPct:5,source:'agent'});
+    assert.equal(s.version,second.policyVersion+1);
+});
+
+test('an unfilled operator full sell that expires restores the removed target',async()=>{
+    const f=await fixture();
+    const plan=await craftPlan(f,{symbol:'AAPL',side:'sell',targetChange:{symbol:'AAPL',weightPct:0,actor:'operator',previous:{weightPct:20}}});
+    const reserved=await f.store.reserveOrder(plan,plan.nextOrder,{enabled:()=>true});
+    assert.equal((await f.store.settings()).policy.targets.some(t=>t.symbol==='AAPL'),false);
+    await f.store.dispatchOrder(plan,reserved.order,{assertFresh:()=>{},submit:async()=>({id:'synthetic-expired',status:'new'})});
+    await f.store.updateOrder(reserved.order.id,{status:'new',broker_id:'synthetic-expired'});
+    await f.store.updateOrder(reserved.order.id,{status:'expired'});
+    assert.deepEqual((await f.store.settings()).policy.targets,[{symbol:'AAPL',weightPct:20}]);
+});
+
+test('an operator can sell the only targeted holding and then buy with no targets saved',async()=>{
+    const f=await fixture();
+    f.state.positions=[{symbol:'AAPL',qty:'3',current_price:'100',side:'long',unrealized_pl:'0'}];
+    f.store.ownership=async()=>[{symbol:'AAPL',delta_qty:3,account_key:f.store.hash(f.account.id)}];
+    const sell=await f.service.previewOperatorTrade({symbol:'AAPL',side:'sell',qty:3});
+    assert.deepEqual(sell.blockers,[]);
+    await f.service.execute(sell.id,confirmation(sell));
+    assert.deepEqual((await f.store.settings()).policy.targets,[]);
+    f.state.positions=[];
+    for (const o of await f.store.orders()) if (!f.store.finalStatuses.has(o.status)) await f.store.updateOrder(o.id,{status:'filled',filled_qty:o.qty});
+    const buy=await f.service.previewOperatorTrade({symbol:'VTI',side:'buy',qty:1});
+    assert.deepEqual(buy.blockers,[]);
+});
+
+test('paper pause always pauses the latest policy, even from a stale view',async()=>{
+    const f=await fixture();
+    await f.service.savePolicy({...f.policy,maxOrderValue:400},1,'ENABLE PAPER INVESTING');
+    const result=await f.service.pause(1);
+    assert.equal(result.policy.paused,true);
+    const s=await f.store.settings();
+    assert.equal(s.version,3); assert.equal(s.policy.paused,true); assert.equal(s.policy.maxOrderValue,400);
 });

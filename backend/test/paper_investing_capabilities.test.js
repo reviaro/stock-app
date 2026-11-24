@@ -57,7 +57,7 @@ test('real authentication separates paper decisions from live, simulator, raw or
             ['GET', '/alpaca-live/overview'], ['POST', '/alpaca-live/decisions'], ['POST', '/alpaca-paper/orders'],
             ['POST', '/alpaca-paper/day-trading/v2/entries'], ['POST', '/simulator/trade'],
             ['GET', '/simulator/holdings?account_id=2'], ['GET', '/simulator/holdings'], ['GET', '/portfolio'],
-            ['POST', '/alpaca-paper/long-term/manual-buy/preview'], ['PUT', '/alpaca-paper/long-term/policy'], ['POST', '/alpaca-paper/long-term/execute'],
+            ['POST', '/alpaca-paper/long-term/manual-trade/preview'], ['PUT', '/alpaca-paper/long-term/policy'], ['POST', '/alpaca-paper/long-term/execute'],
             ['POST', '/alpaca-paper/long-term/ownership'], ['POST', '/alpaca-paper/long-term/pause'],
             ['POST', '/alpaca-paper/long-term/legacy-handover'], ['POST', '/alpaca-paper/long-term/legacy-reconcile'],
             ['POST', '/alpaca-paper/long-term/orders/example/cancel'], ['GET', '/alpaca-paper/long-term/simulator-draft'],
@@ -69,8 +69,8 @@ test('real authentication separates paper decisions from live, simulator, raw or
         const login = await request('/auth/login', { token: null, method: 'POST', requestOrigin: origin,
             body: { username: 'test-operator', password: 'synthetic-password' } });
         assert.equal(login.status, 200);
-        assert.equal((await request('/alpaca-paper/long-term/manual-buy/preview', { token: null, cookie: login.cookie,
-            method: 'POST', requestOrigin: origin, body: { symbol: 'SPY' } })).status, 200);
+        assert.equal((await request('/alpaca-paper/long-term/manual-trade/preview', { token: null, cookie: login.cookie,
+            method: 'POST', requestOrigin: origin, body: { symbol: 'SPY', side: 'buy', qty: 1 } })).status, 200);
         assert.equal((await request('/alpaca-paper/long-term/policy', { token: null, cookie: login.cookie,
             method: 'PUT', requestOrigin: origin, body: {} })).status, 200);
         assert.equal((await request('/alpaca-paper/long-term/policy', { token: null, cookie: login.cookie,

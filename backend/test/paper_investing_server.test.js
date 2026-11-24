@@ -40,7 +40,7 @@ test('actual server exposes isolated paper policy through the operator session w
         const saved = await request('/alpaca-paper/long-term/policy', 'PUT', { policy, expectedVersion: 0 });
         assert.equal(saved.status, 200);
         assert.equal(saved.json.data.version, 1);
-        assert.deepEqual((await paperStore.settings()).policy, policy);
+        assert.deepEqual((await paperStore.settings()).policy, { ...policy, agentPicksMaxPct: 0 });
         assert.deepEqual(await liveStore.settings(), liveBefore);
         assert.deepEqual(await db.listSimTransactions(1), simulatorBefore);
         assert.equal((await request('/alpaca-live/policy', 'PUT', { policy, expectedVersion: 0 })).status, 403);
