@@ -396,8 +396,12 @@ function createLongTermInvesting({ store, env=process.env, clientFactory, config
         const existing=previous?(await store.orders()).find(o=>o.decision_key===previous.decision_key):null;
         if (!existing && input.policyVersion!==(await store.settings()).version) throw fail('POLICY_CHANGED','Read the current investing policy before requesting a decision.');
         // Refuse an out-of-policy agent pick before it is recorded as a decision.
-        if (!previous && environment==='paper' && typeof input.targetWeightPct==='number' && Number.isFinite(input.targetWeightPct)) {
-            planAgentTargetChange((await store.settings()).policy,{symbol:input.symbol,side:input.side,weightPct:input.targetWeightPct},fail);
+        if (!previous && input.targetWeightPct!==undefined) {
+            const weight=input.targetWeightPct;
+            if (environment!=='paper' || typeof weight!=='number' || !Number.isFinite(weight) || weight<0 || weight>100 || !['buy','sell'].includes(input.side)) {
+                throw fail('INVALID_DECISION','targetWeightPct must be a number from 0 to 100 with a buy or sell side, and is available only on Paper.',400);
+            }
+            planAgentTargetChange((await store.settings()).policy,{symbol:input.symbol,side:input.side,weightPct:weight},fail);
         }
         const analysis=await researchDecisions.validateAnalysis(input.analysis,input.symbol,{now:existing?new Date(previous.analysis?.analyzedAt):now(),
             ...(previous?{maxAgeMs:researchDecisions.RECOMMENDATION_MAX_AGE_MS}:{})});

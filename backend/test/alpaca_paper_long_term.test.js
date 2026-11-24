@@ -413,3 +413,14 @@ test('operator trades reject malformed input',async()=>{
         {symbol:'VTI',side:'buy',qty:-1},{symbol:'VTI',side:'buy',qty:'1'},{symbol:'VTI',side:'buy',qty:Number.NaN}])
         await assert.rejects(f.service.previewOperatorTrade(bad),{code:'PAPER_INVALID_REQUEST'});
 });
+
+test('malformed agent weights are refused as invalid decisions before anything is stored',async()=>{
+    const f=await fixture();const version=await automaticWithCap(f);
+    let n=0;
+    for (const bad of ['5',-1,Number.NaN,101,null]) {
+        const key='pick-malformed-0'+(++n);
+        await assert.rejects(f.service.decision({...await agentDecision(f,{key,symbol:'VTI',policyVersion:version}),targetWeightPct:bad}),{code:'PAPER_INVALID_DECISION'});
+        assert.equal(await f.store.getDecision(key),null);
+    }
+    await assert.rejects(f.service.decision({...await agentDecision(f,{key:'pick-badside-0001',symbol:'VTI',targetWeightPct:5,policyVersion:version}),side:'hold'}),{code:'PAPER_INVALID_DECISION'});
+});
