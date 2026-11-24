@@ -111,6 +111,16 @@ describe('Long-term paper workspace', () => {
     expect(screen.getByRole('button', { name: 'Save paper policy' })).toBeEnabled()
     expect(hooks.policy.mutate).not.toHaveBeenCalled()
   })
+  it('explains why resuming stays disabled when the saved policy has no targets', () => {
+    hooks.overview.data = { ...baseline(), policy: { ...baseline().policy, budget: 1000, executionMode: 'automatic' } }
+    render(<AlpacaPaperPage />)
+    expect(screen.queryByText(/Add at least one target weight/)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Pause new paper orders' }))
+    fireEvent.change(screen.getByLabelText('Type ENABLE AUTOMATIC PAPER INVESTING'), { target: { value: 'ENABLE AUTOMATIC PAPER INVESTING' } })
+    const save = screen.getByRole('button', { name: 'Save paper policy' })
+    expect(save).toBeDisabled()
+    expect(save).toHaveAccessibleDescription(/Add at least one target weight/)
+  })
   it('requires the exact paper-order phrase before submitting the immutable preview ID', () => {
     hooks.overview.data = { ...baseline(), connected: true }
     Object.assign(hooks.preview, { data: { id: 'synthetic-plan', expiresAt: new Date(Date.now() + 60000).toISOString(), blockers: [], rows: [],
