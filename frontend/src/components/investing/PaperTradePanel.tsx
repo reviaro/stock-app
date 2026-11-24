@@ -113,6 +113,7 @@ export function PaperTradePanel({ hooks, prefill }: { hooks: Hooks; prefill?: Tr
       {plan.blockers.map(b => <p key={b} role="status" className="text-amber-700 dark:text-amber-300">{b}</p>)}
       {next ? <><p>{next.side.toUpperCase()} {next.symbol}: {next.qty} shares · limit {money.format(next.limitPrice)} · up to {money.format(next.notional)}</p>
         <p className="text-muted-foreground">{targetOutcome(plan)}</p>
+        {plan.targetChange && <p className="text-muted-foreground">This trade saves a new policy version. Pending agent recommendations will need fresh analysis.</p>}
         <label className="block">Type {phrase} <input className="rounded border bg-background p-2" value={confirmation} autoComplete="off" disabled={attempted} onChange={e => setConfirmation(e.target.value)} /></label>
         <Button disabled={!canSubmit} onClick={submit}>{`Submit paper ${side}`}</Button></> : <p>No order for this quantity.</p>}
     </div>}

@@ -458,7 +458,9 @@ eligibility and sell-first still apply; minimum trade and minimum allocation dri
 do not. A buy raises the saved target to at least the resulting weight; a sell
 lowers it to at most the resulting weight, and selling every managed share removes
 it, even the last target. The same restore rule applies when the order ends with
-nothing filled. Sell buttons appear only on app-managed holdings. Operator trades always need
+nothing filled. A trade that changes a target saves a new policy version, so
+pending agent recommendations then need fresh analysis; the preview says so. Sell
+buttons appear only on app-managed holdings. Operator trades always need
 the typed confirmation and never execute automatically.
 
 Orders are cash-funded, long-only stock/ETF DAY limit orders. DAY controls how

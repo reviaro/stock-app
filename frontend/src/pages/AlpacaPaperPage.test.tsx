@@ -129,6 +129,7 @@ describe('Long-term paper workspace', () => {
     fillTrade('VTI', '2')
     fireEvent.click(screen.getByRole('button', { name: 'Preview trade' }))
     expect(await screen.findByText('Target after trade: 2%')).toBeVisible()
+    expect(screen.getByText('This trade saves a new policy version. Pending agent recommendations will need fresh analysis.')).toBeVisible()
   })
   it('Sell on a managed holding prefills the trade panel', () => {
     render(<AlpacaPaperPage />)
